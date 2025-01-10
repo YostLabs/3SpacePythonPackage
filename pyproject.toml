@@ -27,5 +27,5 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://yostlabs.com/"
-# Repository = "github"
-# Issues = "https://github.com/pypa/sampleproject/issues"
+Repository = "https://github.com/YostLabs/3SpacePythonPackage/tree/main"
+Issues = "https://github.com/YostLabs/3SpacePythonPackage/issues"
