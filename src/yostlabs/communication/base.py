@@ -6,7 +6,7 @@ class ThreespaceInputStream:
     Reads specified number of bytes. 
     If that many bytes are not available after timeout, less data will be returned
     """
-    def read(self, num_bytes) -> bytes:
+    def read(self, num_bytes: int) -> bytes:
         raise NotImplementedError()
     
     def read_all(self):
@@ -16,16 +16,16 @@ class ThreespaceInputStream:
         raise NotImplementedError()
 
     """Allows reading without removing the data from the buffer"""
-    def peek(self, num_bytes) -> bytes:
+    def peek(self, num_bytes: int) -> bytes:
         raise NotImplementedError()
     
-    def peek_until(self, expected: bytes, max_length=None) -> bytes:
+    def peek_until(self, expected: bytes, max_length: int = None) -> bytes:
         raise NotImplementedError()
     
     def readline(self) -> bytes:
         return self.read_until(b"\n")
     
-    def peekline(self, max_length=None) -> bytes:
+    def peekline(self, max_length: int = None) -> bytes:
         return self.peek_until(b"\n", max_length=max_length)    
     
     @property

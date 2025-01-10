@@ -6,7 +6,7 @@ import serial.tools.list_ports
 class ThreespaceSerialComClass(ThreespaceComClass):
 
     PID_V3_MASK = 0x3000
-    PID_BOOTLOADER = 0x1000 #We should really change this to 0x3000
+    PID_BOOTLOADER = 0x1000
 
     VID = 0x2476
 
@@ -26,10 +26,10 @@ class ThreespaceSerialComClass(ThreespaceComClass):
         self.peek_buffer = bytearray()
         self.peek_length = 0
 
-    def write(self, bytes):
+    def write(self, bytes: bytes):
         self.ser.write(bytes)
     
-    def read(self, num_bytes):
+    def read(self, num_bytes: int):
         if self.peek_length >= num_bytes:
             result = self.peek_buffer[:num_bytes]
             self.peek_length -= num_bytes
@@ -40,7 +40,7 @@ class ThreespaceSerialComClass(ThreespaceComClass):
             self.peek_length = 0
         return result
     
-    def peek(self, num_bytes):
+    def peek(self, num_bytes: int):
         if self.peek_length >= num_bytes:
             return self.peek_buffer[:num_bytes]
         else:
@@ -61,7 +61,7 @@ class ThreespaceSerialComClass(ThreespaceComClass):
         self.peek_length = 0
         return result
 
-    def peek_until(self, expected: bytes, max_length=None) -> bytes:
+    def peek_until(self, expected: bytes, max_length: int = None) -> bytes:
         if expected in self.peek_buffer:
             length = self.peek_buffer.index(expected) + len(expected)
             if max_length is not None and length > max_length: 
@@ -127,7 +127,7 @@ class ThreespaceSerialComClass(ThreespaceComClass):
                 yield port
 
     @staticmethod
-    def auto_detect(default_timeout=2, default_baudrate=115200) -> Generator["ThreespaceSerialComClass", None, None]:
+    def auto_detect(default_timeout: float = 2, default_baudrate: int = 115200) -> Generator["ThreespaceSerialComClass", None, None]:
         """
         Returns a list of com classes of the same type called on nearby.
         These ports will start unopened. This allows the caller to get a list of ports without having to connect.
