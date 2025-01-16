@@ -9,6 +9,7 @@ import struct
 import types
 import inspect
 import time
+import math
 
 
 #For converting from internal format specifiers to struct module specifiers
@@ -86,16 +87,22 @@ class ThreespaceCommand:
     def parse_response(self, response: bytes):
         if self.info.num_out_params == 0: return None
         output = []
-        for c in self.out_format:
-            if c != 's':
-                format_str = f"<{c}"
-                size = struct.calcsize(format_str)
-                output.append(struct.unpack(format_str, response[:size])[0])
-                response = response[size:]
-            else: #Strings are special, find the null terminator
-                str_len = response.index(0)
-                output.append(struct.unpack(f"<{str_len}s", response[str_len])[0])
-                response = response[str_len + 1:] #+1 to skip past the null terminator character too
+        
+        if math.isnan(self.info.out_size): #Has strings in it, must slow parse
+            for c in self.out_format:
+                if c != 's':
+                    format_str = f"<{c}"
+                    size = struct.calcsize(format_str)
+                    output.append(struct.unpack(format_str, response[:size])[0])
+                    #TODO: Switch to using numpy views instead of slicing
+                    response = response[size:]
+                else: #Strings are special, find the null terminator
+                    str_len = response.index(0)
+                    output.append(struct.unpack(f"<{str_len}s", response[str_len])[0])
+                    response = response[str_len + 1:] #+1 to skip past the null terminator character too
+        else: #Fast parse because no strings
+            output.extend(struct.unpack(f"<{self.out_format}", response[:self.info.out_size]))
+
         
         if self.info.num_out_params == 1:
             return output[0]
