@@ -520,6 +520,8 @@ class ThreespaceSensor:
             self.serial_number = self.bootloader_get_sn()
             self.__empty_debug_cache()
 
+#-----------------------INITIALIZIATION & REINITIALIZATION-----------------------------------
+
     def __firmware_init(self):
         """
         Should only be called when not streaming and known in firmware.
@@ -533,11 +535,6 @@ class ThreespaceSensor:
         self.valid_accels = self.__get_valid_components("valid_accels")
         self.valid_gyros = self.__get_valid_components("valid_gyros")
         self.valid_baros = self.__get_valid_components("valid_baros")
-
-    def __get_valid_components(self, key: str):
-        valid = self.get_settings(key)
-        if len(valid) == 0: return []
-        return [int(v) for v in valid.split(',')]
 
     def __reinit_firmware(self):
         """
@@ -558,22 +555,18 @@ class ThreespaceSensor:
 
         #Now reinitialize the cached settings
         self.__cache_header_settings()
-        self.cache_streaming_settings()
+        self.__cache_streaming_settings()
 
         self.serial_number = int(self.get_settings("serial_number"), 16)
         self.__empty_debug_cache()
         self.immediate_debug = int(self.get_settings("debug_mode")) == 1 #Needed for some startup processes when restarting
 
-    def __default_debug_callback(self, msg: str, sensor: "ThreespaceSensor"):
-        if self.serial_number is None:
-            self.__debug_cache.append(msg.strip())
-        else:
-            print(f"DEBUG {hex(self.serial_number)}:", msg.strip())
+#------------------------------INITIALIZATION HELPERS--------------------------------------------
 
-    def __empty_debug_cache(self):
-        for msg in self.__debug_cache:
-            print(f"DEBUG {hex(self.serial_number)}:", msg)
-        self.__debug_cache.clear()
+    def __get_valid_components(self, key: str):
+        valid = self.get_settings(key)
+        if len(valid) == 0: return []
+        return [int(v) for v in valid.split(',')]
 
     def __add_command(self, command: ThreespaceCommand):
         if self.commands[command.info.num] != None:
@@ -592,10 +585,91 @@ class ThreespaceSensor:
             if command.info.name == command_name:
                 return command
         return None
+    
+    def __attempt_rediscover_self(self):
+        """
+        Trys to change the com class currently being used to be a detected
+        com class with the same serial number. Useful for re-enumeration, such as when
+        entering bootloader and using USB.
+        """
+        for potential_com in self.com.auto_detect():
+            potential_com.open()
+            sensor = ThreespaceSensor(potential_com)
+            if sensor.serial_number == self.serial_number:
+                self.com = potential_com
+                return True
+            sensor.cleanup() #Handles closing the potential_com
+        return False
 
-    @property
-    def is_streaming(self):
-        return self.is_data_streaming or self.is_log_streaming or self.is_file_streaming
+    def __cache_header_settings(self):
+        """
+        Should be called any time changes are made to the header. Will normally be called via the check_dirty/reinit
+        """
+        result = self.get_settings("header")
+        header = int(result)
+        #API requires these bits to be enabled, so don't let them be disabled
+        required_header = header | THREESPACE_REQUIRED_HEADER
+        if header == self.header_info.bitfield and header == required_header: return #Nothing to update
+        
+        #Don't allow the header to change while streaming
+        #This is to prevent a situation where the header for streaming and commands are different
+        #since streaming caches the header. This would cause an issue where the echo byte could be in seperate
+        #positions, causing a situation where parsing a command and streaming at the same time breaks since it thinks both are valid cmd echoes.
+        if self.is_streaming:
+            print("PREVENTING HEADER CHANGE DUE TO CURRENTLY STREAMING")
+            self.set_settings(header=self.header_info.bitfield)
+            return
+        
+        if required_header != header:
+            print(f"Forcing header checksum, echo, and length enabled")
+            self.set_settings(header=required_header)
+            return
+        
+        #Current/New header is valid, so can cache it
+        self.header_info.bitfield = header
+        self.cmd_echo_byte_index = self.header_info.get_start_byte(THREESPACE_HEADER_ECHO_BIT) #Needed for cmd validation while streaming
+
+#--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
+    def set_cached_settings_dirty(self):
+        """
+        Could be streaming settings, header settings...
+        Basically the sensor needs reinitialized
+        """
+        self.dirty_cache = True
+
+    def check_dirty(self):
+        if not self.dirty_cache: return
+        if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
+            success = self.__attempt_rediscover_self()
+            if not success:
+                raise RuntimeError("Sensor connection lost")
+        
+        self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
+        was_in_bootloader = self.__cached_in_bootloader
+        self.__cached_in_bootloader = self.__check_bootloader_status()
+        
+        if was_in_bootloader and not self.__cached_in_bootloader: #Just Exited bootloader, need to fully reinit
+            self.__firmware_init()
+        elif not self.__cached_in_bootloader:   #Was already in firmware, so only need to partially reinit
+            self.__reinit_firmware()    #Partially init when just naturally dirty
+        self.dirty_cache = False
+
+#-----------------------------------DEBUG COMMANDS---------------------------------------------------
+    def __default_debug_callback(self, msg: str, sensor: "ThreespaceSensor"):
+        if self.serial_number is None:
+            self.__debug_cache.append(msg.strip())
+        else:
+            print(f"DEBUG {hex(self.serial_number)}:", msg.strip())
+
+    def __empty_debug_cache(self):
+        for msg in self.__debug_cache:
+            print(f"DEBUG {hex(self.serial_number)}:", msg)
+        self.__debug_cache.clear()
+
+    def set_debug_callback(self, callback: Callable[[str, "ThreespaceSensor"], None]):
+        self.debug_callback = callback
+
+#-----------------------------------------------BASE SETTINGS PROTOCOL------------------------------------------------
 
     #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require cacheing the header
     HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
@@ -653,7 +727,7 @@ class ThreespaceSensor:
                 self.__cache_header_settings()
         
         if "stream_slots" in cmd.lower():
-            self.cache_streaming_settings()
+            self.__cache_streaming_settings()
         
         #All the settings changed, just need to mark dirty
         if any(v in keys for v in ("default", "reboot")):
@@ -704,86 +778,8 @@ class ThreespaceSensor:
             return list(response_dict.values())[0]
         return response_dict
 
-    def set_debug_callback(self, callback: Callable[[str, "ThreespaceSensor"], None]):
-        self.debug_callback = callback
+    #-----------Base Settings Parsing----------------
 
-    def execute_command(self, cmd: ThreespaceCommand, *args):
-        self.check_dirty()
-
-        retries = 0
-        MAX_RETRIES = 3
-
-        while retries < MAX_RETRIES:
-            cmd.send_command(self.com, *args, header_enabled=self.header_enabled)
-            result = self.__await_command(cmd)
-            if result == THREESPACE_AWAIT_COMMAND_FOUND:
-                break
-            retries += 1
-        
-        if retries == MAX_RETRIES:
-            raise RuntimeError(f"Failed to get response to command {cmd.info.name}")
-
-        return self.read_and_parse_command(cmd)
-    
-    def read_and_parse_command(self, cmd: ThreespaceCommand):
-        if self.header_enabled:
-            header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
-        else:
-            header = ThreespaceHeader()
-        result, raw = cmd.read_command(self.com)
-        return ThreespaceCmdResult(result, header, data_raw_binary=raw)
-
-    def __peek_checksum(self, header: ThreespaceHeader, max_data_length=4096):
-        """
-        Using a header that contains the checksum and data length, calculate the checksum of the expected
-        data and verify if with the checksum in the header.
-
-        Params
-        ------
-        header : The header to verify
-        max_data_length : The maximum size to allow from header_length. This should be set to avoid a corrupted header with an extremely large length causing a lockup/timeout
-        """
-        header_len = len(header.raw_binary)
-        if header.length > max_data_length:
-            print("DATA TOO BIG:", header.length)
-            return False
-        data = self.com.peek(header_len + header.length)[header_len:]
-        if len(data) != header.length: return False
-        checksum = sum(data) % 256
-        return checksum == header.checksum
-
-    def __await_command(self, cmd: ThreespaceCommand, timeout=2):
-        #Header isn't enabled, nothing can do. Just pretend we found it
-        if not self.header_enabled: return THREESPACE_AWAIT_COMMAND_FOUND
-
-        start_time = time.time()
-
-        #Update the streaming until the result for this command is next in the buffer
-        while True:
-            if time.time() - start_time > timeout:
-                return THREESPACE_AWAIT_COMMAND_TIMEOUT
-            
-            #Get potential header
-            header = self.__try_peek_header()
-            if header is None:
-                continue
-
-            echo = header.echo
-
-            if echo == cmd.info.num: #Cmd matches
-                if self.__peek_checksum(header, max_data_length=cmd.info.out_size):
-                    self.misaligned = False
-                    return THREESPACE_AWAIT_COMMAND_FOUND
-                
-                #Error in packet, go start realigning
-                if not self.misaligned:
-                    print(f"Checksum mismatch for command {cmd.info.num}")
-                    self.misaligned = True
-                self.com.read(1)
-            else:
-                #It wasn't a response to the command, so may be a response to some internal system
-                self.__internal_update(header)
-        
     def __await_set_settings(self, timeout=2):
         start_time = time.time()
         MINIMUM_LENGTH = len("0,0\r\n")
@@ -867,8 +863,9 @@ class ThreespaceSensor:
                 continue
             
             self.misaligned = False
-            return THREESPACE_AWAIT_COMMAND_FOUND        
-        
+            return THREESPACE_AWAIT_COMMAND_FOUND
+
+#---------------------------------BASE COMMAND PARSING--------------------------------------
     def __try_peek_header(self):
         """
         Attempts to retrieve a header from the com class immediately.
@@ -883,6 +880,59 @@ class ThreespaceSensor:
         if len(header) != self.header_info.size: return None
         header = ThreespaceHeader.from_bytes(header, self.header_info)
         return header
+
+    def __peek_checksum(self, header: ThreespaceHeader, max_data_length=4096):
+        """
+        Using a header that contains the checksum and data length, calculate the checksum of the expected
+        data and verify if with the checksum in the header.
+
+        Params
+        ------
+        header : The header to verify
+        max_data_length : The maximum size to allow from header_length. This should be set to avoid a corrupted header with an extremely large length causing a lockup/timeout
+        """
+        header_len = len(header.raw_binary)
+        if header.length > max_data_length:
+            print("DATA TOO BIG:", header.length)
+            return False
+        data = self.com.peek(header_len + header.length)[header_len:]
+        if len(data) != header.length: return False
+        checksum = sum(data) % 256
+        return checksum == header.checksum
+
+    def __await_command(self, cmd: ThreespaceCommand, timeout=2):
+        #Header isn't enabled, nothing can do. Just pretend we found it
+        if not self.header_enabled: return THREESPACE_AWAIT_COMMAND_FOUND
+
+        start_time = time.time()
+
+        #Update the streaming until the result for this command is next in the buffer
+        while True:
+            if time.time() - start_time > timeout:
+                return THREESPACE_AWAIT_COMMAND_TIMEOUT
+            
+            #Get potential header
+            header = self.__try_peek_header()
+            if header is None:
+                continue
+
+            echo = header.echo
+
+            if echo == cmd.info.num: #Cmd matches
+                if self.__peek_checksum(header, max_data_length=cmd.info.out_size):
+                    self.misaligned = False
+                    return THREESPACE_AWAIT_COMMAND_FOUND
+                
+                #Error in packet, go start realigning
+                if not self.misaligned:
+                    print(f"Checksum mismatch for command {cmd.info.num}")
+                    self.misaligned = True
+                self.com.read(1)
+            else:
+                #It wasn't a response to the command, so may be a response to some internal system
+                self.__internal_update(header)        
+
+#------------------------------BASE INPUT PARSING--------------------------------------------
 
     def __internal_update(self, header: ThreespaceHeader = None):
         """
@@ -955,9 +1005,94 @@ class ThreespaceSensor:
         self.misaligned = True
         self.com.read(1) #Because of expected misalignment, go through buffer 1 by 1 until realigned
 
+#-----------------------------BASE COMMAND EXECUTION-------------------------------------
+
+    def execute_command(self, cmd: ThreespaceCommand, *args):
+        self.check_dirty()
+
+        retries = 0
+        MAX_RETRIES = 3
+
+        while retries < MAX_RETRIES:
+            cmd.send_command(self.com, *args, header_enabled=self.header_enabled)
+            result = self.__await_command(cmd)
+            if result == THREESPACE_AWAIT_COMMAND_FOUND:
+                break
+            retries += 1
+        
+        if retries == MAX_RETRIES:
+            raise RuntimeError(f"Failed to get response to command {cmd.info.name}")
+
+        return self.read_and_parse_command(cmd)
+    
+    def read_and_parse_command(self, cmd: ThreespaceCommand):
+        if self.header_enabled:
+            header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
+        else:
+            header = ThreespaceHeader()
+        result, raw = cmd.read_command(self.com)
+        return ThreespaceCmdResult(result, header, data_raw_binary=raw)
+
+#-----------------------------------BASE STREAMING COMMMANDS----------------------------------------------
+
+    @property
+    def is_streaming(self):
+        return self.is_data_streaming or self.is_log_streaming or self.is_file_streaming
+
+    def __cache_streaming_settings(self):
+        cached_slots: list[ThreespaceCommand] = []
+        slots: str = self.get_settings("stream_slots")
+        slots = slots.split(',')
+        for slot in slots:
+            slot = int(slot.split(':')[0]) #Ignore parameters if any
+            if slot != 255:
+                cached_slots.append(self.commands[slot])
+            else:
+                cached_slots.append(None)
+        self.streaming_slots = cached_slots.copy()
+        self.getStreamingBatchCommand.set_stream_slots(self.streaming_slots)
+        self.streaming_packet_size = 0
+        for command in self.streaming_slots:
+            if command == None: continue
+            self.streaming_packet_size += command.info.out_size
+
+    def startStreaming(self):
+        if self.is_data_streaming: return
+        self.streaming_packets.clear()
+        self.__cache_streaming_settings()
+
+        result = self.execute_command(self.commands[85])
+        self.is_data_streaming = True
+        return result
+
+    def stopStreaming(self):
+        result = self.execute_command(self.commands[86])
+        self.is_data_streaming = False
+        return result
+
+    def __update_base_streaming(self):
+        """
+        Should be called after the packet is validated
+        """
+        self.streaming_packets.append(self.read_and_parse_command(self.getStreamingBatchCommand))
+
+    def getOldestStreamingPacket(self):
+        if len(self.streaming_packets) == 0:
+            return None
+        return self.streaming_packets.pop(0)
+    
+    def getNewestStreamingPacket(self):
+        if len(self.streaming_packets) == 0:
+            return None
+        return self.streaming_packets.pop()   
+    
+    def clearStreamingPackets(self):
+        self.streaming_packets.clear()
+    
+    #This is called for all streaming types
     def updateStreaming(self, max_checks=float('inf')):
         """
-        Returns true if any amount of data was processed whether valid or not
+        Returns true if any amount of data was processed whether valid or not. This is called for all streaming types.
         """
         if not self.is_streaming: return False
 
@@ -980,15 +1115,8 @@ class ThreespaceSensor:
         
         return data_processed
 
-    def startStreaming(self):
-        if self.is_data_streaming: return
-        self.streaming_packets.clear()
-        self.cache_streaming_settings()
-
-        result = self.execute_command(self.commands[85])
-        self.is_data_streaming = True
-        return result
-
+    #This is more so used for initialization. Its a way of stopping streaming without having to worry about parsing.
+    #That way it can clean up the data stream that won't match the expected state if not already configured.
     def _force_stop_streaming(self):
         """
         This function is used to stop streaming without validating it was streaming and ignoring any output of the
@@ -1011,114 +1139,8 @@ class ThreespaceSensor:
         self.header_enabled = cached_header_enabled
         self.dirty_cache = cahched_dirty
 
-    def stopStreaming(self):
-        result = self.execute_command(self.commands[86])
-        self.is_data_streaming = False
-        return result
+#-------------------------------------FILE STREAMING----------------------------------------------
 
-    def set_cached_settings_dirty(self):
-        """
-        Could be streaming settings, header settings...
-        Basically the sensor needs reinitialized
-        """
-        self.dirty_cache = True
-
-    def __attempt_rediscover_self(self):
-        """
-        Trys to change the com class currently being used to be a detected
-        com class with the same serial number. Useful for re-enumeration, such as when
-        entering bootloader and using USB
-        """
-        for potential_com in self.com.auto_detect():
-            potential_com.open()
-            sensor = ThreespaceSensor(potential_com)
-            if sensor.serial_number == self.serial_number:
-                self.com = potential_com
-                return True
-            sensor.cleanup() #Handles closing the potential_com
-        return False
-
-    def check_dirty(self):
-        if not self.dirty_cache: return
-        if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
-            success = self.__attempt_rediscover_self()
-            if not success:
-                raise RuntimeError("Sensor connection lost")
-        
-        self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
-        was_in_bootloader = self.__cached_in_bootloader
-        self.__cached_in_bootloader = self.__check_bootloader_status()
-        
-        if was_in_bootloader and not self.__cached_in_bootloader: #Just Exited bootloader, need to fully reinit
-            self.__firmware_init()
-        elif not self.__cached_in_bootloader:   #Was already in firmware, so only need to partially reinit
-            self.__reinit_firmware()    #Partially init when just naturally dirty
-        self.dirty_cache = False
-
-    def cache_streaming_settings(self):
-        cached_slots: list[ThreespaceCommand] = []
-        slots: str = self.get_settings("stream_slots")
-        slots = slots.split(',')
-        for slot in slots:
-            slot = int(slot.split(':')[0]) #Ignore parameters if any
-            if slot != 255:
-                cached_slots.append(self.commands[slot])
-            else:
-                cached_slots.append(None)
-        self.streaming_slots = cached_slots.copy()
-        self.getStreamingBatchCommand.set_stream_slots(self.streaming_slots)
-        self.streaming_packet_size = 0
-        for command in self.streaming_slots:
-            if command == None: continue
-            self.streaming_packet_size += command.info.out_size
-
-    def __cache_header_settings(self):
-        """
-        Should be called any time changes are made to the header. Will normally be called via the check_dirty/reinit
-        """
-        result = self.get_settings("header")
-        header = int(result)
-        #API requires these bits to be enabled, so don't let them be disabled
-        required_header = header | THREESPACE_REQUIRED_HEADER
-        if header == self.header_info.bitfield and header == required_header: return #Nothing to update
-        
-        #Don't allow the header to change while streaming
-        #This is to prevent a situation where the header for streaming and commands are different
-        #since streaming caches the header. This would cause an issue where the echo byte could be in seperate
-        #positions, causing a situation where parsing a command and streaming at the same time breaks since it thinks both are valid cmd echoes.
-        if self.is_streaming:
-            print("PREVENTING HEADER CHANGE DUE TO CURRENTLY STREAMING")
-            self.set_settings(header=self.header_info.bitfield)
-            return
-        
-        if required_header != header:
-            print(f"Forcing header checksum, echo, and length enabled")
-            self.set_settings(header=required_header)
-            return
-        
-        #Current/New header is valid, so can cache it
-        self.header_info.bitfield = header
-        self.cmd_echo_byte_index = self.header_info.get_start_byte(THREESPACE_HEADER_ECHO_BIT) #Needed for cmd validation while streaming
-
-    def __update_base_streaming(self):
-        """
-        Should be called after the packet is validated
-        """
-        self.streaming_packets.append(self.read_and_parse_command(self.getStreamingBatchCommand))
-
-    def getOldestStreamingPacket(self):
-        if len(self.streaming_packets) == 0:
-            return None
-        return self.streaming_packets.pop(0)
-    
-    def getNewestStreamingPacket(self):
-        if len(self.streaming_packets) == 0:
-            return None
-        return self.streaming_packets.pop()   
-    
-    def clearStreamingPackets(self):
-        self.streaming_packets.clear()
-    
     def fileStartStream(self) -> ThreespaceCmdResult[int]:
         result = self.execute_command(self.__get_command("__fileStartStream"))
         self.file_stream_length = result.data
@@ -1152,8 +1174,10 @@ class ThreespaceSensor:
             if self.file_stream_length != 0:
                 print(f"File streaming stopped due to last packet. However still expected {self.file_stream_length} more bytes.")
 
+#----------------------------DATA LOGGING--------------------------------------
+
     def startDataLogging(self) -> ThreespaceCmdResult[None]:
-        self.cache_streaming_settings()
+        self.__cache_streaming_settings()
 
         #Must check whether streaming is being done alongside logging or not. Also configure required settings if it is
         streaming = bool(int(self.get_settings("log_immediate_output")))
@@ -1179,6 +1203,8 @@ class ThreespaceSensor:
         header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
         data = self.com.read(header.length)
         self.file_stream_data += data
+
+#---------------------------------POWER STATE CHANGING COMMANDS & BOOTLOADER------------------------------------
 
     def softwareReset(self):
         self.check_dirty()
