@@ -63,10 +63,11 @@ class ThreespaceCommand:
     BINARY_START_BYTE = 0xf7
     BINARY_START_BYTE_HEADER = 0xf9
 
-    def __init__(self, name: str, num: int, in_format: str, out_format: str):
+    def __init__(self, name: str, num: int, in_format: str, out_format: str, custom_func: Callable = None):
         self.info = ThreespaceCommandInfo(name, num, in_format, out_format)
         self.in_format = _3space_format_to_external(self.info.in_format)
         self.out_format = _3space_format_to_external(self.info.out_format)
+        self.custom_func = custom_func
 
     def format_cmd(self, *args, header_enabled=False):
         cmd_data = struct.pack("<B", self.info.num)
@@ -486,22 +487,11 @@ class ThreespaceSensor:
             except:
                 raise ValueError("Failed to create default ThreespaceSerialComClass from parameter:", type(com), com)
 
-        self.verbose = verbose
-        self.commands: list[ThreespaceCommand] = [None] * 256
-        self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
-        self.funcs = {}
-        for command in _threespace_commands:
-            #Some commands are special and need added specially
-            if command.info.num == THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM:
-                self.getStreamingBatchCommand = ThreespaceGetStreamingBatchCommand([])
-                command = self.getStreamingBatchCommand
-            
-            self.__add_command(command)
-
         self.immediate_debug = True #Assume it is on from the start. May cause it to take slightly longer to initialize, but prevents breaking if it is on
         #Callback gives the debug message and sensor object that caused it
         self.__debug_cache: list[str] = [] #Used for storing startup debug messages until sensor state is confirmed
         
+        self.verbose = verbose
         self.debug_callback: Callable[[str, ThreespaceSensor],None] = self.__default_debug_callback
         self.misaligned = False
         self.dirty_cache = False
@@ -518,6 +508,11 @@ class ThreespaceSensor:
         self.serial_number = None
         self.short_serial_number = None
         self.sensor_family = None
+        self.firmware_version = None
+
+        self.commands: list[ThreespaceCommand] = [None] * 256
+        self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
+        self.funcs = {}
 
         self.__cached_in_bootloader = self.__check_bootloader_status()
         if not self.in_bootloader:
@@ -540,6 +535,12 @@ class ThreespaceSensor:
         """
         self.dirty_cache = False #No longer dirty cause initializing
         
+        #Only reinitialize settings if detected firmware version changed (Or on startup)
+        version = self.get_settings("version_firmware")
+        if version != self.firmware_version:
+            self.firmware_version = version
+            self.__initialize_commands()
+    
         self.__reinit_firmware()
         
         self.valid_mags = self.__get_valid_components("valid_mags")
@@ -572,6 +573,33 @@ class ThreespaceSensor:
         self.__empty_debug_cache()
         self.immediate_debug = int(self.get_settings("debug_mode")) == 1 #Needed for some startup processes when restarting
 
+    def __initialize_commands(self):
+        self.commands: list[ThreespaceCommand] = [None] * 256
+        self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
+        self.funcs = {}
+
+        valid_commands = self.get_settings("valid_commands")
+        if valid_commands == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
+            #Treat all commands as valid because firmware is too old to have this setting
+            valid_commands = list(range(256))
+            self.log("Please update firmware to a version that contains ?valid_commands")
+        else:
+            valid_commands = list(int(v) for v in valid_commands.split(','))
+        
+        for command in _threespace_commands:
+            #Skip commands that are not valid for this sensor
+            if command.info.num not in valid_commands:
+                #Register as invalid.
+                setattr(self, command.info.name, self.__invalid_command)
+                continue
+
+            #Some commands are special and need added specially
+            if command.info.num == THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM:
+                self.getStreamingBatchCommand = ThreespaceGetStreamingBatchCommand([])
+                command = self.getStreamingBatchCommand
+            
+            self.__add_command(command)
+
 #------------------------------INITIALIZATION HELPERS--------------------------------------------
 
     def __get_valid_components(self, key: str):
@@ -584,11 +612,19 @@ class ThreespaceSensor:
             self.log(f"Registering duplicate command: {command.info.num} {self.commands[command.info.num].info.name} {command.info.name}")
         self.commands[command.info.num] = command
 
-        #Build the actual method for executing the command
-        code = f"def {command.info.name}(self, *args):\n"
-        code += f"    return self.execute_command(self.commands[{command.info.num}], *args)"
-        exec(code, globals(), self.funcs)
-        setattr(self, command.info.name, types.MethodType(self.funcs[command.info.name], self))
+        #This command type has special logic that requires its own function.
+        #Make that function be called instead of using the generic execute that gets built
+        method = None
+        if command.custom_func is not None:
+            method = types.MethodType(command.custom_func, self)
+        else:
+            #Build the actual method for executing the command
+            code = f"def {command.info.name}(self, *args):\n"
+            code += f"    return self.execute_command(self.commands[{command.info.num}], *args)"
+            exec(code, globals(), self.funcs)
+            method = types.MethodType(self.funcs[command.info.name], self)
+
+        setattr(self, command.info.name, method)
 
     def __get_command(self, command_name: str):
         for command in self.commands:
@@ -1052,6 +1088,9 @@ class ThreespaceSensor:
 
         return self.read_and_parse_command(cmd)
     
+    def __invalid_command(self, *args):
+        raise NotImplementedError("This method is not available.")
+
     def read_and_parse_command(self, cmd: ThreespaceCommand):
         if self.header_enabled:
             header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
@@ -1083,17 +1122,19 @@ class ThreespaceSensor:
             if command == None: continue
             self.streaming_packet_size += command.info.out_size
 
-    def startStreaming(self):
+    def startStreaming(self) -> ThreespaceCmdResult[None]: ...
+    def __startStreaming(self) -> ThreespaceCmdResult[None]:
         if self.is_data_streaming: return
         self.streaming_packets.clear()
         self.__cache_streaming_settings()
 
-        result = self.execute_command(self.commands[85])
+        result = self.execute_command(self.commands[THREESPACE_START_STREAMING_COMMAND_NUM])
         self.is_data_streaming = True
         return result
 
-    def stopStreaming(self):
-        result = self.execute_command(self.commands[86])
+    def stopStreaming(self) -> ThreespaceCmdResult[None]: ...
+    def __stopStreaming(self) -> ThreespaceCmdResult[None]:
+        result = self.execute_command(self.commands[THREESPACE_STOP_STREAMING_COMMAND_NUM])
         self.is_data_streaming = False
         return result
 
@@ -1146,9 +1187,13 @@ class ThreespaceSensor:
     #That way it can clean up the data stream that won't match the expected state if not already configured.
     def _force_stop_streaming(self):
         """
-        This function is used to stop streaming without validating it was streaming and ignoring any output of the
+        This function attempts to stop all possible streaming without knowing anything about the state of the sensor.
+        This includes trying to stop before any commands are even registered as valid. This is to ensure the sensor can properly
+        start and recover from error conditions.
+
+        This will stop streaming without validating it was streaming and ignoring any output of the
         communication line. This is a destructive call that will lose data, but will gurantee stopping streaming
-        and leave the communication line in a clean state
+        and leave the communication line in a clean state.
         """
         cached_header_enabled = self.header_enabled
         cahched_dirty = self.dirty_cache
@@ -1156,11 +1201,22 @@ class ThreespaceSensor:
         #Must set these to gurantee it doesn't try and parse a response from anything since don't know the state of header
         self.dirty_cache = False
         self.header_enabled = False #Keep off for the attempt at stop streaming since if in an invalid state, won't be able to get response
-        self.stopStreaming() #Just in case was streaming
-        self.fileStopStream()
 
-        #TODO: Change this to pause the data logging instead, then check the state and update
-        self.stopDataLogging()
+        #NOTE that commands are accessed directly from the global table instead of commands registered to this sensor object
+        #since this sensor object may have yet to register these commands when calling force_stop_streaming
+
+        #Stop base Streaming
+        self.execute_command(threespaceCommandGetByName("stopStreaming"))
+        self.is_data_streaming = False
+
+        #Stop file streaming
+        self.execute_command(threespaceCommandGetByName("fileStopStream"))
+        self.is_file_streaming = False  
+
+        #Stop logging streaming
+        # #TODO: Change this to pause the data logging instead, then check the state and update
+        self.execute_command(threespaceCommandGetByName("stopDataLogging"))
+        self.is_log_streaming = False              
         
         #Restore
         self.header_enabled = cached_header_enabled
@@ -1168,15 +1224,16 @@ class ThreespaceSensor:
 
 #-------------------------------------FILE STREAMING----------------------------------------------
 
-    def fileStartStream(self) -> ThreespaceCmdResult[int]:
-        result = self.execute_command(self.__get_command("__fileStartStream"))
+    def fileStartStream(self) -> ThreespaceCmdResult[int]: ...
+    def __fileStartStream(self) -> ThreespaceCmdResult[int]:
+        result = self.execute_command(self.__get_command("fileStartStream"))
         self.file_stream_length = result.data
         self.is_file_streaming = True
         return result
     
-    def fileStopStream(self) -> ThreespaceCmdResult[None]:
-        self.check_dirty()
-        result = self.execute_command(self.__get_command("__fileStopStream"))
+    def fileStopStream(self) -> ThreespaceCmdResult[None]: ...
+    def __fileStopStream(self) -> ThreespaceCmdResult[None]:
+        result = self.execute_command(self.__get_command("fileStopStream"))
         self.is_file_streaming = False
         return result
 
@@ -1203,7 +1260,8 @@ class ThreespaceSensor:
 
 #----------------------------DATA LOGGING--------------------------------------
 
-    def startDataLogging(self) -> ThreespaceCmdResult[None]:
+    def startDataLogging(self) -> ThreespaceCmdResult[None]: ...
+    def __startDataLogging(self) -> ThreespaceCmdResult[None]:
         self.__cache_streaming_settings()
 
         #Must check whether streaming is being done alongside logging or not. Also configure required settings if it is
@@ -1212,12 +1270,13 @@ class ThreespaceSensor:
             self.set_settings(log_immediate_output_header_enabled=1,
                                 log_immediate_output_header_mode=THREESPACE_OUTPUT_MODE_BINARY) #Must have header enabled in the log messages for this to work and must use binary for the header
         
-        result = self.execute_command(self.__get_command("__startDataLogging"))
+        result = self.execute_command(self.__get_command("startDataLogging"))
         self.is_log_streaming = streaming 
         return result
 
-    def stopDataLogging(self) -> ThreespaceCmdResult[None]:
-        result = self.execute_command(self.__get_command("__stopDataLogging"))
+    def stopDataLogging(self) -> ThreespaceCmdResult[None]: ...
+    def __stopDataLogging(self) -> ThreespaceCmdResult[None]:
+        result = self.execute_command(self.__get_command("stopDataLogging"))
         self.is_log_streaming = False
         return result
 
@@ -1233,20 +1292,24 @@ class ThreespaceSensor:
 
 #---------------------------------POWER STATE CHANGING COMMANDS & BOOTLOADER------------------------------------
 
-    def softwareReset(self):
+    def softwareReset(self): ...
+    def __softwareReset(self):
         self.check_dirty()
-        cmd = self.commands[226]
+        cmd = self.commands[THREESPACE_SOFTWARE_RESET_COMMAND_NUM]
         cmd.send_command(self.com)
         self.com.close()
+        #TODO: Make this actually wait instead of an arbitrary sleep length
         time.sleep(0.5) #Give it time to restart
         self.com.open()
         self.__firmware_init()
 
-    def enterBootloader(self):
+    def enterBootloader(self): ...
+    def __enterBootloader(self):
         if self.in_bootloader: return
 
-        cmd = self.commands[229]
+        cmd = self.commands[THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM]
         cmd.send_command(self.com)
+        #TODO: Make this actually wait instead of an arbitrary sleep length
         time.sleep(0.5) #Give it time to boot into bootloader
         if self.com.reenumerates:
             self.com.close()
@@ -1370,302 +1433,134 @@ class ThreespaceSensor:
                 self.fileStopStream()
             if self.is_log_streaming:
                 self.stopDataLogging()
-            #self.closeFile() #May not be opened, but also not cacheing that so just attempt to close. Currently commented out because breaks embedded
+
+            #The sensor may or may not have this command registered. So just try it
+            try:
+                #May not be opened, but also not cacheing that so just attempt to close.
+                self.closeFile()
+            except: pass
         self.com.close()
 
 #-------------------------START ALL PROTOTYPES------------------------------------
 
-    def eeptsStart(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
+#To actually see how commands work, look at __initialize_commands and __add_command
+#But basically, these are all just prototypes. Information about the commands is in the table
+#beneath here, and the API simply calls its execute_command function on the Command information objects defined.
 
-    def eeptsStop(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")    
-    
-    def eeptsGetOldestStep(self) -> ThreespaceCmdResult[list]:
-        raise NotImplementedError("This method is not available.")  
-
-    def eeptsGetNewestStep(self) -> ThreespaceCmdResult[list]:
-        raise NotImplementedError("This method is not available.")      
-
-    def eeptsGetNumStepsAvailable(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")       
-
-    def eeptsInsertGPS(self, latitude: float, longitude: float) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")      
-       
-    def eeptsAutoOffset(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")    
-    
-    def getRawGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getRawAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getRawMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")   
-
-    def getTaredOrientation(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.") 
-
-    def getTaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")  
-                                    
-    def getTaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getTaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getTaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")  
-    
-    def getDifferenceQuaternion(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")   
-
-    def getUntaredOrientation(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")  
-
-    def getUntaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")  
-
-    def getUntaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")  
-
-    def getUntaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")  
-
-    def getUntaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")  
-    
-    def commitSettings(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")    
-
-    def getMotionlessConfidenceFactor(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.")
-    
-    def enableMSC(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
-
-    def disableMSC(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")    
-    
-    def getNextDirectoryItem(self) -> ThreespaceCmdResult[list[int,str,int]]:    
-        raise NotImplementedError("This method is not available.")
-    
-    def changeDirectory(self, path: str) -> ThreespaceCmdResult[None]:    
-        raise NotImplementedError("This method is not available.")    
-
-    def openFile(self, path: str) -> ThreespaceCmdResult[None]:    
-        raise NotImplementedError("This method is not available.") 
-    
-    def closeFile(self) -> ThreespaceCmdResult[None]:    
-        raise NotImplementedError("This method is not available.")    
-
-    def fileGetRemainingSize(self) -> ThreespaceCmdResult[int]:    
-        raise NotImplementedError("This method is not available.")    
-
-    def fileReadLine(self) -> ThreespaceCmdResult[str]:    
-        raise NotImplementedError("This method is not available.")     
-
-    def fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]:    
+    def eeptsStart(self) -> ThreespaceCmdResult[None]: ...
+    def eeptsStop(self) -> ThreespaceCmdResult[None]: ...
+    def eeptsGetOldestStep(self) -> ThreespaceCmdResult[list]: ...
+    def eeptsGetNewestStep(self) -> ThreespaceCmdResult[list]: ...   
+    def eeptsGetNumStepsAvailable(self) -> ThreespaceCmdResult[int]: ...    
+    def eeptsInsertGPS(self, latitude: float, longitude: float) -> ThreespaceCmdResult[None]: ...
+    def eeptsAutoOffset(self) -> ThreespaceCmdResult[None]: ... 
+    def getRawGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getRawAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getRawMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ...                        
+    def getTaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getDifferenceQuaternion(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getUntaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...  
+    def getUntaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getUntaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getUntaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getUntaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
+    def commitSettings(self) -> ThreespaceCmdResult[None]: ...    
+    def getMotionlessConfidenceFactor(self) -> ThreespaceCmdResult[float]: ...
+    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
+    def disableMSC(self) -> ThreespaceCmdResult[None]: ...  
+    def getNextDirectoryItem(self) -> ThreespaceCmdResult[list[int,str,int]]: ...
+    def changeDirectory(self, path: str) -> ThreespaceCmdResult[None]: ...   
+    def openFile(self, path: str) -> ThreespaceCmdResult[None]: ... 
+    def closeFile(self) -> ThreespaceCmdResult[None]: ...  
+    def fileGetRemainingSize(self) -> ThreespaceCmdResult[int]: ...
+    def fileReadLine(self) -> ThreespaceCmdResult[str]: ... 
+    def fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]: ...
+    def __fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]:    
         self.check_dirty()
         cmd = self.commands[THREESPACE_FILE_READ_BYTES_COMMAND_NUM]
         cmd.send_command(self.com, num_bytes, header_enabled=self.header_enabled)
         self.__await_command(cmd)
         if self.header_enabled:
             header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
+            num_bytes = min(num_bytes, header.length) #Its possible for less bytes to be returned when an error occurs (EX: Reading from unopened file)
         else:
             header = ThreespaceHeader()
 
         response = self.com.read(num_bytes)
         return ThreespaceCmdResult(response, header, data_raw_binary=response)
 
-    def deleteFile(self, path: str) -> ThreespaceCmdResult[None]:    
-        raise NotImplementedError("This method is not available.") 
-
-    def getStreamingBatch(self):
-        raise NotImplementedError("This method is not available.")
-
-    def setOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
-    
-    def resetBaseOffset(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
-
-    def setBaseOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")    
-
-    def getTaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")    
-
-    def getUntaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")        
-
-    def getPrimaryBarometerPressure(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getPrimaryBarometerAltitude(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.")    
-
-    def getBarometerAltitude(self, id: int) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.")   
-    
-    def getBarometerPressure(self, id: int) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.")      
-
-    def getAllPrimaryNormalizedData(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getPrimaryNormalizedGyroRate(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getPrimaryNormalizedAccelVec(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getPrimaryNormalizedMagVec(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getAllPrimaryCorrectedData(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getPrimaryCorrectedGyroRate(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getPrimaryCorrectedAccelVec(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getPrimaryCorrectedMagVec(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")    
-    
-    def getPrimaryGlobalLinearAccel(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.") 
-
-    def getPrimaryLocalLinearAccel(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")         
-
-    def getTemperatureCelsius(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.") 
-    
-    def getTemperatureFahrenheit(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.")     
-
-    def getNormalizedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getNormalizedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getNormalizedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")        
-
-    def getCorrectedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getCorrectedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def getCorrectedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")        
-
-    def enableMSC(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")  
-    
-    def disableMSC(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")    
-
-    def getTimestamp(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")  
-
-    def getBatteryVoltage(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.") 
-    
-    def getBatteryPercent(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.") 
-
-    def getBatteryStatus(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")         
-
-    def getGpsCoord(self) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getGpsAltitude(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.") 
-
-    def getGpsFixState(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.") 
-
-    def getGpsHdop(self) -> ThreespaceCmdResult[float]:
-        raise NotImplementedError("This method is not available.") 
-
-    def getGpsSatellites(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")                 
-
-    def getButtonState(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")
-
-    def correctRawGyroData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-    
-    def correctRawAccelData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def correctRawMagData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]:
-        raise NotImplementedError("This method is not available.")
-
-    def formatSd(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")    
-
-    def setDateTime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
-
-    def getDateTime(self) -> ThreespaceCmdResult[list[int]]:
-        raise NotImplementedError("This method is not available.")  
-
-    def tareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.") 
-    
-    def setBaseTareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")     
-
-    def resetFilter(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getNumDebugMessages(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")
-    
-    def getOldestDebugMessage(self) -> ThreespaceCmdResult[str]:
-        raise NotImplementedError("This method is not available.")
-    
-    def selfTest(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")
-    
-    def beginPassiveAutoCalibration(self, enabled_bitfield: int) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
-
-    def getActivePassiveAutoCalibration(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")
-
-    def beginActiveAutoCalibration(self) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")
-
-    def isActiveAutoCalibrationActive(self) -> ThreespaceCmdResult[int]:
-        raise NotImplementedError("This method is not available.")                
-    
-    def getStreamingLabel(self, cmd_num: int) -> ThreespaceCmdResult[str]:
-        raise NotImplementedError("This method is not available.")   
-
-    def setCursor(self, cursor_index: int) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.") 
-
-    def getLastLogCursorInfo(self) -> ThreespaceCmdResult[tuple[int,str]]:
-        raise NotImplementedError("This method is not available.")   
-
-    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]:
-        raise NotImplementedError("This method is not available.")               
+    def deleteFile(self, path: str) -> ThreespaceCmdResult[None]: ...
+    def getStreamingBatch(self) -> ThreespaceCmdResult[list]: ...
+    def setOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+    def resetBaseOffset(self) -> ThreespaceCmdResult[None]: ...
+    def setBaseOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...    
+    def getTaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...    
+    def getUntaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...        
+    def getPrimaryBarometerPressure(self) -> ThreespaceCmdResult[float]: ...
+    def getPrimaryBarometerAltitude(self) -> ThreespaceCmdResult[float]: ...    
+    def getBarometerAltitude(self, id: int) -> ThreespaceCmdResult[float]: ...   
+    def getBarometerPressure(self, id: int) -> ThreespaceCmdResult[float]: ...      
+    def getAllPrimaryNormalizedData(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getAllPrimaryCorrectedData(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...    
+    def getPrimaryGlobalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getPrimaryLocalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ...         
+    def getTemperatureCelsius(self) -> ThreespaceCmdResult[float]: ... 
+    def getTemperatureFahrenheit(self) -> ThreespaceCmdResult[float]: ...     
+    def getNormalizedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getNormalizedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getNormalizedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...     
+    def getCorrectedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getCorrectedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getCorrectedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...    
+    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
+    def disableMSC(self) -> ThreespaceCmdResult[None]: ...
+    def getTimestamp(self) -> ThreespaceCmdResult[int]: ...
+    def getBatteryVoltage(self) -> ThreespaceCmdResult[float]: ...
+    def getBatteryPercent(self) -> ThreespaceCmdResult[int]: ...
+    def getBatteryStatus(self) -> ThreespaceCmdResult[int]: ...     
+    def getGpsCoord(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getGpsAltitude(self) -> ThreespaceCmdResult[float]: ...
+    def getGpsFixState(self) -> ThreespaceCmdResult[int]: ...
+    def getGpsHdop(self) -> ThreespaceCmdResult[float]: ...
+    def getGpsSatellites(self) -> ThreespaceCmdResult[int]: ...             
+    def getButtonState(self) -> ThreespaceCmdResult[int]: ...
+    def correctRawGyroData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def correctRawAccelData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def correctRawMagData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def formatSd(self) -> ThreespaceCmdResult[None]: ...
+    def setDateTime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> ThreespaceCmdResult[None]: ...
+    def getDateTime(self) -> ThreespaceCmdResult[list[int]]: ...
+    def tareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+    def setBaseTareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ... 
+    def resetFilter(self) -> ThreespaceCmdResult[None]: ...
+    def getNumDebugMessages(self) -> ThreespaceCmdResult[int]: ...
+    def getOldestDebugMessage(self) -> ThreespaceCmdResult[str]: ...
+    def selfTest(self) -> ThreespaceCmdResult[int]: ...
+    def beginPassiveAutoCalibration(self, enabled_bitfield: int) -> ThreespaceCmdResult[None]: ...
+    def getActivePassiveAutoCalibration(self) -> ThreespaceCmdResult[int]: ...
+    def beginActiveAutoCalibration(self) -> ThreespaceCmdResult[None]: ...
+    def isActiveAutoCalibrationActive(self) -> ThreespaceCmdResult[int]: ...            
+    def getStreamingLabel(self, cmd_num: int) -> ThreespaceCmdResult[str]: ...
+    def setCursor(self, cursor_index: int) -> ThreespaceCmdResult[None]: ...
+    def getLastLogCursorInfo(self) -> ThreespaceCmdResult[tuple[int,str]]: ...
+    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]: ...           
 
 THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM = 84
+THREESPACE_START_STREAMING_COMMAND_NUM = 85
+THREESPACE_STOP_STREAMING_COMMAND_NUM = 86
 THREESPACE_FILE_READ_BYTES_COMMAND_NUM = 177
+THREESPACE_SOFTWARE_RESET_COMMAND_NUM = 226
+THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM = 229
 
 #Acutal command definitions
 _threespace_commands: list[ThreespaceCommand] = [
@@ -1733,8 +1628,8 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("disableMSC", 58, "", ""),
 
     ThreespaceCommand("formatSd", 59, "", ""),
-    ThreespaceCommand("__startDataLogging", 60, "", ""),
-    ThreespaceCommand("__stopDataLogging", 61, "", ""),
+    ThreespaceCommand("startDataLogging", 60, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__startDataLogging),
+    ThreespaceCommand("stopDataLogging", 61, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__stopDataLogging),
 
     ThreespaceCommand("setDateTime", 62, "Bbbbbb", ""),
     ThreespaceCommand("getDateTime", 63, "", "Bbbbbb"),
@@ -1752,9 +1647,9 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("eeptsAutoOffset", 74, "", ""),
 
     ThreespaceCommand("getStreamingLabel", 83, "b", "S"),
-    ThreespaceCommand("__getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
-    ThreespaceCommand("__startStreaming", 85, "", ""),
-    ThreespaceCommand("__stopStreaming", 86, "", ""),
+    ThreespaceCommand("getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
+    ThreespaceCommand("startStreaming", THREESPACE_START_STREAMING_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__startStreaming),
+    ThreespaceCommand("stopStreaming", THREESPACE_STOP_STREAMING_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__stopStreaming),
     ThreespaceCommand("pauseLogStreaming", 87, "b", ""),
     
     ThreespaceCommand("getTimestamp", 94, "", "U"),
@@ -1779,11 +1674,11 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("closeFile", 174, "", ""),
     ThreespaceCommand("fileGetRemainingSize", 175, "", "U"),
     ThreespaceCommand("fileReadLine", 176, "", "S"),
-    ThreespaceCommand("__fileReadBytes", THREESPACE_FILE_READ_BYTES_COMMAND_NUM, "B", "S"), #This has to be handled specially as the output is variable length BYTES not STRING
+    ThreespaceCommand("fileReadBytes", THREESPACE_FILE_READ_BYTES_COMMAND_NUM, "B", "S", custom_func=ThreespaceSensor._ThreespaceSensor__fileReadBytes), #This has to be handled specially as the output is variable length BYTES not STRING
     ThreespaceCommand("deleteFile", 178, "S", ""),
     ThreespaceCommand("setCursor", 179, "U", ""),
-    ThreespaceCommand("__fileStartStream", 180, "", "U"),
-    ThreespaceCommand("__fileStopStream", 181, "", ""),
+    ThreespaceCommand("fileStartStream", 180, "", "U", custom_func=ThreespaceSensor._ThreespaceSensor__fileStartStream),
+    ThreespaceCommand("fileStopStream", 181, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__fileStopStream),
 
     ThreespaceCommand("getBatteryVoltage", 201, "", "f"),
     ThreespaceCommand("getBatteryPercent", 202, "", "b"),
@@ -1796,8 +1691,8 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("getGpsSatellites", 219, "", "b"),
 
     ThreespaceCommand("commitSettings", 225, "", ""),
-    ThreespaceCommand("__softwareReset", 226, "", ""),
-    ThreespaceCommand("__enterBootloader", 229, "", ""),
+    ThreespaceCommand("softwareReset", THREESPACE_SOFTWARE_RESET_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__softwareReset),
+    ThreespaceCommand("enterBootloader", THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__enterBootloader),
 
     ThreespaceCommand("getButtonState", 250, "", "b"),
 ]
@@ -1805,6 +1700,12 @@ _threespace_commands: list[ThreespaceCommand] = [
 def threespaceCommandGet(cmd_num: int):
     for command in _threespace_commands:
         if command.info.num == cmd_num:
+            return command
+    return None
+
+def threespaceCommandGetByName(name: str):
+    for command in _threespace_commands:
+        if command.info.name == name:
             return command
     return None
 
