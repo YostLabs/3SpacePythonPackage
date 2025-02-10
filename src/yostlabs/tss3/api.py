@@ -110,7 +110,7 @@ class ThreespaceCommand:
         return output
 
     #Read the command dynamically from an input stream
-    def read_command(self, com: ThreespaceInputStream):
+    def read_command(self, com: ThreespaceInputStream, verbose=False):
         raw = bytearray([])
         if self.info.num_out_params == 0: return None, raw
         output = []
@@ -121,14 +121,16 @@ class ThreespaceCommand:
                 response = com.read(size)
                 raw += response
                 if len(response) != size:
-                    print(f"Failed to read {c} type. Aborting...")
+                    if verbose:
+                        print(f"Failed to read {c} type. Aborting...")
                     return None
                 output.append(struct.unpack(format_str, response)[0])
             else: #Strings are special, find the null terminator
                 response = com.read(1)
                 raw += response
                 if len(response) != 1:
-                    print(f"Failed to read string. Aborting...")
+                    if verbose:
+                        print(f"Failed to read string. Aborting...")
                     return None
                 byte = chr(response[0])
                 string = ""
@@ -138,7 +140,8 @@ class ThreespaceCommand:
                     response = com.read(1)
                     raw += response
                     if len(response) != 1:
-                        print(f"Failed to read string. Aborting...")
+                        if verbose:
+                            print(f"Failed to read string. Aborting...")
                         return None
                     byte = chr(response[0])
                 output.append(string)
@@ -170,7 +173,7 @@ class ThreespaceGetStreamingBatchCommand(ThreespaceCommand):
         
         return data
     
-    def read_command(self, com: ThreespaceInputStream):
+    def read_command(self, com: ThreespaceInputStream, verbose=False):
         #Get the response to all the streaming commands
         response = []
         raw_response = bytearray([])
@@ -460,7 +463,7 @@ class ThreespaceBootloaderInfo:
 THREESPACE_REQUIRED_HEADER = THREESPACE_HEADER_ECHO_BIT | THREESPACE_HEADER_CHECKSUM_BIT | THREESPACE_HEADER_LENGTH_BIT
 class ThreespaceSensor:
     
-    def __init__(self, com = None, timeout=2):
+    def __init__(self, com = None, timeout=2, verbose=False):
         if com is None: #Default to attempting to use the serial com class if none is provided
             com = ThreespaceSerialComClass
         
@@ -483,6 +486,7 @@ class ThreespaceSensor:
             except:
                 raise ValueError("Failed to create default ThreespaceSerialComClass from parameter:", type(com), com)
 
+        self.verbose = verbose
         self.commands: list[ThreespaceCommand] = [None] * 256
         self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
         self.funcs = {}
@@ -512,13 +516,20 @@ class ThreespaceSensor:
 
         #Used to ensure connecting to the correct sensor when reconnecting
         self.serial_number = None
+        self.short_serial_number = None
+        self.sensor_family = None
 
         self.__cached_in_bootloader = self.__check_bootloader_status()
         if not self.in_bootloader:
             self.__firmware_init()
         else:
-            self.serial_number = self.bootloader_get_sn()
+            self.__cache_serial_number(self.bootloader_get_sn())
             self.__empty_debug_cache()
+
+    #Just a helper for outputting information
+    def log(self, *args):
+        if self.verbose:
+            print(*args)
 
 #-----------------------INITIALIZIATION & REINITIALIZATION-----------------------------------
 
@@ -557,7 +568,7 @@ class ThreespaceSensor:
         self.__cache_header_settings()
         self.__cache_streaming_settings()
 
-        self.serial_number = int(self.get_settings("serial_number"), 16)
+        self.__cache_serial_number(int(self.get_settings("serial_number"), 16))
         self.__empty_debug_cache()
         self.immediate_debug = int(self.get_settings("debug_mode")) == 1 #Needed for some startup processes when restarting
 
@@ -570,7 +581,7 @@ class ThreespaceSensor:
 
     def __add_command(self, command: ThreespaceCommand):
         if self.commands[command.info.num] != None:
-            print(f"Registering duplicate command: {command.info.num} {self.commands[command.info.num].info.name} {command.info.name}")
+            self.log(f"Registering duplicate command: {command.info.num} {self.commands[command.info.num].info.name} {command.info.name}")
         self.commands[command.info.num] = command
 
         #Build the actual method for executing the command
@@ -616,18 +627,34 @@ class ThreespaceSensor:
         #since streaming caches the header. This would cause an issue where the echo byte could be in seperate
         #positions, causing a situation where parsing a command and streaming at the same time breaks since it thinks both are valid cmd echoes.
         if self.is_streaming:
-            print("PREVENTING HEADER CHANGE DUE TO CURRENTLY STREAMING")
+            self.log("Preventing header change due to currently streaming")
             self.set_settings(header=self.header_info.bitfield)
             return
         
         if required_header != header:
-            print(f"Forcing header checksum, echo, and length enabled")
+            self.log(f"Forcing header checksum, echo, and length enabled")
             self.set_settings(header=required_header)
             return
         
         #Current/New header is valid, so can cache it
         self.header_info.bitfield = header
         self.cmd_echo_byte_index = self.header_info.get_start_byte(THREESPACE_HEADER_ECHO_BIT) #Needed for cmd validation while streaming
+
+    def __cache_serial_number(self, serial_number: int):
+        """
+        Doesn't actually retrieve the serial number, rather sets various properties based on the serial number
+        """
+        self.serial_number = serial_number
+
+        #Short SN is the 32 bit version of the u64 serial number
+        #It is defined as the FamilyVersion (byte) << 24 | Incrementor (24 bits) 
+        family = (self.serial_number & THREESPACE_SN_FAMILY_MSK) >> THREESPACE_SN_FAMILY_POS
+        incrementor = (self.serial_number & THREESPACE_SN_INCREMENTOR_MSK) >> THREESPACE_SN_INCREMENTOR_POS
+        self.short_serial_number = family << 24 | incrementor
+        self.sensor_family = THREESPACE_SN_FAMILY_TO_NAME.get(family)
+        if self.sensor_family is None:
+            self.log(f"Unknown Sensor Family detected, {family}")
+            
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
     def set_cached_settings_dirty(self):
@@ -690,7 +717,7 @@ class ThreespaceSensor:
         cmd = f"!{';'.join(params)}\n"
 
         if len(cmd) > 2048:
-            print("Too many settings in one set_settings call. Max str length is 2048 but got", len(cmd))
+            self.log("Too many settings in one set_settings call. Max str length is 2048 but got", len(cmd))
             return 0xFF, 0xFF
 
         #For dirty check
@@ -710,7 +737,7 @@ class ThreespaceSensor:
 
         response = self.__await_set_settings(self.com.timeout)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
-            print("Failed to get set_settings response")
+            self.log("Failed to get set_settings response")
             return err, num_successes
 
         #Decode response
@@ -734,7 +761,7 @@ class ThreespaceSensor:
             self.set_cached_settings_dirty()
 
         if err:
-            print(f"Err setting {cmd}: {err=} {num_successes=}")
+            self.log(f"Err setting {cmd}: {err=} {num_successes=}")
         return err, num_successes
 
     def get_settings(self, *args: str) -> dict[str, str] | str:
@@ -754,8 +781,8 @@ class ThreespaceSensor:
         
         response = self.__await_get_settings(min_resp_length, timeout=self.com.timeout)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
-            print("Requested:", cmd)
-            print("Potential response:", self.com.peekline())
+            self.log("Requested:", cmd)
+            self.log("Potential response:", self.com.peekline())
             raise RuntimeError("Failed to receive get_settings response")      
 
         response = self.com.readline()
@@ -771,7 +798,7 @@ class ThreespaceSensor:
                 key, value = v.split('=')
                 response_dict[key] = value
             except:
-                print("Failed to parse get value:", i, v, len(v))
+                self.log("Failed to parse get value:", i, v, len(v))
         
         #Format response
         if len(response_dict) == 1:
@@ -893,7 +920,7 @@ class ThreespaceSensor:
         """
         header_len = len(header.raw_binary)
         if header.length > max_data_length:
-            print("DATA TOO BIG:", header.length)
+            self.log("DATA TOO BIG:", header.length)
             return False
         data = self.com.peek(header_len + header.length)[header_len:]
         if len(data) != header.length: return False
@@ -925,7 +952,7 @@ class ThreespaceSensor:
                 
                 #Error in packet, go start realigning
                 if not self.misaligned:
-                    print(f"Checksum mismatch for command {cmd.info.num}")
+                    self.log(f"Checksum mismatch for command {cmd.info.num}")
                     self.misaligned = True
                 self.com.read(1)
             else:
@@ -995,13 +1022,13 @@ class ThreespaceSensor:
             #f"{self.com.peek(min(self.com.length, 10))}"
         else:
             msg = "Possible Misalignment or corruption/debug message"
-        #print("Misaligned:", self.com.peek(1))
+        #self.log("Misaligned:", self.com.peek(1))
         self.__handle_misalignment(msg)
         return False
 
     def __handle_misalignment(self, message: str = None):
         if not self.misaligned and message is not None:
-            print(message)
+            self.log(message)
         self.misaligned = True
         self.com.read(1) #Because of expected misalignment, go through buffer 1 by 1 until realigned
 
@@ -1030,7 +1057,7 @@ class ThreespaceSensor:
             header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
         else:
             header = ThreespaceHeader()
-        result, raw = cmd.read_command(self.com)
+        result, raw = cmd.read_command(self.com, verbose=self.verbose)
         return ThreespaceCmdResult(result, header, data_raw_binary=raw)
 
 #-----------------------------------BASE STREAMING COMMMANDS----------------------------------------------
@@ -1172,7 +1199,7 @@ class ThreespaceSensor:
         if header.length < THREESPACE_FILE_STREAMING_MAX_PACKET_SIZE or self.file_stream_length == 0: #File streaming sends in chunks of 512. If not 512, it must be the last packet
             self.is_file_streaming = False
             if self.file_stream_length != 0:
-                print(f"File streaming stopped due to last packet. However still expected {self.file_stream_length} more bytes.")
+                self.log(f"File streaming stopped due to last packet. However still expected {self.file_stream_length} more bytes.")
 
 #----------------------------DATA LOGGING--------------------------------------
 
@@ -1259,8 +1286,8 @@ class ThreespaceSensor:
         self.com.write("UUU?UUU\n".encode())
         response = self.__await_get_settings(2, check_bootloader=True)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT: 
-            print("Requested Bootloader, Got:")
-            print(self.com.peek(self.com.length))
+            self.log("Requested Bootloader, Got:")
+            self.log(self.com.peek(self.com.length))
             raise RuntimeError("Failed to discover bootloader or firmware.")
         if response == THREESPACE_AWAIT_BOOTLOADER:
             bootloader = True
