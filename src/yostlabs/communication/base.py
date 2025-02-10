@@ -23,10 +23,11 @@ class ThreespaceInputStream:
         raise NotImplementedError()
     
     def readline(self) -> bytes:
-        return self.read_until(b"\n")
+        return self.read_until(b"\r\n")
     
     def peekline(self, max_length: int = None) -> bytes:
-        return self.peek_until(b"\n", max_length=max_length)    
+        #Lines from the sensor are defined to have a \r\n not just a \n
+        return self.peek_until(b"\r\n", max_length=max_length)    
     
     @property
     def length(self) -> int:
