@@ -1228,7 +1228,8 @@ class ThreespaceSensor:
     def __fileStartStream(self) -> ThreespaceCmdResult[int]:
         result = self.execute_command(self.__get_command("fileStartStream"))
         self.file_stream_length = result.data
-        self.is_file_streaming = True
+        if self.file_stream_length > 0:
+            self.is_file_streaming = True
         return result
     
     def fileStopStream(self) -> ThreespaceCmdResult[None]: ...
