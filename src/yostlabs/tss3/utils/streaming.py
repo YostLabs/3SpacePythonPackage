@@ -270,6 +270,24 @@ class ThreespaceStreamingManager:
         if immediate_update:
             self.__apply_streaming_settings_and_update_state()
 
+    def unregister_all_commands_from_owner(self, owner: object, immediate_update: bool = True):
+        """
+        Undoes all command registrations done by the given owner automatically
+
+        Parameters
+        ----------
+        owner : A reference to the object unregistering the command. A command is only unregistered after all its owners release it
+        immediate_update : If true, the streaming manager will immediately change the streaming slots on the sensor. If doing bulk unregisters, it
+        is useful to set this as False until the last one for performance purposes.
+        """        
+        for registered_command in self.registered_commands.values():
+            if owner in registered_command.registrations:
+                registered_command.registrations.remove(owner)
+                if len(registered_command.registrations) == 0:
+                    self.dirty = True
+        
+        if self.dirty and immediate_update:
+            self.__apply_streaming_settings_and_update_state()
 
     def __build_stream_slots_string(self):
         cmd_strings = []

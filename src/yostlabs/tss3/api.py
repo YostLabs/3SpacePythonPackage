@@ -800,7 +800,16 @@ class ThreespaceSensor:
             self.log(f"Err setting {cmd}: {err=} {num_successes=}")
         return err, num_successes
 
-    def get_settings(self, *args: str) -> dict[str, str] | str:
+    def get_settings(self, *args: str, format="Mixed") -> dict[str, str] | str:
+        """
+        Gets the values for all requested settings. Settings are request by their string name. The result will be
+        the string response to that setting.
+
+        Params
+        -----
+        *args : Any number of string keys
+        format : "Mixed" (Dictionary if multiple settings requested, else just the response string) or "Dict" (Always a dictionary even if only one key)
+        """
         self.check_dirty()
         #Build and send the cmd
         params = list(args)
@@ -837,7 +846,7 @@ class ThreespaceSensor:
                 self.log("Failed to parse get value:", i, v, len(v))
         
         #Format response
-        if len(response_dict) == 1:
+        if len(response_dict) == 1 and format == "Mixed":
             return list(response_dict.values())[0]
         return response_dict
 
