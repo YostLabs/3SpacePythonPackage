@@ -757,8 +757,7 @@ class ThreespaceSensor:
             return 0xFF, 0xFF
 
         #For dirty check
-        keys = cmd[1:-1].split(';')
-        keys = [v.split('=')[0] for v in keys]
+        param_dict = threespaceSetSettingsStringToDict(cmd[1:-1])
 
         #Must enable this before sending the set so can properly handle reading the response
         if "debug_mode=1" in cmd:
@@ -786,14 +785,14 @@ class ThreespaceSensor:
         #Handle updating state variables based on settings
         #If the user modified the header, need to cache the settings so the API knows how to interpret responses
         if "header" in cmd.lower(): #First do a quick check
-            if any(v in keys for v in ThreespaceSensor.HEADER_KEYS): #Then do a longer check
+            if any(v in param_dict.keys() for v in ThreespaceSensor.HEADER_KEYS): #Then do a longer check
                 self.__cache_header_settings()
         
         if "stream_slots" in cmd.lower():
             self.__cache_streaming_settings()
         
         #All the settings changed, just need to mark dirty
-        if any(v in keys for v in ("default", "reboot")):
+        if any(v in param_dict.keys() for v in ("default", "reboot")):
             self.set_cached_settings_dirty()
 
         if err:
@@ -1739,3 +1738,16 @@ def threespaceGetHeaderLabels(header_info: ThreespaceHeaderInfo):
     if header_info.length_enabled:
         order.append("len")
     return order
+
+def threespaceSetSettingsStringToDict(setting_string: str):
+    d = {}
+    for item in setting_string.split(';'):
+        result = item.split('=')
+        key = result[0]
+        if len(result) == 1:
+            value = None
+        else:
+            value = '='.join(result[1:]) #In case = was part of the value, do a join
+        
+        d[key] = value
+    return d
