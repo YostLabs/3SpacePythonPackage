@@ -134,6 +134,37 @@ def quaternion_global_to_local(quat, vec):
 def quaternion_local_to_global(quat, vec):
     return quat_rotate_vec(quat, vec)
 
+def quaternion_swap_axes(quat: list, old_order: str, new_order: str):
+    return quaternion_swap_axes_fast(quat, _vec.parse_axis_string_info(old_order), _vec.parse_axis_string_info(new_order))
+
+def quaternion_swap_axes_fast(quat: list, old_parsed_order: list[list, list, bool], new_parsed_order: list[list, list, bool]):
+    """
+    Like quaternion_swap_axes but uses the inputs of parsing the axis strings to avoid having to recompute
+    the storage types.
+
+    each order should be a sequence of [order, mults, right_handed]
+    """
+    old_order, old_mults, old_right_handed = old_parsed_order
+    new_order, new_mults, new_right_handed = new_parsed_order
+
+    #Undo the old negations
+    base_quat = quat.copy()
+    for i, mult in enumerate(old_mults):
+        base_quat[i] *= mult
+    
+    #Now swap the positions and apply new multipliers
+    new_quat = base_quat.copy()
+    for i in range(3):
+        new_quat[i] = base_quat[old_order.index(new_order[i])]
+        new_quat[i] *= new_mults[i]
+    
+    if old_right_handed != new_right_handed:
+        #Different handed systems rotate opposite directions. So to maintain the same rotation,
+        #negate the rotation of the quaternion when swapping systems
+        new_quat[-1] *= -1
+
+    return new_quat
+
 #https://splines.readthedocs.io/en/latest/rotation/slerp.html
 def slerp(a, b, t):
     dot = _vec.vec_dot(a, b)
