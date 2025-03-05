@@ -1465,20 +1465,26 @@ class ThreespaceSensor:
         self.com.write("RR".encode())
 
     def cleanup(self):
-        if not self.in_bootloader:
-            if self.is_data_streaming:
-                self.stopStreaming()
-            if self.is_file_streaming:
-                self.fileStopStream()
-            if self.is_log_streaming:
-                self.stopDataLogging()
+        error = None
+        try:
+            if not self.in_bootloader:
+                if self.is_data_streaming:
+                    self.stopStreaming()
+                if self.is_file_streaming:
+                    self.fileStopStream()
+                if self.is_log_streaming:
+                    self.stopDataLogging()
 
-            #The sensor may or may not have this command registered. So just try it
-            try:
-                #May not be opened, but also not cacheing that so just attempt to close.
-                self.closeFile()
-            except: pass
-        self.com.close()
+                #The sensor may or may not have this command registered. So just try it
+                try:
+                    #May not be opened, but also not cacheing that so just attempt to close.
+                    self.closeFile()
+                except: pass
+        except Exception as e:
+            error = e
+        self.com.close() #Ensuring the close gets called, that way com ports can't get stuck open. Also makes calling cleanup() "safe" even after disconnect
+        if error:
+            raise error
 
 #-------------------------START ALL PROTOTYPES------------------------------------
 
