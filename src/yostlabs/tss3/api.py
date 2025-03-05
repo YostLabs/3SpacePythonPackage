@@ -419,6 +419,10 @@ THREESPACE_AWAIT_COMMAND_FOUND = 0
 THREESPACE_AWAIT_COMMAND_TIMEOUT = 1
 THREESPACE_AWAIT_BOOTLOADER = 2
 
+THREESPACE_UPDATE_COMMAND_PARSED = 0
+THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA = 1
+THREESPACE_UPDATE_COMMAND_MISALIGNED = 2
+
 T = TypeVar('T')
 
 @dataclass
@@ -481,6 +485,8 @@ class ThreespaceSensor:
         #The supplied com already was a com class, nothing to do
         elif inspect.isclass(type(com)) and issubclass(type(com), ThreespaceComClass):
             self.com = com
+            if not self.com.check_open():
+                self.com.open()
         else: #Unknown type, try making a ThreespaceSerialComClass out of this
             try:
                 self.com = ThreespaceSerialComClass(com)
@@ -1005,7 +1011,7 @@ class ThreespaceSensor:
 
 #------------------------------BASE INPUT PARSING--------------------------------------------
 
-    def __internal_update(self, header: ThreespaceHeader = None):
+    def __internal_update(self, header: ThreespaceHeader = None, blocking=True):
         """
         Manages checking the datastream for asynchronous responses (Streaming, Immediate Debug Messages).
         If no data is found to match these responses, the data buffer will be considered corrupted/misaligned
@@ -1020,29 +1026,39 @@ class ThreespaceSensor:
 
         Returns
         --------
-        False : Misalignment
-        True : Internal Data Found/Parsed
+        0 : Internal Data Found/Parsed
+        1 : Not enough data (Only possible when blocking == False)
+        2 : Misalignment
         """
         checksum_match = False #Just for debugging
 
         if header is not None:
             #NOTE: FOR THIS TO WORK IT IS REQUIRED THAT THE HEADER DOES NOT CHANGE WHILE STREAMING ANY FORM OF DATA.
             #IT IS UP TO THE API TO ENFORCE NOT ALLOWING HEADER CHANGES WHILE ANY OF THOSE THINGS ARE HAPPENING
-            if self.is_data_streaming and header.echo == THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM: #Its a streaming packet, so update streaming
+            if self.is_data_streaming and header.echo == THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM:
+                if not blocking:
+                    expected_output_size = len(header.raw_binary) + self.getStreamingBatchCommand.info.out_size
+                    if self.com.length < expected_output_size: return THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA
                 if checksum_match := self.__peek_checksum(header, max_data_length=self.getStreamingBatchCommand.info.out_size):
                     self.__update_base_streaming()
                     self.misaligned = False
-                    return True
+                    return THREESPACE_UPDATE_COMMAND_PARSED
             elif self.is_log_streaming and header.echo == THREESPACE_FILE_READ_BYTES_COMMAND_NUM:
-                if checksum_match := self.__peek_checksum(header, max_data_length=2560): #TODO: Confirm this number can be 2048 and then pound define it. Currently set to 2560 because I know that is big enough, but not optimal
+                if not blocking: 
+                    expected_output_size = len(header.raw_binary) + min(header.length, THREESPACE_LIVE_LOG_STREAM_MAX_PACKET_SIZE)
+                    if self.com.length < expected_output_size: return THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA
+                if checksum_match := self.__peek_checksum(header, max_data_length=THREESPACE_LIVE_LOG_STREAM_MAX_PACKET_SIZE):
                     self.__update_log_streaming()
                     self.misaligned = False
-                    return True
+                    return THREESPACE_UPDATE_COMMAND_PARSED
             elif self.is_file_streaming and header.echo == THREESPACE_FILE_READ_BYTES_COMMAND_NUM:
+                if not blocking:
+                    expected_output_size = len(header.raw_binary) + min(header.length, THREESPACE_FILE_STREAMING_MAX_PACKET_SIZE)
+                    if self.com.length < expected_output_size: return THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA
                 if checksum_match := self.__peek_checksum(header, max_data_length=THREESPACE_FILE_STREAMING_MAX_PACKET_SIZE):
                     self.__update_file_streaming()
                     self.misaligned = False
-                    return True
+                    return THREESPACE_UPDATE_COMMAND_PARSED
         
         #Debug messages are possible and there is enough data to potentially be a debug message
         #NOTE: Firmware should avoid putting more then one \r\n in a debug message as they will be treated as unprocessed/misaligned characters
@@ -1057,7 +1073,7 @@ class ThreespaceSensor:
                     message = self.com.readline() #Read out the whole message!
                     self.debug_callback(message.decode('ascii'), self)
                     self.misaligned = False
-                    return True
+                    return THREESPACE_UPDATE_COMMAND_PARSED
 
         #The response didn't match any of the expected asynchronous streaming API responses, so assume a misalignment
         if header is not None:
@@ -1068,7 +1084,7 @@ class ThreespaceSensor:
             msg = "Possible Misalignment or corruption/debug message"
         #self.log("Misaligned:", self.com.peek(1))
         self.__handle_misalignment(msg)
-        return False
+        return THREESPACE_UPDATE_COMMAND_MISALIGNED
 
     def __handle_misalignment(self, message: str = None):
         if not self.misaligned and message is not None:
@@ -1166,12 +1182,21 @@ class ThreespaceSensor:
         self.streaming_packets.clear()
     
     #This is called for all streaming types
-    def updateStreaming(self, max_checks=float('inf')):
+    def updateStreaming(self, max_checks=float('inf'), timeout=None, blocking=False):
         """
         Returns true if any amount of data was processed whether valid or not. This is called for all streaming types.
+
+        Parameters
+        ----------
+        max_checks : Will only attempt to read up to max_checks packets
+        timeout : Will only attempt to read packets for this duration. It is possible for this function to take longer then this timeout \
+        if blocking = True, in which case it could take up to timeout + com.timeout 
+        blocking : If False, will immediately stop when not enough data is available. If true, will immediately stop if not enough data \
+        for a header, but will block when trying to retrieve the data associated with that header. For most com classes, this does not matter. \
+        But for communication such as BLE where the header and data may be split between different packets, this will have a clear effect.
         """
         if not self.is_streaming: return False
-
+        if timeout is None: timeout = float('inf')
         #I may need to make this have a max num bytes it will process before exiting to prevent locking up on slower machines
         #due to streaming faster then the program runs
         num_checks = 0
@@ -1181,12 +1206,17 @@ class ThreespaceSensor:
                 return data_processed
             
             #Get header
+
             header = self.com.peek(self.header_info.size)
 
             #Get the header and send it to the internal update
             header = ThreespaceHeader.from_bytes(header, self.header_info)
-            self.__internal_update(header)
-            data_processed = True #Internal update always processes data. Either reads a streaming message, or advances buffer due to misalignment
+            result = self.__internal_update(header, blocking=blocking)
+            if result == THREESPACE_UPDATE_COMMAND_PARSED:
+                data_processed = True
+            elif result == THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA:
+                return data_processed
+            
             num_checks += 1
         
         return data_processed

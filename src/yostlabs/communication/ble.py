@@ -1,4 +1,5 @@
 import asyncio
+import async_timeout
 import time
 from bleak import BleakScanner, BleakClient
 from bleak.backends.device import BLEDevice
@@ -42,15 +43,22 @@ class ThreespaceBLEComClass(ThreespaceComClass):
 
         self.buffer = bytearray()
         self.event_loop = asyncio.new_event_loop()
+        self.data_read_event = asyncio.Event()
+
+        #Default to 20, will update on open
+        self.max_packet_size = 20
 
     async def __async_open(self):
         await self.client.connect()
         await self.client.start_notify(NORDIC_UART_TX_UUID, self.__on_data_received)
 
     def open(self):
+        if self.check_open(): return
         self.event_loop.run_until_complete(self.__async_open())
+        self.max_packet_size = self.client.mtu_size - 3 #-3 to account for the opcode and attribute handle stored in the data packet
 
     def close(self):
+        if not self.check_open(): return
         self.event_loop.run_until_complete(self.client.disconnect())
         self.buffer.clear()
 
@@ -70,15 +78,28 @@ class ThreespaceBLEComClass(ThreespaceComClass):
 
     def __on_data_received(self, sender: BleakGATTCharacteristic, data: bytearray):
         self.buffer += data
+        self.data_read_event.set()
 
     def write(self, bytes: bytes):
-        self.event_loop.run_until_complete(self.client.write_gatt_char(NORDIC_UART_RX_UUID, bytes, response=False))
+        start_index = 0
+        while start_index < len(bytes):
+            end_index = min(len(bytes), start_index + self.max_packet_size) #Can only send max_packet_size data per call to write_gatt_char
+            self.event_loop.run_until_complete(self.client.write_gatt_char(NORDIC_UART_RX_UUID, bytes[start_index:end_index], response=False))
+            start_index = end_index
     
+    async def __await_read(self, timeout_time: int):
+        self.data_read_event.clear()
+        try:
+            async with async_timeout.timeout_at(timeout_time):
+                await self.data_read_event.wait()
+            return True
+        except:
+            return False
+
     async def __await_num_bytes(self, num_bytes: int):
         start_time = time.time()
         while len(self.buffer) < num_bytes and time.time() - start_time < self.timeout:
-            await asyncio.sleep(0) #Yield so the scheduled callbacks can be triggered to add to self.buffer
-        return len(self.buffer)
+            await self.__await_read(start_time + self.timeout)
 
     def read(self, num_bytes: int):
         self.event_loop.run_until_complete(self.__await_num_bytes(num_bytes))
@@ -98,7 +119,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         if max_length is None: max_length = float('inf')
         start_time = time.time()
         while pattern not in self.buffer and time.time() - start_time < self.timeout and len(self.buffer) < max_length:
-            await asyncio.sleep(0)
+            await self.__await_read(start_time + self.timeout)
         return pattern in self.buffer
 
     def read_until(self, expected: bytes) -> bytes:
@@ -193,9 +214,13 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             cls.SCANNER_EVENT_LOOP.run_until_complete(cls.__wait_for_callbacks_async())
             #Remove expired devices
             cur_time = time.time()
+            to_remove = [] #Avoiding concurrent list modification
             for device in cls.discovered_devices:
                 if cur_time - cls.discovered_devices[device]["last_found"] > cls.SCANNER_EXPIRATION_TIME:
-                    del cls.discovered_devices[device]
+                    to_remove.append(device) 
+            for device in to_remove:
+                del cls.discovered_devices[device]
+
         else:
             #Mark all devices as invalid before searching for nearby devices
             cls.discovered_devices.clear()
@@ -226,24 +251,3 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         cls.update_nearby_devices()
         for device_info in cls.discovered_devices.values():
             yield(ThreespaceBLEComClass(device_info["device"]))
-
-async def run_scanner():
-    stop_event = asyncio.Event()
-
-    discovered_devices = []
-    def callback(device, adv):
-        nonlocal last_discover_time
-        if device in discovered_devices: return
-        last_discover_time = time.time()
-        print(device, last_discover_time - start_time)
-        discovered_devices.append(device)
-
-        
-    
-    start_time = time.time()
-    last_discover_time = start_time
-    async with BleakScanner(callback, service_uuids=[NORDIC_UART_SERVICE_UUID]) as scanner:
-        print(f"Started:", time.time() - start_time)
-        while time.time() - last_discover_time < 3:
-            await asyncio.sleep(0)
-    print("Done", time.time() - start_time)
