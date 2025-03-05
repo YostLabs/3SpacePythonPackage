@@ -5,6 +5,7 @@ from bleak import BleakScanner, BleakClient
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.exc import BleakDeviceNotFoundError
 
 #Services
 NORDIC_UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -21,20 +22,39 @@ HARDWARE_REVISION_STRING_UUID = "00002a27-0000-1000-8000-00805f9b34fb"
 SERIAL_NUMBER_STRING_UUID = "00002a25-0000-1000-8000-00805f9b34fb"
 MANUFACTURER_NAME_STRING_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
 
+class TssBLENoConnectionError(Exception): ...
+
 from yostlabs.communication.base import *
 class ThreespaceBLEComClass(ThreespaceComClass):
 
     DEFAULT_TIMEOUT = 2
 
-    def __init__(self, ble: BleakClient | BLEDevice | str):
+    def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=5, error_on_disconnect=True):
+        """
+        Parameters
+        ----------
+        ble : Can be either a BleakClient, BleakDevice, MacAddress String, or localName string
+        discover_name : If true, a string ble parameter is interpreted as a localName, else as a MacAddress
+        discovery_timeout : Max amount of time in seconds to discover the BLE device for the corresponding MacAddress/localName
+        error_on_disconnect : If trying to read while the sensor is disconnected, an exception will be generated. This may be undesirable \
+        if it is expected that the sensor will frequently go in and out of range and the user wishes to preserve data (such as streaming)
+        """
+        self.event_loop = asyncio.new_event_loop()
         if isinstance(ble, BleakClient):    #Actual client
             self.client = ble
             self.__name = ble.address
-        elif isinstance(ble, str): #Address string
-            self.client = BleakClient(ble)
-            self.__name = self.client.address
+        elif isinstance(ble, str): 
+            if discover_name: #Local Name stirng
+                device = self.event_loop.run_until_complete(BleakScanner.find_device_by_name(ble, timeout=discovery_timeout))
+                if device is None:
+                    raise BleakDeviceNotFoundError(ble)
+                self.client = BleakClient(device, timeout=discovery_timeout)
+                self.__name = ble
+            else: #Address string
+                self.client = BleakClient(ble, timeout=discovery_timeout)
+                self.__name = self.client.address
         elif isinstance(ble, BLEDevice):
-            self.client = BleakClient(ble)
+            self.client = BleakClient(ble, timeout=discovery_timeout)
             self.__name = ble.name #Use the local name instead of the address
         else:
             raise TypeError("Invalid type for creating a ThreespaceBLEComClass:", type(ble), ble)
@@ -42,27 +62,52 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         self.__timeout = self.DEFAULT_TIMEOUT
 
         self.buffer = bytearray()
-        self.event_loop = asyncio.new_event_loop()
         self.data_read_event = asyncio.Event()
 
         #Default to 20, will update on open
         self.max_packet_size = 20
+
+        self.error_on_disconnect = error_on_disconnect
+        #is_connected is different from open.
+        #check_open() should return is_connected as that is what the user likely wants.
+        #open is whether or not the client will auto connect to the device when rediscovered.
+        #This file is set up to automatically close the connection if a method is called and is_connected is False
+        #This behavior might be specific to Windows.
+        self.__opened = False
+
+    def __assert_connected(self):
+        if not self.client.is_connected and self.error_on_disconnect:
+            raise TssBLENoConnectionError(f"{self.name} is not connected")
 
     async def __async_open(self):
         await self.client.connect()
         await self.client.start_notify(NORDIC_UART_TX_UUID, self.__on_data_received)
 
     def open(self):
-        if self.check_open(): return
+        #If trying to open while already open, this infinitely loops
+        if self.__opened: 
+            if not self.client.is_connected and self.error_on_disconnect:
+                self.close()
+            return
         self.event_loop.run_until_complete(self.__async_open())
         self.max_packet_size = self.client.mtu_size - 3 #-3 to account for the opcode and attribute handle stored in the data packet
+        self.__opened = True
+
+    async def __async_close(self):
+        #There appears to be a bug where if you call close too soon after is_connected returns false,
+        #the disconnect call will hang on Windows. It seems similar to this issue: https://github.com/hbldh/bleak/issues/1359
+        await asyncio.sleep(0.5)
+        await self.client.disconnect()
 
     def close(self):
-        if not self.check_open(): return
-        self.event_loop.run_until_complete(self.client.disconnect())
+        if not self.__opened: return
+        self.event_loop.run_until_complete(self.__async_close())
         self.buffer.clear()
+        self.__opened = False
 
     def check_open(self):
+        if not self.client.is_connected and self.__opened and self.error_on_disconnect:
+            self.close()
         return self.client.is_connected
 
     #Bleak does run a thread to read data on notification after calling start_notify, however on notification
@@ -74,6 +119,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         pass
 
     def __read_all_data(self):
+        self.__assert_connected()
         self.event_loop.run_until_complete(self.__wait_for_callbacks_async())
 
     def __on_data_received(self, sender: BleakGATTCharacteristic, data: bytearray):
@@ -81,6 +127,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         self.data_read_event.set()
 
     def write(self, bytes: bytes):
+        self.__assert_connected()
         start_index = 0
         while start_index < len(bytes):
             end_index = min(len(bytes), start_index + self.max_packet_size) #Can only send max_packet_size data per call to write_gatt_char
@@ -102,6 +149,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             await self.__await_read(start_time + self.timeout)
 
     def read(self, num_bytes: int):
+        self.__assert_connected()
         self.event_loop.run_until_complete(self.__await_num_bytes(num_bytes))
         num_bytes = min(num_bytes, len(self.buffer))
         data = self.buffer[:num_bytes]
@@ -109,6 +157,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         return data
 
     def peek(self, num_bytes: int):
+        self.__assert_connected()
         self.event_loop.run_until_complete(self.__await_num_bytes(num_bytes))
         num_bytes = min(num_bytes, len(self.buffer))
         data = self.buffer[:num_bytes]
@@ -123,6 +172,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         return pattern in self.buffer
 
     def read_until(self, expected: bytes) -> bytes:
+        self.__assert_connected()
         self.event_loop.run_until_complete(self.__await_pattern(expected))
         if expected in self.buffer: #Found the pattern
             length = self.buffer.index(expected) + len(expected)
@@ -135,6 +185,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         return result
 
     def peek_until(self, expected: bytes, max_length: int = None) -> bytes:
+        self.__assert_connected()
         self.event_loop.run_until_complete(self.__await_pattern(expected, max_length=max_length))
         if expected in self.buffer:
             length = self.buffer.index(expected) + len(expected)
@@ -148,6 +199,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
 
     @property
     def length(self):
+        self.__assert_connected()
         self.__read_all_data() #Gotta update the data before knowing the length
         return len(self.buffer) 
 
