@@ -6,11 +6,31 @@
 
 ## Basic Usage
 
+#### USB
+
 ```Python
 from yostlabs.tss3.api import ThreespaceSensor
 
 #Will auto detect a 3-Space sensor connected to the machine via a USB connection
 sensor = ThreespaceSensor()
+
+result = sensor.getPrimaryCorrectedAccelVec()
+print(result)
+
+sensor.cleanup()
+```
+
+#### BLE
+
+```Python
+from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.communication.ble import ThreespaceBLEComClass
+
+#PUT YOUR SENSORS BLE_NAME HERE
+ble_name = "YL-TSS-####" #Defaults to the lowest 4 hex digits of the sensors serial number
+com_class = ThreespaceBLEComClass(ble_name)
+sensor = ThreespaceSensor(com_class)
+#sensor = ThreespaceSensor(ThreespaceBLEComClass) #Attempt to auto discover nearby sensor
 
 result = sensor.getPrimaryCorrectedAccelVec()
 print(result)
