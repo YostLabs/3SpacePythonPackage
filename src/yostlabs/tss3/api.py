@@ -468,7 +468,7 @@ class ThreespaceBootloaderInfo:
 THREESPACE_REQUIRED_HEADER = THREESPACE_HEADER_ECHO_BIT | THREESPACE_HEADER_CHECKSUM_BIT | THREESPACE_HEADER_LENGTH_BIT
 class ThreespaceSensor:
     
-    def __init__(self, com = None, timeout=2, verbose=False):
+    def __init__(self, com = None, timeout=2, verbose=False, initial_clear_timeout=None):
         if com is None: #Default to attempting to use the serial com class if none is provided
             com = ThreespaceSerialComClass
         
@@ -512,6 +512,12 @@ class ThreespaceSensor:
         self.is_log_streaming = False
         self.is_file_streaming = False
         self._force_stop_streaming()
+        #Clear out the buffer to allow faster initializing
+        #Ex: If a large buffer build up due to streaming, especially if using a slower interface like BLE,
+        #it may take a while before the entire garbage data can be parsed when checking for bootloader, causing a timeout
+        #even though it would have eventually succeeded        
+        self.__clear_com(initial_clear_timeout)
+
 
         #Used to ensure connecting to the correct sensor when reconnecting
         self.serial_number = None
@@ -543,6 +549,16 @@ class ThreespaceSensor:
             print(*args)
 
 #-----------------------INITIALIZIATION & REINITIALIZATION-----------------------------------
+
+    def __clear_com(self, refresh_timeout=None):
+        data = self.com.read_all()
+        if refresh_timeout is None: return
+        while len(data) > 0: #Continue until all data is cleared
+            start_time = time.time()
+            while time.time() - start_time < refresh_timeout: #Wait up to refresh time for a new message
+                data = self.com.read_all()
+                if len(data) > 0:
+                    break #Refresh the start time and wait for more data
 
     def __firmware_init(self):
         """
