@@ -472,6 +472,7 @@ class ThreespaceSensor:
         if com is None: #Default to attempting to use the serial com class if none is provided
             com = ThreespaceSerialComClass
         
+        manually_opened_com = False
         #Auto discover using the supplied com class type
         if inspect.isclass(com) and issubclass(com, ThreespaceComClass):
             new_com = None
@@ -481,12 +482,14 @@ class ThreespaceSensor:
             if new_com is None:
                 raise RuntimeError("Failed to auto discover com port")
             self.com = new_com
+            manually_opened_com = True
             self.com.open()
         #The supplied com already was a com class, nothing to do
         elif inspect.isclass(type(com)) and issubclass(type(com), ThreespaceComClass):
             self.com = com
             if not self.com.check_open():
                 self.com.open()
+                manually_opened_com = True
         else: #Unknown type, try making a ThreespaceSerialComClass out of this
             try:
                 self.com = ThreespaceSerialComClass(com)
@@ -520,12 +523,19 @@ class ThreespaceSensor:
         self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
         self.funcs = {}
 
-        self.__cached_in_bootloader = self.__check_bootloader_status()
-        if not self.in_bootloader:
-            self.__firmware_init()
-        else:
-            self.__cache_serial_number(self.bootloader_get_sn())
-            self.__empty_debug_cache()
+        try:
+            self.__cached_in_bootloader = self.__check_bootloader_status()
+            if not self.in_bootloader:
+                self.__firmware_init()
+            else:
+                self.__cache_serial_number(self.bootloader_get_sn())
+                self.__empty_debug_cache()
+        #This is just to prevent a situation where instantiating the API creates and fails to release a com class on failure when user catches the exception
+        #If user provides the com class, it is up to them to handle its state on error
+        except Exception as e:
+            if manually_opened_com:
+                self.com.close()
+            raise e
 
     #Just a helper for outputting information
     def log(self, *args):
