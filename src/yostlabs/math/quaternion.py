@@ -22,7 +22,7 @@ def quat_rotate(a: list[float], b: list[float]):
     return [*final[:3], b[3]]
 
 def quat_inverse(quat: list[float]):
-    return [-quat[0], -quat[1], -quat[2], quat[3]]
+    return [quat[0], quat[1], quat[2], -quat[3]]
 
 def quat_rotate_vec(quat: list[float], vec: list[float]):
     inv = quat_inverse(quat)
