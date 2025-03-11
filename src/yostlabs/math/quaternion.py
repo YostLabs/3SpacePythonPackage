@@ -22,7 +22,9 @@ def quat_rotate(a: list[float], b: list[float]):
     return [*final[:3], b[3]]
 
 def quat_inverse(quat: list[float]):
-    return [quat[0], quat[1], quat[2], -quat[3]]
+    #Note: While technically negating just the W is rotationally equivalent, this is not a good idea
+    #as it will conflict with rotating vectors, which are not rotations, by quaternions
+    return [-quat[0], -quat[1], -quat[2], quat[3]]
 
 def quat_rotate_vec(quat: list[float], vec: list[float]):
     inv = quat_inverse(quat)
@@ -43,7 +45,6 @@ def angles_to_quaternion(angles: list[float], order: str, degrees=True):
         imaginary = math.sin(angle / 2)
         unit_vec = [v * imaginary for v in unit_vec]
         angle_quat = [*unit_vec, w]
-        #print(f"{axis} {angle} {angle_quat}")
         quat = quat_mul(quat, angle_quat)
     return quat
 
