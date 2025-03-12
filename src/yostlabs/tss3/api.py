@@ -766,6 +766,15 @@ class ThreespaceSensor:
 
 #-----------------------------------------------BASE SETTINGS PROTOCOL------------------------------------------------
 
+    #Helper for converting python types to strings that set_settings can understand
+    def __internal_str(self, value):
+        if isinstance(value, float):
+            return f"{value:.10f}"
+        elif isinstance(value, bool):
+            return int(value)
+        else:
+            return str(value)        
+
     #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require cacheing the header
     HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
     def set_settings(self, param_string: str = None, **kwargs):
@@ -777,10 +786,10 @@ class ThreespaceSensor:
         
         for key, value in kwargs.items():
             if isinstance(value, list):
-                value = [str(v) for v in value]
+                value = [self.__internal_str(v) for v in value]
                 value = ','.join(value)
-            elif isinstance(value, bool):
-                value = int(value)
+            else:
+                value = self.__internal_str(value)
             params.append(f"{key}={value}")
         cmd = f"!{';'.join(params)}\n"
 
