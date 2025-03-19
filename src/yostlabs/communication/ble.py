@@ -39,14 +39,14 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         error_on_disconnect : If trying to read while the sensor is disconnected, an exception will be generated. This may be undesirable \
         if it is expected that the sensor will frequently go in and out of range and the user wishes to preserve data (such as streaming)
         """
-        self.event_loop = asyncio.new_event_loop()
         bleak_options = { "timeout": discovery_timeout, "disconnected_callback": self.__on_disconnect }
         if isinstance(ble, BleakClient):    #Actual client
             self.client = ble
             self.__name = ble.address
         elif isinstance(ble, str): 
             if discover_name: #Local Name stirng
-                device = self.event_loop.run_until_complete(BleakScanner.find_device_by_name(ble, timeout=discovery_timeout))
+                self.__lazy_init_scanner()
+                device = ThreespaceBLEComClass.SCANNER_EVENT_LOOP.run_until_complete(BleakScanner.find_device_by_name(ble, timeout=discovery_timeout))
                 if device is None:
                     raise BleakDeviceNotFoundError(ble)
                 self.client = BleakClient(device, **bleak_options)
@@ -63,7 +63,8 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         self.__timeout = self.DEFAULT_TIMEOUT
 
         self.buffer = bytearray()
-        self.data_read_event = asyncio.Event()
+        self.event_loop: asyncio.AbstractEventLoop = None
+        self.data_read_event: asyncio.Event = None
 
         #Default to 20, will update on open
         self.max_packet_size = 20
@@ -106,6 +107,8 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         if not self.__opened: return
         self.event_loop.run_until_complete(self.__async_close())
         self.buffer.clear()
+        self.event_loop.close()
+        self.data_read_event = None
         self.__opened = False
 
     def __on_disconnect(self, client: BleakClient):
