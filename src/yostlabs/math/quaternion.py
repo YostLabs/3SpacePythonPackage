@@ -12,10 +12,7 @@ def quat_mul(a: list[float], b: list[float]):
 
 #Rotates quaternion b by quaternion a, it does not combine them
 def quat_rotate(a: list[float], b: list[float]):
-    inv = a.copy()
-    inv[0] *= -1
-    inv[1] *= -1
-    inv[2] *= -1
+    inv = quat_inverse(a)
     axis = [b[0], b[1], b[2], 0]
     halfway = quat_mul(a, axis)
     final = quat_mul(halfway, inv)
@@ -161,8 +158,8 @@ def quaternion_swap_axes_fast(quat: list, old_parsed_order: list[list, list, boo
     
     if old_right_handed != new_right_handed:
         #Different handed systems rotate opposite directions. So to maintain the same rotation,
-        #negate the rotation of the quaternion when swapping systems
-        new_quat[-1] *= -1
+        #invert the quaternion
+        new_quat = quat_inverse(new_quat)
 
     return new_quat
 
