@@ -651,8 +651,8 @@ class ThreespaceSensor:
             method = types.MethodType(command.custom_func, self)
         else:
             #Build the actual method for executing the command
-            code = f"def {command.info.name}(self, *args):\n"
-            code += f"    return self.execute_command(self.commands[{command.info.num}], *args)"
+            code = f"def {command.info.name}(self, *args, **kwargs):\n"
+            code += f"    return self.execute_command(self.commands[{command.info.num}], *args, **kwargs)"
             exec(code, globals(), self.funcs)
             method = types.MethodType(self.funcs[command.info.name], self)
 
