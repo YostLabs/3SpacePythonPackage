@@ -471,16 +471,18 @@ class ThreespaceSensor:
     def __init__(self, com = None, timeout=2, verbose=False, initial_clear_timeout=None):
         if com is None: #Default to attempting to use the serial com class if none is provided
             com = ThreespaceSerialComClass
-        
+        self.verbose = verbose
+
         manually_opened_com = False
         #Auto discover using the supplied com class type
         if inspect.isclass(com) and issubclass(com, ThreespaceComClass):
             new_com = None
+            self.log("Auto-Discovering Sensor")
             for serial_com in com.auto_detect():
                 new_com = serial_com
                 break #Exit after getting 1
             if new_com is None:
-                raise RuntimeError("Failed to auto discover com port")
+                raise RuntimeError("Failed to auto discover com port")   
             self.com = new_com
             manually_opened_com = True
             self.com.open()
@@ -496,11 +498,11 @@ class ThreespaceSensor:
             except:
                 raise ValueError("Failed to create default ThreespaceSerialComClass from parameter:", type(com), com)
 
+        self.log("Configuring sensor communication")
         self.immediate_debug = True #Assume it is on from the start. May cause it to take slightly longer to initialize, but prevents breaking if it is on
         #Callback gives the debug message and sensor object that caused it
         self.__debug_cache: list[str] = [] #Used for storing startup debug messages until sensor state is confirmed
         
-        self.verbose = verbose
         self.debug_callback: Callable[[str, ThreespaceSensor],None] = self.__default_debug_callback
         self.misaligned = False
         self.dirty_cache = False
@@ -511,11 +513,13 @@ class ThreespaceSensor:
         self.is_data_streaming = False
         self.is_log_streaming = False
         self.is_file_streaming = False
+        self.log("Stopping potential streaming")
         self._force_stop_streaming()
         #Clear out the buffer to allow faster initializing
         #Ex: If a large buffer build up due to streaming, especially if using a slower interface like BLE,
         #it may take a while before the entire garbage data can be parsed when checking for bootloader, causing a timeout
-        #even though it would have eventually succeeded        
+        #even though it would have eventually succeeded   
+        self.log("Clearing com")     
         self.__clear_com(initial_clear_timeout)
 
 
@@ -529,19 +533,24 @@ class ThreespaceSensor:
         self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
         self.funcs = {}
 
+        self.log("Checking firmware status")
         try:
             self.__cached_in_bootloader = self.__check_bootloader_status()
             if not self.in_bootloader:
+                self.log("Initializing firmware")
                 self.__firmware_init()
             else:
+                self.log("Initializing bootloader")
                 self.__cache_serial_number(self.bootloader_get_sn())
                 self.__empty_debug_cache()
         #This is just to prevent a situation where instantiating the API creates and fails to release a com class on failure when user catches the exception
         #If user provides the com class, it is up to them to handle its state on error
         except Exception as e:
+            self.log("Failed to initialize sensor")
             if manually_opened_com:
                 self.com.close()
             raise e
+        self.log("Successfully initialized sensor")
 
     #Just a helper for outputting information
     def log(self, *args):
@@ -554,6 +563,7 @@ class ThreespaceSensor:
         data = self.com.read_all()
         if refresh_timeout is None: return
         while len(data) > 0: #Continue until all data is cleared
+            self.log(f"Refresh clear Length: {len(data)}")
             start_time = time.time()
             while time.time() - start_time < refresh_timeout: #Wait up to refresh time for a new message
                 data = self.com.read_all()
@@ -772,6 +782,8 @@ class ThreespaceSensor:
             return f"{value:.10f}"
         elif isinstance(value, bool):
             return int(value)
+        elif isinstance(value, Enum):
+            return str(value.value)
         else:
             return str(value)        
 

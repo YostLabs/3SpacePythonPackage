@@ -92,6 +92,8 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             if not self.__connected and self.error_on_disconnect:
                 self.close()
             return
+        self.event_loop = asyncio.new_event_loop()
+        self.data_read_event = asyncio.Event()
         self.event_loop.run_until_complete(self.__async_open())
         self.max_packet_size = self.client.mtu_size - 3 #-3 to account for the opcode and attribute handle stored in the data packet
         self.__opened = True
@@ -108,6 +110,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         self.event_loop.run_until_complete(self.__async_close())
         self.buffer.clear()
         self.event_loop.close()
+        self.event_loop = None
         self.data_read_event = None
         self.__opened = False
 
