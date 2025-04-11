@@ -498,6 +498,8 @@ class ThreespaceSensor:
             except:
                 raise ValueError("Failed to create default ThreespaceSerialComClass from parameter:", type(com), com)
 
+        self.restart_delay = 0.5
+
         self.log("Configuring sensor communication")
         self.immediate_debug = True #Assume it is on from the start. May cause it to take slightly longer to initialize, but prevents breaking if it is on
         #Callback gives the debug message and sensor object that caused it
@@ -1385,7 +1387,7 @@ class ThreespaceSensor:
         cmd.send_command(self.com)
         self.com.close()
         #TODO: Make this actually wait instead of an arbitrary sleep length
-        time.sleep(0.5) #Give it time to restart
+        time.sleep(self.restart_delay) #Give it time to restart
         self.com.open()
         self.__firmware_init()
 
@@ -1396,7 +1398,7 @@ class ThreespaceSensor:
         cmd = self.commands[THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM]
         cmd.send_command(self.com)
         #TODO: Make this actually wait instead of an arbitrary sleep length
-        time.sleep(0.5) #Give it time to boot into bootloader
+        time.sleep(self.restart_delay) #Give it time to boot into bootloader
         if self.com.reenumerates:
             self.com.close()
             success = self.__attempt_rediscover_self()
@@ -1460,7 +1462,7 @@ class ThreespaceSensor:
     def bootloader_boot_firmware(self):
         if not self.in_bootloader: return
         self.com.write("B".encode())
-        time.sleep(0.5) #Give time to boot into firmware
+        time.sleep(self.restart_delay) #Give time to boot into firmware
         if self.com.reenumerates:
             self.com.close()
             success = self.__attempt_rediscover_self()
@@ -1477,13 +1479,14 @@ class ThreespaceSensor:
         This may take a long time
         """
         self.com.write('S'.encode())
-        if timeout is not None:
-            cached_timeout = self.com.timeout
-            self.com.timeout = timeout
-        response = self.com.read(1)[0]
-        if timeout is not None:
-            self.com.timeout = cached_timeout
-        return response
+
+        start_time = time.perf_counter()
+        response = []
+        while len(response) == 0 and time.perf_counter() - start_time < timeout:
+            response = self.com.read(1)
+        if len(response) == 0:
+            return -1
+        return response[0]
     
     def bootloader_get_info(self):
         self.com.write('I'.encode())
@@ -1493,14 +1496,20 @@ class ThreespaceSensor:
         bootversion = struct.unpack(f">{_3space_format_to_external('I')}", self.com.read(2))[0]
         return ThreespaceBootloaderInfo(memstart, memend, pagesize, bootversion)
 
-    def bootloader_prog_mem(self, bytes: bytearray):
+    def bootloader_prog_mem(self, bytes: bytearray, timeout=5):
         memsize = len(bytes)
         checksum = sum(bytes)
         self.com.write('C'.encode())
         self.com.write(struct.pack(f">{_3space_format_to_external('I')}", memsize))
         self.com.write(bytes)
         self.com.write(struct.pack(f">{_3space_format_to_external('B')}", checksum & 0xFFFF))
-        return self.com.read(1)[0]
+        start_time = time.perf_counter()
+        result = []
+        while len(result) == 0 and time.perf_counter() - start_time < timeout:
+            result = self.com.read(1)
+        if len(result) > 0:
+            return result[0]
+        return -1
 
     def bootloader_get_state(self):
         self.com.write('OO'.encode()) #O is sent twice to compensate for a bug in some versions of the bootloader where the next character is ignored (except for R, do NOT send R after O, it will erase all settings)
