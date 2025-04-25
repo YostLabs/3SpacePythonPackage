@@ -1019,11 +1019,18 @@ class ThreespaceSensor:
         """
         header_len = len(header.raw_binary)
         if header.length > max_data_length:
-            self.log("DATA TOO BIG:", header.length)
+            if not self.misaligned:
+                self.log("DATA TOO BIG:", header.length)
             return False
         data = self.com.peek(header_len + header.length)[header_len:]
-        if len(data) != header.length: return False
+        if len(data) != header.length: 
+            if not self.misaligned:
+                self.log(f"Data Length Mismatch - Got: {len(data)} Expected: {header.length}")
+            return False
         checksum = sum(data) % 256
+        if checksum != header.checksum and not self.misaligned:
+            self.log(f"Checksum Mismatch - Got: {checksum} Expected: {header.checksum}")
+            self.log(f"Data: {data}")
         return checksum == header.checksum
 
     def __await_command(self, cmd: ThreespaceCommand, timeout=2):

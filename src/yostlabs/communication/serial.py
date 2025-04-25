@@ -1,6 +1,7 @@
 from yostlabs.communication.base import *
 import serial
 import serial.tools.list_ports
+import time
 
 
 class ThreespaceSerialComClass(ThreespaceComClass):
@@ -107,7 +108,10 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     
     @timeout.setter
     def timeout(self, timeout: float):
-        self.ser.timeout = timeout    
+        self.ser.timeout = timeout
+        #There is a bug in Windows drivers that requires a delay after setting timeout
+        #When using certain Serial Interfaces
+        time.sleep(0.01) 
 
     @property
     def reenumerates(self) -> bool:

@@ -144,6 +144,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
 
     def __read_all_data(self):
         self.event_loop.run_until_complete(self.__wait_for_callbacks_async())
+        self.data_read_event.clear()
         self.__assert_connected()
 
     def __on_data_received(self, sender: BleakGATTCharacteristic, data: bytearray):
@@ -159,10 +160,10 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     
     async def __await_read(self, timeout_time: int):
         self.__assert_connected()
-        self.data_read_event.clear()
         try:
             async with async_timeout.timeout_at(timeout_time):
                 await self.data_read_event.wait()
+            self.data_read_event.clear()
             return True
         except:
             return False
