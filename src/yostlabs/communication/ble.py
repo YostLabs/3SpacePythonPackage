@@ -238,6 +238,10 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     @property
     def name(self) -> str:
         return self.__name
+    
+    @property
+    def address(self) -> str:
+        return self.client.address    
 
     SCANNER = None
     SCANNER_EVENT_LOOP = None
