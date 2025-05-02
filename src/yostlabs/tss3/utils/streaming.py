@@ -17,6 +17,17 @@ class ThreespaceStreamingStatus(Enum):
     #disable the streaming manager for some reason
     Reset = 4
 
+#Used for when the callback signature changed to allow user data, but maintain backwards compatability
+def _api_compatible_callback(func: Callable):
+    arg_count = func.__code__.co_argcount
+    if hasattr(func, "__self__"): arg_count -= 1 #Do NOT count self
+
+    if arg_count == 1:
+        def without_userdata(status: ThreespaceStreamingStatus, user_data: Any):
+            return func(status)
+        return without_userdata
+    return func
+
 from typing import NamedTuple
 ThreespaceStreamingOption = NamedTuple("ThreespaceStreamingOption", [("cmd", StreamableCommands), ("param", int|None)])
 class ThreespaceStreamingManager:
@@ -44,6 +55,7 @@ class ThreespaceStreamingManager:
         hz: int = None
 
         only_newest: bool = False
+        user_data: Any = None
 
         @property
         def interval(self):
@@ -100,8 +112,8 @@ class ThreespaceStreamingManager:
         self.pausers.add(locker)
         if len(self.pausers) == 1 and self.is_streaming:
             self.__stop_streaming()
-            for callback in self.callbacks:
-                callback(ThreespaceStreamingStatus.Paused)
+            for callback in self.callbacks.values():
+                callback.func(ThreespaceStreamingStatus.Paused, callback.user_data)
         return True
 
     def resume(self, locker: object):
@@ -112,8 +124,8 @@ class ThreespaceStreamingManager:
 
         #Attempt to start again
         if len(self.pausers) == 0:
-            for callback in self.callbacks:
-                callback(ThreespaceStreamingStatus.Resumed)
+            for callback in self.callbacks.values():
+                callback.func(ThreespaceStreamingStatus.Resumed, callback.user_data)
             self.__apply_streaming_settings_and_update_state()
 
     def lock_modifications(self, locker: object):
@@ -138,7 +150,7 @@ class ThreespaceStreamingManager:
         self.block_updates = True
         values = list(self.callbacks.values()) #To prevent concurrent dict modification, cache this
         for cb in values:
-            cb.func(ThreespaceStreamingStatus.Reset)
+            cb.func(ThreespaceStreamingStatus.Reset, cb.user_data)
         self.block_updates = False
         self.lockers.clear()
         self.pausers.clear()
@@ -170,18 +182,18 @@ class ThreespaceStreamingManager:
                 #Let all the callbacks know the data was updated
                 for cb in self.callbacks.values():
                     if cb.only_newest: continue
-                    cb.func(ThreespaceStreamingStatus.Data)
+                    cb.func(ThreespaceStreamingStatus.Data, cb.user_data)
 
                 result = self.sensor.getOldestStreamingPacket()
             
             for cb in self.callbacks.values():
                 if cb.only_newest:
-                    cb.func(ThreespaceStreamingStatus.Data)
-                cb.func(ThreespaceStreamingStatus.DataEnd)
+                    cb.func(ThreespaceStreamingStatus.Data, cb.user_data)
+                cb.func(ThreespaceStreamingStatus.DataEnd, cb.user_data)
 
-    def register_callback(self, callback: Callable[[ThreespaceStreamingStatus],None], hz=None, only_newest=False):
+    def register_callback(self, callback: Callable[[ThreespaceStreamingStatus,Any],None], hz=None, only_newest=False, user_data=None):
         if callback in self.callbacks: return
-        self.callbacks[callback] = ThreespaceStreamingManager.Callback(callback, hz, only_newest)
+        self.callbacks[callback] = ThreespaceStreamingManager.Callback(_api_compatible_callback(callback), hz, only_newest, user_data=user_data)
         self.__update_streaming_speed()
 
     def unregister_callback(self, callback: Callable[[ThreespaceStreamingStatus],None]):
@@ -451,3 +463,4 @@ class ThreespaceStreamingManager:
                 slot_info.append(None)
         
         return slot_info
+    
