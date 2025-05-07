@@ -1,4 +1,5 @@
-from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands, ThreespaceCmdResult, threespaceGetHeaderLabels
+from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands, ThreespaceCmdResult, threespaceGetHeaderLabels, \
+    ThreespaceGetStreamingBatchCommand, threespaceCommandGet
 
 from enum import Enum
 from typing import Any, Callable
@@ -484,3 +485,7 @@ def get_stream_options_from_str(string: str):
         options.append(stream_option)
     
     return options
+
+def stream_options_to_command(options: list[ThreespaceStreamingOption]):
+    commands = [threespaceCommandGet(v.cmd.value) for v in options]
+    return ThreespaceGetStreamingBatchCommand(commands)
