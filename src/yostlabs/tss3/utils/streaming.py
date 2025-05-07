@@ -463,4 +463,24 @@ class ThreespaceStreamingManager:
                 slot_info.append(None)
         
         return slot_info
+
+#Utility functions
+def get_stream_options_from_str(string: str):
+    options = []
+    slots = string.split(',')
+    for slot in slots:
+        slot = slot.split(':')
+        cmd = int(slot[0])
+        if cmd == 255: continue #Ignore 255
+
+        #Get the param if any
+        param = None
+        if len(slot) > 2:
+            raise Exception()
+        if len(slot) == 2:
+            param = int(slot[1])
+        
+        stream_option = ThreespaceStreamingOption(StreamableCommands(cmd), param)
+        options.append(stream_option)
     
+    return options

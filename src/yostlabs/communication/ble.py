@@ -236,7 +236,12 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         return False
     
     @property
-    def name(self) -> str:
+    def name(self) -> str | None:
+        """
+        The name of the device. This may be the Address or the Local Name of the device
+        depending on how discovery was done.
+        May also be None
+        """
         return self.__name
     
     @property
