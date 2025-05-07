@@ -137,7 +137,7 @@ class ThreespaceBinaryParser:
             if "read_size" not in kwargs:
                 raise ValueError("Missing arguement 'read_size' when registering the fileReadBytes command with the binary parser")
             raise NotImplementedError("The fileReadBytes command has yet to be implemented for the ThreespaceBinaryParser")
-        elif cmd.info.num == THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM:
+        elif cmd.info.num == THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM and not isinstance(cmd, ThreespaceGetStreamingBatchCommand):
             if "stream_slots" not in kwargs:
                 raise ValueError("Missing arguement 'stream_slots' when registering the getStreamingBatch command with the binary parser")
             cmd = ThreespaceGetStreamingBatchCommand(kwargs['stream_slots'])
@@ -221,7 +221,6 @@ class ThreespaceBinaryParser:
             return None
         
         if self.header_info.checksum_enabled and not math.isnan(self.__parsing_msg_length): #Can validate checksum before parsing
-            print("Pre validating checksum")
             if not self.__peek_checksum():
                 #Data corruption/Misalignment error
                 if self.verbose and not self.misaligned:
