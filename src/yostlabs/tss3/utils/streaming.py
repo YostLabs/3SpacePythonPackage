@@ -86,9 +86,12 @@ class ThreespaceStreamingManager:
         self.is_streaming = False #Store this seperately to attempt to allow using both the regular streaming and streaming manager via pausing and such
 
         #Set the initial streaming speed
-        self.interval = int(self.sensor.get_settings("stream_interval"))    
+        self.interval = int(self.sensor.get_settings("stream_interval"))   
+        self.desired_interval = self.interval 
 
-        self.dirty = False
+        #Registrations and update rate dirt are handled separately for some situations.
+        #Primarily, we want registration to succeed even if the update can't update the rate.
+        self.dirty_registrations = False
         self.validated = False
 
         #Control variable to manually control when updating happens here
@@ -98,6 +101,14 @@ class ThreespaceStreamingManager:
         #However the functions for interfacing with these are still done in Hz
         self.max_interval = 0xFFFFFFFF
         self.min_interval = 1000000 / 2000
+
+    @property
+    def dirty(self):
+        return self.dirty_registrations or self.dirty_rate
+    
+    @property
+    def dirty_rate(self):
+        return self.desired_interval != self.interval
 
     @property
     def paused(self):
@@ -230,7 +241,11 @@ class ThreespaceStreamingManager:
             
             cmd.registrations.add(owner)
             if immediate_update and self.dirty:
-                return self.__apply_streaming_settings_and_update_state()
+                updated = self.__apply_streaming_settings_and_update_state()
+                if self.dirty_registrations:
+                    return updated
+                else: #The rate was dirty, that does not affect the registration process
+                    return True
             return True
         
         if self.locked: #Wasn't already registered, so don't allow new registrations
@@ -245,7 +260,7 @@ class ThreespaceStreamingManager:
         self.registered_commands[info] = ThreespaceStreamingManager.Command(command, param=param, slot=num_commands_registered)
         self.registered_commands[info].labels = self.sensor.getStreamingLabel(command.value).data
         self.registered_commands[info].registrations.add(owner)
-        self.dirty = True
+        self.dirty_registrations = True
         if immediate_update:
             return self.__apply_streaming_settings_and_update_state()
         return True
@@ -279,7 +294,7 @@ class ThreespaceStreamingManager:
             return
         
         #Remove the command from streaming since nothing owns it anymore
-        self.dirty = True
+        self.dirty_registrations = True
         if immediate_update:
             self.__apply_streaming_settings_and_update_state()
 
@@ -297,7 +312,7 @@ class ThreespaceStreamingManager:
             if owner in registered_command.registrations:
                 registered_command.registrations.remove(owner)
                 if len(registered_command.registrations) == 0:
-                    self.dirty = True
+                    self.dirty_registrations = True
         
         if self.dirty and immediate_update:
             self.__apply_streaming_settings_and_update_state()
@@ -340,7 +355,7 @@ class ThreespaceStreamingManager:
             self.__stop_streaming()
         
         #Clean up any registrations that need removed and activate any that need activated
-        if self.dirty:
+        if self.dirty_registrations:
             to_remove = []
             for k, v in self.registered_commands.items():
                 if len(v.registrations) == 0:
@@ -351,14 +366,15 @@ class ThreespaceStreamingManager:
                 del self.registered_commands[key]
                 if key in self.results:
                     del self.results[key]
-        self.dirty = False
+        self.dirty_registrations = False
 
         if self.num_commands_registered > 0:
             slots_string = self.__build_stream_slots_string()
-            err, num_successes = self.sensor.set_settings(stream_slots=slots_string, stream_interval=self.interval)
+            err, num_successes = self.sensor.set_settings(stream_slots=slots_string, stream_interval=self.desired_interval)
             if err:
                 self.validated = False
                 return False
+            self.interval = self.desired_interval
             if not self.paused and self.enabled: 
                 self.__start_streaming() #Re-enable
         
@@ -373,13 +389,12 @@ class ThreespaceStreamingManager:
                 required_interval = callback.interval
 
         if required_interval is None: #Treat required as current to make sure the current interval is still valid
-            required_interval = self.interval 
+            required_interval = self.desired_interval 
 
         required_interval = min(self.max_interval, max(self.min_interval, required_interval))
-        if required_interval != self.interval:
-            print(f"Updating streaming speed from {1000000 / self.interval}hz to {1000000 / required_interval}hz")
-            self.interval = int(required_interval)
-            self.dirty = True
+        if required_interval != self.desired_interval:
+            print(f"Updating desired speed from {1000000 / self.desired_interval}hz to {1000000 / required_interval}hz")
+            self.desired_interval = int(required_interval)
             self.__apply_streaming_settings_and_update_state()
 
     def __start_streaming(self):
