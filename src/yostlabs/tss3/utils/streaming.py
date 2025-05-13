@@ -381,7 +381,9 @@ class ThreespaceStreamingManager:
         self.validated = True
         return True
 
-    def __update_streaming_speed(self):        
+    def __update_streaming_speed(self): 
+        if self.locked: return #Don't update the desired speed if modifications are locked
+
         required_interval = None
         for callback in self.callbacks.values():
             if callback.interval is None: continue
