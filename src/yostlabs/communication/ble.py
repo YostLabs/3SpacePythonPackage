@@ -1,5 +1,6 @@
 import asyncio
 import async_timeout
+import threading
 import time
 from bleak import BleakScanner, BleakClient
 from bleak.backends.device import BLEDevice
@@ -24,10 +25,23 @@ MANUFACTURER_NAME_STRING_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
 
 class TssBLENoConnectionError(Exception): ...
 
+def ylBleEventLoopThread(loop: asyncio.AbstractEventLoop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
 from yostlabs.communication.base import *
 class ThreespaceBLEComClass(ThreespaceComClass):
 
     DEFAULT_TIMEOUT = 2
+    EVENT_LOOP = None
+    EVENT_LOOP_THREAD = None
+
+    @classmethod
+    def __lazy_event_loop_init(cls):
+        if cls.EVENT_LOOP is None:
+            cls.EVENT_LOOP = asyncio.new_event_loop()
+            cls.EVENT_LOOP_THREAD = threading.Thread(target=ylBleEventLoopThread, args=(cls.EVENT_LOOP,), daemon=True)
+            cls.EVENT_LOOP_THREAD.start()
 
     def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=5, error_on_disconnect=True):
         """
@@ -39,6 +53,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         error_on_disconnect : If trying to read while the sensor is disconnected, an exception will be generated. This may be undesirable \
         if it is expected that the sensor will frequently go in and out of range and the user wishes to preserve data (such as streaming)
         """
+        self.__lazy_event_loop_init()
         bleak_options = { "timeout": discovery_timeout, "disconnected_callback": self.__on_disconnect }
         if isinstance(ble, BleakClient):    #Actual client
             self.client = ble
@@ -46,7 +61,8 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         elif isinstance(ble, str): 
             if discover_name: #Local Name stirng
                 self.__lazy_init_scanner()
-                device = ThreespaceBLEComClass.SCANNER_EVENT_LOOP.run_until_complete(BleakScanner.find_device_by_name(ble, timeout=discovery_timeout))
+                future = asyncio.run_coroutine_threadsafe(BleakScanner.find_device_by_name(ble, timeout=discovery_timeout), self.EVENT_LOOP)
+                device = future.result()
                 if device is None:
                     raise BleakDeviceNotFoundError(ble)
                 self.client = BleakClient(device, **bleak_options)
@@ -63,26 +79,27 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         self.__timeout = self.DEFAULT_TIMEOUT
 
         self.buffer = bytearray()
-        self.event_loop: asyncio.AbstractEventLoop = None
         self.data_read_event: asyncio.Event = None
 
         #Default to 20, will update on open
         self.max_packet_size = 20
         
         self.error_on_disconnect = error_on_disconnect
-        #is_connected is different from open.
-        #check_open() should return is_connected as that is what the user likely wants.
-        #open is whether or not the client will auto connect to the device when rediscovered.
-        #This file is set up to automatically close the connection if a method is called and is_connected is False
-        #This behavior might be specific to Windows.
+
+        #is_connected is different from open. Open is the cached idea of whether the BLE connection should be active,
+        #while is_connected is the actual state of the connection. Basically, opened means a connection is desired, while
+        #is_connected means it is actually connected.
         self.__opened = False
+
         #client.is_connected is really slow (noticeable when called in bulk, which happens do to the assert_connected)... 
         #So instead using the disconnected callback and this variable to manage tracking the state without the delay
         self.__connected = False
+
         #Writing functions will naturally throw an exception if disconnected. Reading ones don't because they use notifications rather
         #then direct reads. This means reading functions will need to assert the connection status but writing does not.
 
     async def __async_open(self):
+        self.data_read_event = asyncio.Event()
         await self.client.connect()
         await self.client.start_notify(NORDIC_UART_TX_UUID, self.__on_data_received)
 
@@ -92,9 +109,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             if not self.__connected and self.error_on_disconnect:
                 self.close()
             return
-        self.event_loop = asyncio.new_event_loop()
-        self.data_read_event = asyncio.Event()
-        self.event_loop.run_until_complete(self.__async_open())
+        asyncio.run_coroutine_threadsafe(self.__async_open(), self.EVENT_LOOP).result()
         self.max_packet_size = self.client.mtu_size - 3 #-3 to account for the opcode and attribute handle stored in the data packet
         self.__opened = True
         self.__connected = True
@@ -104,14 +119,12 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         #the disconnect call will hang on Windows. It seems similar to this issue: https://github.com/hbldh/bleak/issues/1359
         await asyncio.sleep(0.5)
         await self.client.disconnect()
+        self.data_read_event = None
+        self.buffer.clear()
 
     def close(self):
         if not self.__opened: return
-        self.event_loop.run_until_complete(self.__async_close())
-        self.buffer.clear()
-        self.event_loop.close()
-        self.event_loop = None
-        self.data_read_event = None
+        asyncio.run_coroutine_threadsafe(self.__async_close(), self.EVENT_LOOP).result()
         self.__opened = False
 
     def __on_disconnect(self, client: BleakClient):
@@ -125,27 +138,9 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             raise TssBLENoConnectionError(f"{self.name} is not connected")
 
     def check_open(self):
-        #Checking this, while slow, isn't much difference in speed as allowing the disconnect callback to update via
-        #running the empty async function. So just going to use this here. Repeated calls to check_open are not a good
-        #idea from a speed perspective until a fix is found. We will probably make a version of this BLEComClass that uses
-        #a background thread for asyncio to allow for speed increases.
-        self.__connected = self.client.is_connected
         if not self.__connected and self.__opened and self.error_on_disconnect:
             self.close()
         return self.__connected
-
-    #Bleak does run a thread to read data on notification after calling start_notify, however on notification
-    #it schedules a callback using loop.call_soon_threadsafe() so the actual notification can't happen unless we
-    #run the event loop. Therefore, this async function that does nothing is used just to trigger an event loop updated
-    #so the read callbacks __on_data_received can occur
-    @staticmethod
-    async def __wait_for_callbacks_async():
-        pass
-
-    def __read_all_data(self):
-        self.event_loop.run_until_complete(self.__wait_for_callbacks_async())
-        self.data_read_event.clear()
-        self.__assert_connected()
 
     def __on_data_received(self, sender: BleakGATTCharacteristic, data: bytearray):
         self.buffer += data
@@ -155,7 +150,9 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         start_index = 0
         while start_index < len(bytes):
             end_index = min(len(bytes), start_index + self.max_packet_size) #Can only send max_packet_size data per call to write_gatt_char
-            self.event_loop.run_until_complete(self.client.write_gatt_char(NORDIC_UART_RX_UUID, bytes[start_index:end_index], response=False))
+            asyncio.run_coroutine_threadsafe(
+                self.client.write_gatt_char(NORDIC_UART_RX_UUID, bytes[start_index:end_index], response=False),
+                self.EVENT_LOOP).result()
             start_index = end_index
     
     async def __await_read(self, timeout_time: int):
@@ -169,19 +166,19 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             return False
 
     async def __await_num_bytes(self, num_bytes: int):
-        start_time = self.event_loop.time()
-        while len(self.buffer) < num_bytes and self.event_loop.time() - start_time < self.timeout:
+        start_time = self.EVENT_LOOP.time()
+        while len(self.buffer) < num_bytes and self.EVENT_LOOP.time() - start_time < self.timeout:
             await self.__await_read(start_time + self.timeout)
 
     def read(self, num_bytes: int):
-        self.event_loop.run_until_complete(self.__await_num_bytes(num_bytes))
+        asyncio.run_coroutine_threadsafe(self.__await_num_bytes(num_bytes), self.EVENT_LOOP).result()
         num_bytes = min(num_bytes, len(self.buffer))
         data = self.buffer[:num_bytes]
         del self.buffer[:num_bytes]
         return data
 
     def peek(self, num_bytes: int):
-        self.event_loop.run_until_complete(self.__await_num_bytes(num_bytes))
+        asyncio.run_coroutine_threadsafe(self.__await_num_bytes(num_bytes), self.EVENT_LOOP).result()
         num_bytes = min(num_bytes, len(self.buffer))
         data = self.buffer[:num_bytes]
         return data        
@@ -189,13 +186,13 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     #Reads until the pattern is received, max_length is exceeded, or timeout occurs
     async def __await_pattern(self, pattern: bytes, max_length: int = None):
         if max_length is None: max_length = float('inf')
-        start_time = self.event_loop.time()
-        while pattern not in self.buffer and self.event_loop.time() - start_time < self.timeout and len(self.buffer) < max_length:
+        start_time = self.EVENT_LOOP.time()
+        while pattern not in self.buffer and self.EVENT_LOOP.time() - start_time < self.timeout and len(self.buffer) < max_length:
             await self.__await_read(start_time + self.timeout)
         return pattern in self.buffer
 
     def read_until(self, expected: bytes) -> bytes:
-        self.event_loop.run_until_complete(self.__await_pattern(expected))
+        asyncio.run_coroutine_threadsafe(self.__await_pattern(expected), self.EVENT_LOOP).result()
         if expected in self.buffer: #Found the pattern
             length = self.buffer.index(expected) + len(expected)
             result = self.buffer[:length]
@@ -207,7 +204,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         return result
 
     def peek_until(self, expected: bytes, max_length: int = None) -> bytes:
-        self.event_loop.run_until_complete(self.__await_pattern(expected, max_length=max_length))
+        asyncio.run_coroutine_threadsafe(self.__await_pattern(expected, max_length=max_length), self.EVENT_LOOP).result()
         if expected in self.buffer:
             length = self.buffer.index(expected) + len(expected)
         else:
@@ -220,7 +217,6 @@ class ThreespaceBLEComClass(ThreespaceComClass):
 
     @property
     def length(self):
-        self.__read_all_data() #Gotta update the data before knowing the length
         return len(self.buffer) 
 
     @property
@@ -249,7 +245,6 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         return self.client.address    
 
     SCANNER = None
-    SCANNER_EVENT_LOOP = None
 
     SCANNER_CONTINOUS = False   #Controls if scanning will continously run
     SCANNER_TIMEOUT = 5         #Controls the scanners timeout
@@ -261,9 +256,13 @@ class ThreespaceBLEComClass(ThreespaceComClass):
 
     @classmethod
     def __lazy_init_scanner(cls):
+        cls.__lazy_event_loop_init()
         if cls.SCANNER is None:
-            cls.SCANNER = BleakScanner(detection_callback=cls.__detection_callback, service_uuids=[NORDIC_UART_SERVICE_UUID])
-            cls.SCANNER_EVENT_LOOP = asyncio.new_event_loop()
+            #Scanner should be created inside of the Async Context that will use it
+            async def create_scanner():
+                cls.SCANNER = BleakScanner(detection_callback=cls.__detection_callback, service_uuids=[NORDIC_UART_SERVICE_UUID])
+            asyncio.run_coroutine_threadsafe(create_scanner(), cls.EVENT_LOOP).result()
+            
 
     @classmethod
     def __detection_callback(cls, device: BLEDevice, adv: AdvertisementData):
@@ -281,8 +280,10 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         """
         cls.__lazy_init_scanner()
         cls.SCANNER_CONTINOUS = continous
-        if continous: cls.SCANNER_EVENT_LOOP.run_until_complete(cls.SCANNER.start())
-        else: cls.SCANNER_EVENT_LOOP.run_until_complete(cls.SCANNER.stop())
+        if continous: 
+            asyncio.run_coroutine_threadsafe(cls.SCANNER.start(), cls.EVENT_LOOP).result()
+        else: 
+            asyncio.run_coroutine_threadsafe(cls.SCANNER.stop(), cls.EVENT_LOOP).result()
 
     @classmethod
     def update_nearby_devices(cls):
@@ -292,7 +293,6 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         cls.__lazy_init_scanner()
         if cls.SCANNER_CONTINOUS:
             #Allow the callbacks for nearby devices to trigger
-            cls.SCANNER_EVENT_LOOP.run_until_complete(cls.__wait_for_callbacks_async())
             #Remove expired devices
             cur_time = time.time()
             to_remove = [] #Avoiding concurrent list modification
@@ -308,10 +308,10 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             start_time = time.time()
             end_time = cls.SCANNER_TIMEOUT or float('inf')
             end_count = cls.SCANNER_FIND_COUNT or float('inf')
-            cls.SCANNER_EVENT_LOOP.run_until_complete(cls.SCANNER.start())
+            asyncio.run_coroutine_threadsafe(cls.SCANNER.start(), cls.EVENT_LOOP).result()
             while time.time() - start_time < end_time and len(cls.discovered_devices) < end_count:
-                cls.SCANNER_EVENT_LOOP.run_until_complete(cls.__wait_for_callbacks_async())
-            cls.SCANNER_EVENT_LOOP.run_until_complete(cls.SCANNER.stop())
+                time.sleep(0)
+            asyncio.run_coroutine_threadsafe(cls.SCANNER.stop(), cls.EVENT_LOOP).result()
         
         return cls.discovered_devices
     
