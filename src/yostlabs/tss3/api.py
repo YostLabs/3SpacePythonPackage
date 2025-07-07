@@ -609,13 +609,13 @@ class ThreespaceSensor:
         self.streaming_packet_size = 0
         self._force_stop_streaming()
 
-        #Now reinitialize the cached settings
-        self.__cache_header_settings()
-        self.__cache_streaming_settings()
-
         self.__cache_serial_number(int(self.get_settings("serial_number"), 16))
         self.__empty_debug_cache()
         self.immediate_debug = int(self.get_settings("debug_mode")) == 1 #Needed for some startup processes when restarting
+
+        #Now reinitialize the cached settings
+        self.__cache_header_settings()
+        self.__cache_streaming_settings()
 
     def __initialize_commands(self):
         self.commands: list[ThreespaceCommand] = [None] * 256
@@ -1007,6 +1007,7 @@ class ThreespaceSensor:
         header = ThreespaceHeader.from_bytes(header, self.header_info)
         return header
 
+    #TODO: max_data_length is not sufficient. Need MINIMUM length as well. Can have a situation where len = 0 and checksum = 0
     def __peek_checksum(self, header: ThreespaceHeader, max_data_length=4096):
         """
         Using a header that contains the checksum and data length, calculate the checksum of the expected
@@ -1100,7 +1101,7 @@ class ThreespaceSensor:
                     self.misaligned = False
                     return THREESPACE_UPDATE_COMMAND_PARSED
             elif self.is_log_streaming and header.echo == THREESPACE_FILE_READ_BYTES_COMMAND_NUM:
-                if not blocking: 
+                if not blocking:
                     expected_output_size = len(header.raw_binary) + min(header.length, THREESPACE_LIVE_LOG_STREAM_MAX_PACKET_SIZE)
                     if self.com.length < expected_output_size: return THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA
                 if checksum_match := self.__peek_checksum(header, max_data_length=THREESPACE_LIVE_LOG_STREAM_MAX_PACKET_SIZE):
