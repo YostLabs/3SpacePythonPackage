@@ -100,7 +100,7 @@ class ThreespaceCommand:
                     response = response[size:]
                 else: #Strings are special, find the null terminator
                     str_len = response.index(0)
-                    output.append(struct.unpack(f"<{str_len}s", response[str_len])[0])
+                    output.append(struct.unpack(f"<{str_len}s", response[:str_len])[0])
                     response = response[str_len + 1:] #+1 to skip past the null terminator character too
         else: #Fast parse because no strings
             output.extend(struct.unpack(f"<{self.out_format}", response[:self.info.out_size]))
@@ -162,7 +162,7 @@ class ThreespaceGetStreamingBatchCommand(ThreespaceCommand):
     def set_stream_slots(self, streaming_slots: list[ThreespaceCommand]):
         self.commands = streaming_slots
         self.out_format = ''.join(slot.out_format for slot in streaming_slots if slot is not None)
-        self.info.out_size = struct.calcsize(f"<{self.out_format}")
+        self.info.out_size = sum(slot.info.out_size for slot in streaming_slots if slot is not None)
 
     def parse_response(self, response: bytes):
         data = []
@@ -393,6 +393,8 @@ class StreamableCommands(Enum):
     GetCorrectedAccelVec = 55
     GetCorrectedMagVec = 56
 
+    GetDateTime = 63
+
     GetRawGyroRate = 65
     GetRawAccelVec = 66
     GetRawMagVec = 67
@@ -401,8 +403,10 @@ class StreamableCommands(Enum):
     GetEeptsNewestStep = 71
     GetEeptsNumStepsAvailable = 72
 
+    GetDateTimeString = 93
     GetTimestamp = 94
 
+    GetBatteryCurrent = 200
     GetBatteryVoltage = 201
     GetBatteryPercent = 202
     GetBatteryStatus = 203
@@ -669,6 +673,9 @@ class ThreespaceSensor:
             method = types.MethodType(self.funcs[command.info.name], self)
 
         setattr(self, command.info.name, method)
+
+    def has_command(self, command: ThreespaceCommand):
+        return self.commands[command.info.num] is not None 
 
     def __get_command(self, command_name: str):
         for command in self.commands:
@@ -1205,9 +1212,9 @@ class ThreespaceSensor:
 
     def startStreaming(self) -> ThreespaceCmdResult[None]: ...
     def __startStreaming(self) -> ThreespaceCmdResult[None]:
-        if self.is_data_streaming: return
-        self.streaming_packets.clear()
-        self.__cache_streaming_settings()
+        if not self.is_data_streaming:
+            self.streaming_packets.clear()
+            self.__cache_streaming_settings()
 
         result = self.execute_command(self.commands[THREESPACE_START_STREAMING_COMMAND_NUM])
         self.is_data_streaming = True
@@ -1633,6 +1640,7 @@ class ThreespaceSensor:
     def getCorrectedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...    
     def enableMSC(self) -> ThreespaceCmdResult[None]: ...
     def disableMSC(self) -> ThreespaceCmdResult[None]: ...
+    def getDateTimeString(self) -> ThreespaceCmdResult[str]: ...
     def getTimestamp(self) -> ThreespaceCmdResult[int]: ...
     def getBatteryVoltage(self) -> ThreespaceCmdResult[float]: ...
     def getBatteryPercent(self) -> ThreespaceCmdResult[int]: ...
@@ -1761,6 +1769,7 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("stopStreaming", THREESPACE_STOP_STREAMING_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__stopStreaming),
     ThreespaceCommand("pauseLogStreaming", 87, "b", ""),
     
+    ThreespaceCommand("getDateTimeString", 93, "", "S"),
     ThreespaceCommand("getTimestamp", 94, "", "U"),
 
     ThreespaceCommand("tareWithCurrentOrientation", 96, "", ""),
@@ -1789,6 +1798,7 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("fileStartStream", 180, "", "U", custom_func=ThreespaceSensor._ThreespaceSensor__fileStartStream),
     ThreespaceCommand("fileStopStream", 181, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__fileStopStream),
 
+    ThreespaceCommand("getBatteryCurrent", 200, "", "I"),
     ThreespaceCommand("getBatteryVoltage", 201, "", "f"),
     ThreespaceCommand("getBatteryPercent", 202, "", "b"),
     ThreespaceCommand("getBatteryStatus", 203, "", "b"),
