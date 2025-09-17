@@ -115,37 +115,42 @@ class ThreespaceCommand:
         raw = bytearray([])
         if self.info.num_out_params == 0: return None, raw
         output = []
-        for c in self.out_format:
-            if c != 's':
-                format_str = f"<{c}"
-                size = struct.calcsize(format_str)
-                response = com.read(size)
-                raw += response
-                if len(response) != size:
-                    if verbose:
-                        print(f"Failed to read {c} type. Aborting...")
-                    return None
-                output.append(struct.unpack(format_str, response)[0])
-            else: #Strings are special, find the null terminator
-                response = com.read(1)
-                raw += response
-                if len(response) != 1:
-                    if verbose:
-                        print(f"Failed to read string. Aborting...")
-                    return None
-                byte = chr(response[0])
-                string = ""
-                while byte != '\0':
-                    string += byte
-                    #Get next byte
-                    response = com.read(1)
+
+        if not math.isnan(self.info.out_size):
+            #Fast read and parse
+            response = com.read(self.info.out_size)
+            raw += response
+            if len(response) != self.info.out_size:
+                if verbose:
+                    print(f"Failed to read {self.info.name} {len(response)} / {self.info.out_size}. Aborting...")
+            output.extend(struct.unpack(f"<{self.out_format}", response))
+        else:
+            #There is a string, so go element by element
+            i = 0
+            while i < len(self.out_format):
+                c = self.out_format[i]
+                if c != 's':
+                    end_index = self.out_format.find('s', i)
+                    if end_index == -1: end_index = len(self.out_format)
+                    format_str = f"<{self.out_format[i:end_index]}"
+                    size = struct.calcsize(format_str)
+                    response = com.read(size)
                     raw += response
-                    if len(response) != 1:
+                    if len(response) != size:
+                        if verbose:
+                            print(f"Failed to read {c} type. Aborting...")
+                        return None
+                    output.append(struct.unpack(format_str, response)[0])
+                    i = end_index
+                else:
+                    response = com.read_until(b'\0')
+                    raw += response
+                    if response[-1] != 0:
                         if verbose:
                             print(f"Failed to read string. Aborting...")
                         return None
-                    byte = chr(response[0])
-                output.append(string)
+                    output.append(response[:-1].decode())
+                    i += 1
         
         if self.info.num_out_params == 1:
             return output[0], raw
@@ -180,9 +185,8 @@ class ThreespaceGetStreamingBatchCommand(ThreespaceCommand):
         raw_response = bytearray([])
         for command in self.commands:
             if command is None: continue
-            binary = com.read(command.info.out_size)
-            raw_response += binary
-            out = command.parse_response(binary)
+            out, raw = command.read_command(com, verbose=verbose)
+            raw_response += raw
             response.append(out)
         
         return response, raw_response
