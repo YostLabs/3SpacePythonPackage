@@ -245,6 +245,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         return self.client.address    
 
     SCANNER = None
+    SCANNER_LOCK = None
 
     SCANNER_CONTINOUS = False   #Controls if scanning will continously run
     SCANNER_TIMEOUT = 5         #Controls the scanners timeout
@@ -258,15 +259,18 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     def __lazy_init_scanner(cls):
         cls.__lazy_event_loop_init()
         if cls.SCANNER is None:
+            cls.SCANNER_LOCK = threading.Lock()
             #Scanner should be created inside of the Async Context that will use it
             async def create_scanner():
                 cls.SCANNER = BleakScanner(detection_callback=cls.__detection_callback, service_uuids=[NORDIC_UART_SERVICE_UUID])
             asyncio.run_coroutine_threadsafe(create_scanner(), cls.EVENT_LOOP).result()
+
             
 
     @classmethod
     def __detection_callback(cls, device: BLEDevice, adv: AdvertisementData):
-        cls.discovered_devices[device.address] = {"device": device, "adv": adv, "last_found": time.time()}
+        with cls.SCANNER_LOCK:
+            cls.discovered_devices[device.address] = {"device": device, "adv": adv, "last_found": time.time()}
     
     @classmethod
     def set_scanner_continous(cls, continous: bool):
@@ -292,16 +296,16 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         """
         cls.__lazy_init_scanner()
         if cls.SCANNER_CONTINOUS:
-            #Allow the callbacks for nearby devices to trigger
-            #Remove expired devices
-            cur_time = time.time()
-            to_remove = [] #Avoiding concurrent list modification
-            for device in cls.discovered_devices:
-                if cur_time - cls.discovered_devices[device]["last_found"] > cls.SCANNER_EXPIRATION_TIME:
-                    to_remove.append(device) 
-            for device in to_remove:
-                del cls.discovered_devices[device]
-
+            with cls.SCANNER_LOCK:
+                #Remove expired devices
+                cur_time = time.time()
+                to_remove = [] #Avoiding concurrent list modification
+                for device in cls.discovered_devices:
+                    if cur_time - cls.discovered_devices[device]["last_found"] > cls.SCANNER_EXPIRATION_TIME:
+                        to_remove.append(device) 
+                for device in to_remove:
+                    del cls.discovered_devices[device]
+                discovered = cls.discovered_devices.copy()
         else:
             #Mark all devices as invalid before searching for nearby devices
             cls.discovered_devices.clear()
@@ -312,15 +316,17 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             while time.time() - start_time < end_time and len(cls.discovered_devices) < end_count:
                 time.sleep(0)
             asyncio.run_coroutine_threadsafe(cls.SCANNER.stop(), cls.EVENT_LOOP).result()
-        
-        return cls.discovered_devices
+            discovered = cls.discovered_devices.copy()
+        return discovered
     
     @classmethod
     def get_discovered_nearby_devices(cls):
         """
         A helper to get a copy of the discovered devices
         """
-        return cls.discovered_devices.copy()
+        with cls.SCANNER_LOCK:
+            discovered = cls.discovered_devices.copy()
+        return discovered
 
     @staticmethod
     def auto_detect() -> Generator["ThreespaceBLEComClass", None, None]:
@@ -330,5 +336,6 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         """
         cls = ThreespaceBLEComClass
         cls.update_nearby_devices()
-        for device_info in cls.discovered_devices.values():
-            yield(ThreespaceBLEComClass(device_info["device"]))
+        with cls.SCANNER_LOCK:
+            for device_info in cls.discovered_devices.values():
+                yield(ThreespaceBLEComClass(device_info["device"]))
