@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "yostlabs"
 #If uploading again on the same day, add a fourth number
-version = "2025.05.14"
+version = "2025.09.17"
 authors = [
   { name="Yost Labs Inc.", email="techsupport@yostlabs.com" },
   { name="Andy Riedlinger", email="techsupport@yostlabs.com" },
@@ -23,7 +23,8 @@ keywords = ["3space", "threespace", "yost"]
 dependencies = [
   "pyserial",
   "numpy",
-  "bleak"
+  "bleak",
+  "async-timeout"
 ]
 
 [project.urls]
