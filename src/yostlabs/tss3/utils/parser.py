@@ -27,7 +27,7 @@ class ThreespaceBufferInputStream(ThreespaceInputStream):
         length = self.buffer.index(expected) + len(expected)
         result = self.buffer[:length]
         del self.buffer[:length]
-        raise result
+        return result
 
     """Allows reading without removing the data from the buffer"""
     def peek(self, num_bytes) -> bytes:
