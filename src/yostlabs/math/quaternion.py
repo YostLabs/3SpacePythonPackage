@@ -51,6 +51,15 @@ def quat_from_axis_angle(axis: list[float], angle: float):
     quat.append(math.cos(angle / 2))
     return quat
 
+#There are multiple valid quats that can be returned by this. The intention of this function
+#is to be able to rotate an arrow by the quat such that it points the correct direction. The rotation
+#of that arrow along its axis may differ though
+def quat_from_one_vector(vec: list[float]):
+    vec = _vec.vec_normalize(vec)
+    perpendicular = _vec.vec_normalize(_vec.vec_cross([0, 0, 1], vec))
+    angle = math.acos(_vec.vec_dot([0, 0, 1], vec))
+    return quat_from_axis_angle(perpendicular, angle)
+
 def quat_from_two_vectors(forward: list[float], down: list[float]):
     """
     This function requires two orthogonal vectors to work
