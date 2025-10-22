@@ -421,6 +421,8 @@ class StreamableCommands(Enum):
     GetGpsHdop = 218
     GetGpsSattelites = 219
 
+    GetLedColor = 238
+
     GetButtonState = 250
 
 THREESPACE_AWAIT_COMMAND_FOUND = 0
@@ -1674,7 +1676,8 @@ class ThreespaceSensor:
     def getStreamingLabel(self, cmd_num: int) -> ThreespaceCmdResult[str]: ...
     def setCursor(self, cursor_index: int) -> ThreespaceCmdResult[None]: ...
     def getLastLogCursorInfo(self) -> ThreespaceCmdResult[tuple[int,str]]: ...
-    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]: ...           
+    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]: ...  
+    def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...           
 
 THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM = 84
 THREESPACE_START_STREAMING_COMMAND_NUM = 85
@@ -1816,6 +1819,8 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("commitSettings", 225, "", ""),
     ThreespaceCommand("softwareReset", THREESPACE_SOFTWARE_RESET_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__softwareReset),
     ThreespaceCommand("enterBootloader", THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__enterBootloader),
+
+    ThreespaceCommand("getLedColor", 238, "", "fff"),
 
     ThreespaceCommand("getButtonState", 250, "", "b"),
 ]
