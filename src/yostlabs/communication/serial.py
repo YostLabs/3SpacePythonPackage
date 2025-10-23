@@ -3,13 +3,21 @@ import serial
 import serial.tools.list_ports
 import time
 
-
 class ThreespaceSerialComClass(ThreespaceComClass):
-
     PID_V3_MASK = 0x3000
-    PID_BOOTLOADER = 0x1000
 
     VID = 0x2476
+
+    PID_BOOTLOADER = 0x1000
+    PID_EMBED = 0x3040
+    PID_DL = 0x3050
+
+    PID_TO_STR_DICT = {
+        PID_EMBED: "EM",
+        PID_DL: "DL",
+        PID_BOOTLOADER: "BOOT"
+    }
+
 
     DEFAULT_BAUDRATE = 115200
     DEFAULT_TIMEOUT = 2
@@ -21,8 +29,6 @@ class ThreespaceSerialComClass(ThreespaceComClass):
             self.ser = serial.Serial(ser, baudrate=ThreespaceSerialComClass.DEFAULT_BAUDRATE, timeout=ThreespaceSerialComClass.DEFAULT_TIMEOUT)
         else:
             raise TypeError("Invalid type for creating a ThreespaceSerialComClass:", type(ser), ser)
-
-        self.ser = ser
 
         self.peek_buffer = bytearray()
         self.peek_length = 0
@@ -120,6 +126,17 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     @property
     def name(self) -> str:
         return self.ser.port
+    
+    @property
+    def suffix(self) -> str:
+        return self.pid_to_str(self.get_port_info().pid) 
+    
+    def get_port_info(self):
+        ports = serial.tools.list_ports.comports()
+        for port in ports:
+            if port.device == self.ser.port:
+                return port
+        return None
 
     #This is not part of the ThreespaceComClass interface, but is useful as a utility for those directly using the ThreespaceSerialComClass
     @staticmethod 
@@ -143,3 +160,8 @@ class ThreespaceSerialComClass(ThreespaceComClass):
                 ser = serial.Serial(None, baudrate=default_baudrate, timeout=default_timeout) #By setting port as None, can create an object without immediately opening the port
                 ser.port = port.device #Now assign the port, allowing the serial object to exist without being opened yet
                 yield ThreespaceSerialComClass(ser)
+
+    @classmethod
+    def pid_to_str(cls, pid):
+        if pid not in cls.PID_TO_STR_DICT: return None
+        return cls.PID_TO_STR_DICT[pid]
