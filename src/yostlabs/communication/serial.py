@@ -1,6 +1,7 @@
 from yostlabs.communication.base import *
 import serial
 import serial.tools.list_ports
+from serial.tools.list_ports_common import ListPortInfo
 import time
 
 class ThreespaceSerialComClass(ThreespaceComClass):
@@ -26,7 +27,8 @@ class ThreespaceSerialComClass(ThreespaceComClass):
         if isinstance(ser, serial.Serial):
             self.ser = ser
         elif isinstance(ser, str):
-            self.ser = serial.Serial(ser, baudrate=ThreespaceSerialComClass.DEFAULT_BAUDRATE, timeout=ThreespaceSerialComClass.DEFAULT_TIMEOUT)
+            self.ser = serial.Serial(None, baudrate=ThreespaceSerialComClass.DEFAULT_BAUDRATE, timeout=ThreespaceSerialComClass.DEFAULT_TIMEOUT)
+            self.ser.port = ser
         else:
             raise TypeError("Invalid type for creating a ThreespaceSerialComClass:", type(ser), ser)
 
@@ -138,13 +140,18 @@ class ThreespaceSerialComClass(ThreespaceComClass):
                 return port
         return None
 
+    @staticmethod
+    def is_threespace_port(port: ListPortInfo):
+        cls = ThreespaceSerialComClass
+        return port.vid == cls.VID and (port.pid & cls.PID_V3_MASK == cls.PID_V3_MASK or port.pid == cls.PID_BOOTLOADER)
+
     #This is not part of the ThreespaceComClass interface, but is useful as a utility for those directly using the ThreespaceSerialComClass
     @staticmethod 
     def enumerate_ports():
         cls = ThreespaceSerialComClass
         ports = serial.tools.list_ports.comports()
         for port in ports:
-            if port.vid == cls.VID and (port.pid & cls.PID_V3_MASK == cls.PID_V3_MASK or port.pid == cls.PID_BOOTLOADER): 
+            if cls.is_threespace_port(port):
                 yield port
 
     @staticmethod
@@ -156,12 +163,12 @@ class ThreespaceSerialComClass(ThreespaceComClass):
         cls = ThreespaceSerialComClass
         ports = serial.tools.list_ports.comports()
         for port in ports:
-            if port.vid == cls.VID and (port.pid & cls.PID_V3_MASK == cls.PID_V3_MASK or port.pid == cls.PID_BOOTLOADER): 
+            if cls.is_threespace_port(port):
                 ser = serial.Serial(None, baudrate=default_baudrate, timeout=default_timeout) #By setting port as None, can create an object without immediately opening the port
                 ser.port = port.device #Now assign the port, allowing the serial object to exist without being opened yet
                 yield ThreespaceSerialComClass(ser)
 
     @classmethod
     def pid_to_str(cls, pid):
-        if pid not in cls.PID_TO_STR_DICT: return None
+        if pid not in cls.PID_TO_STR_DICT: return "Unknown"
         return cls.PID_TO_STR_DICT[pid]
