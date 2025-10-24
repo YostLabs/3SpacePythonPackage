@@ -12,11 +12,13 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     PID_BOOTLOADER = 0x1000
     PID_EMBED = 0x3040
     PID_DL = 0x3050
+    PID_LX = 0x3090
 
     PID_TO_STR_DICT = {
         PID_EMBED: "EM",
         PID_DL: "DL",
-        PID_BOOTLOADER: "BOOT"
+        PID_BOOTLOADER: "BOOT",
+        PID_LX: "LX"
     }
 
 
