@@ -7,6 +7,7 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakDeviceNotFoundError
+from dataclasses import dataclass
 
 #Services
 NORDIC_UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -23,6 +24,12 @@ HARDWARE_REVISION_STRING_UUID = "00002a27-0000-1000-8000-00805f9b34fb"
 SERIAL_NUMBER_STRING_UUID = "00002a25-0000-1000-8000-00805f9b34fb"
 MANUFACTURER_NAME_STRING_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
 
+@dataclass
+class ThreespaceBLENordicUartProfile:
+    SERVICE_UUID: str
+    RX_UUID: str
+    TX_UUID: str
+
 class TssBLENoConnectionError(Exception): ...
 
 def ylBleEventLoopThread(loop: asyncio.AbstractEventLoop):
@@ -36,6 +43,9 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     EVENT_LOOP = None
     EVENT_LOOP_THREAD = None
 
+    DEFAULT_PROFILE = ThreespaceBLENordicUartProfile(NORDIC_UART_SERVICE_UUID, NORDIC_UART_RX_UUID, NORDIC_UART_TX_UUID)
+    REGISTERED_PROFILES: list[ThreespaceBLENordicUartProfile] = [DEFAULT_PROFILE]
+
     @classmethod
     def __lazy_event_loop_init(cls):
         if cls.EVENT_LOOP is None:
@@ -43,7 +53,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             cls.EVENT_LOOP_THREAD = threading.Thread(target=ylBleEventLoopThread, args=(cls.EVENT_LOOP,), daemon=True)
             cls.EVENT_LOOP_THREAD.start()
 
-    def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=5, error_on_disconnect=True):
+    def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=5, error_on_disconnect=True, adv: AdvertisementData = None):
         """
         Parameters
         ----------
@@ -54,6 +64,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         if it is expected that the sensor will frequently go in and out of range and the user wishes to preserve data (such as streaming)
         """
         self.__lazy_event_loop_init()
+        self.adv = adv
         bleak_options = { "timeout": discovery_timeout, "disconnected_callback": self.__on_disconnect }
         if isinstance(ble, BleakClient):    #Actual client
             self.client = ble
@@ -75,6 +86,19 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             self.__name = ble.name #Use the local name instead of the address
         else:
             raise TypeError("Invalid type for creating a ThreespaceBLEComClass:", type(ble), ble)
+
+        #Select the profile
+        self.profile = None
+        if self.adv is not None and len(self.adv.service_uuids) > 0:
+            for service_uuid in self.adv.service_uuids:
+                self.profile = self.get_profile(service_uuid)
+                if self.profile is not None:
+                    break
+            if self.profile is None:
+                self.profile = ThreespaceBLEComClass.DEFAULT_PROFILE
+                raise Exception(f"Unknown Service UUIDS: {self.adv.service_uuids}")
+        else:
+            self.profile = ThreespaceBLEComClass.DEFAULT_PROFILE
 
         self.__timeout = self.DEFAULT_TIMEOUT
 
@@ -101,7 +125,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     async def __async_open(self):
         self.data_read_event = asyncio.Event()
         await self.client.connect()
-        await self.client.start_notify(NORDIC_UART_TX_UUID, self.__on_data_received)
+        await self.client.start_notify(self.profile.TX_UUID, self.__on_data_received)
 
     def open(self):
         #If trying to open while already open, this infinitely loops
@@ -151,7 +175,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         while start_index < len(bytes):
             end_index = min(len(bytes), start_index + self.max_packet_size) #Can only send max_packet_size data per call to write_gatt_char
             asyncio.run_coroutine_threadsafe(
-                self.client.write_gatt_char(NORDIC_UART_RX_UUID, bytes[start_index:end_index], response=False),
+                self.client.write_gatt_char(self.profile.RX_UUID, bytes[start_index:end_index], response=False),
                 self.EVENT_LOOP).result()
             start_index = end_index
     
@@ -244,8 +268,16 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     def address(self) -> str:
         return self.client.address    
 
-    SCANNER = None
+    @classmethod
+    def get_profile(cls, service_uuid: str):
+        for profile in cls.REGISTERED_PROFILES:
+            if profile.SERVICE_UUID == service_uuid:
+                return profile
+        return None
+
+    SCANNER: BleakScanner = None
     SCANNER_LOCK = None
+    SCANNER_RUNNING = False
 
     SCANNER_CONTINOUS = False   #Controls if scanning will continously run
     SCANNER_TIMEOUT = 5         #Controls the scanners timeout
@@ -256,22 +288,93 @@ class ThreespaceBLEComClass(ThreespaceComClass):
     discovered_devices: dict[str,dict] = {}
 
     @classmethod
+    def set_profiles(cls, profiles: list[ThreespaceBLENordicUartProfile]):
+        cls.REGISTERED_PROFILES = profiles
+        if cls.SCANNER is not None:
+            asyncio.run_coroutine_threadsafe(cls.create_scanner(), cls.EVENT_LOOP).result()
+            cls.__remove_unused_profiles()
+
+    @classmethod
+    def register_profile(cls, profile: ThreespaceBLENordicUartProfile):        
+        if any(v.SERVICE_UUID == profile.SERVICE_UUID for v in cls.REGISTERED_PROFILES): return
+        cls.REGISTERED_PROFILES.append(profile)
+        if cls.SCANNER is not None:
+            asyncio.run_coroutine_threadsafe(cls.create_scanner(), cls.EVENT_LOOP).result()
+    
+    @classmethod
+    def unregister_profile(cls, service_uuid: str|ThreespaceBLENordicUartProfile):
+        if isinstance(service_uuid, ThreespaceBLENordicUartProfile):
+            service_uuid = service_uuid.SERVICE_UUID
+        index = None
+        for i in range(len(cls.REGISTERED_PROFILES)):
+            if cls.REGISTERED_PROFILES[i].SERVICE_UUID == service_uuid:
+                index = i
+                break
+        del cls.REGISTERED_PROFILES[index]
+        if cls.SCANNER is not None:
+            asyncio.run_coroutine_threadsafe(cls.create_scanner(), cls.EVENT_LOOP).result()
+            cls.__remove_unused_profiles()
+
+    @classmethod
+    def __remove_unused_profiles(cls):
+        if cls.SCANNER is None: return
+        to_remove = []
+        valid_service_uuids = [v.SERVICE_UUID for v in cls.REGISTERED_PROFILES]
+        with cls.SCANNER_LOCK:
+            for address in cls.discovered_devices:
+                adv: AdvertisementData = cls.discovered_devices[address]["adv"]
+                if not any(uuid in valid_service_uuids for uuid in adv.service_uuids):
+                    to_remove.append(address)
+            for address in to_remove:
+                del cls.discovered_devices[address]
+
+    #Scanner should be created inside of the Async Context that will use it
+    @classmethod
+    async def create_scanner(cls):
+        uuids = [v.SERVICE_UUID for v in cls.REGISTERED_PROFILES]
+        restart_scanner = cls.SCANNER_RUNNING
+        with cls.SCANNER_LOCK:
+            if restart_scanner:
+                await cls.__async_stop_scanner()
+            cls.SCANNER = BleakScanner(detection_callback=cls.__detection_callback, service_uuids=uuids)
+            if restart_scanner:
+                await cls.__async_start_scanner()
+
+    @classmethod
     def __lazy_init_scanner(cls):
         cls.__lazy_event_loop_init()
         if cls.SCANNER is None:
             cls.SCANNER_LOCK = threading.Lock()
-            #Scanner should be created inside of the Async Context that will use it
-            async def create_scanner():
-                cls.SCANNER = BleakScanner(detection_callback=cls.__detection_callback, service_uuids=[NORDIC_UART_SERVICE_UUID])
-            asyncio.run_coroutine_threadsafe(create_scanner(), cls.EVENT_LOOP).result()
-
-            
+            asyncio.run_coroutine_threadsafe(cls.create_scanner(), cls.EVENT_LOOP).result()
 
     @classmethod
     def __detection_callback(cls, device: BLEDevice, adv: AdvertisementData):
         with cls.SCANNER_LOCK:
             cls.discovered_devices[device.address] = {"device": device, "adv": adv, "last_found": time.time()}
     
+    @classmethod
+    async def __async_start_scanner(cls):
+        if cls.SCANNER_RUNNING: return
+        await cls.SCANNER.start()
+        cls.SCANNER_RUNNING = True
+
+    @classmethod
+    async def __async_stop_scanner(cls):
+        if not cls.SCANNER_RUNNING: return
+        await cls.SCANNER.stop()
+        cls.SCANNER_RUNNING = False        
+
+    @classmethod
+    def __start_scanner(cls):
+        if cls.SCANNER_RUNNING: return
+        asyncio.run_coroutine_threadsafe(cls.__async_start_scanner(), cls.EVENT_LOOP).result()
+    
+    @classmethod
+    def __stop_scanner(cls):
+        if not cls.SCANNER_RUNNING: return
+        asyncio.run_coroutine_threadsafe(cls.__async_stop_scanner(), cls.EVENT_LOOP).result()
+        cls.__stop_scanner()
+
     @classmethod
     def set_scanner_continous(cls, continous: bool):
         """
@@ -285,9 +388,9 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         cls.__lazy_init_scanner()
         cls.SCANNER_CONTINOUS = continous
         if continous: 
-            asyncio.run_coroutine_threadsafe(cls.SCANNER.start(), cls.EVENT_LOOP).result()
+            cls.__start_scanner()
         else: 
-            asyncio.run_coroutine_threadsafe(cls.SCANNER.stop(), cls.EVENT_LOOP).result()
+            cls.__stop_scanner()
 
     @classmethod
     def update_nearby_devices(cls):
@@ -338,4 +441,4 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         cls.update_nearby_devices()
         with cls.SCANNER_LOCK:
             for device_info in cls.discovered_devices.values():
-                yield(ThreespaceBLEComClass(device_info["device"]))
+                yield(ThreespaceBLEComClass(device_info["device"], adv=device_info["adv"]))
