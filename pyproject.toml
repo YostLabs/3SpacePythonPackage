@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "yostlabs"
 #If uploading again on the same day, add a fourth number
-version = "2025.10.29"
+version = "2025.10.29.1"
 authors = [
   { name="Yost Labs Inc.", email="techsupport@yostlabs.com" },
   { name="Andy Riedlinger", email="techsupport@yostlabs.com" },
