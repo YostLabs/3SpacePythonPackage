@@ -195,6 +195,11 @@ class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
             cls.SCANNER = Scanner()
             cls.SCANNER.start()
 
+    @classmethod
+    def set_scanner_continous(cls, continous: bool):
+        cls.__lazy_init_scanner()
+        cls.SCANNER.set_continous(continous)
+
     @staticmethod
     def __default_filter(result: ScannerResult):
         return result.class_of_device.major_class == "Wearable" and result.class_of_device.minor_class == "Minor code 0"
@@ -220,6 +225,14 @@ class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
 
     @staticmethod
     def unpair(address: str):
+        """
+        It is recommended to call this after done with a ThreespaceBluetoothComClass object
+        so that windows will not report the device as still being available when powered off.
+        This occurs because windows Bluetooth detect functions report nearby devices & paired devices,
+        regardless of their power status. By removing the device from the list of paired devices, auto detect
+        will only report actual nearby and powered devices.
+        EX: ThreespaceBluetoothComClass.unpair(com.address)
+        """
         remove_device(address)
 
 
