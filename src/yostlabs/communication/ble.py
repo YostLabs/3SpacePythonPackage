@@ -53,7 +53,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             cls.EVENT_LOOP_THREAD = threading.Thread(target=ylBleEventLoopThread, args=(cls.EVENT_LOOP,), daemon=True)
             cls.EVENT_LOOP_THREAD.start()
 
-    def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=5, error_on_disconnect=True, adv: AdvertisementData = None):
+    def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=5, error_on_disconnect=True, adv: AdvertisementData = None, profile: ThreespaceBLENordicUartProfile=None):
         """
         Parameters
         ----------
@@ -88,17 +88,18 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             raise TypeError("Invalid type for creating a ThreespaceBLEComClass:", type(ble), ble)
 
         #Select the profile
-        self.profile = None
-        if self.adv is not None and len(self.adv.service_uuids) > 0:
-            for service_uuid in self.adv.service_uuids:
-                self.profile = self.get_profile(service_uuid)
-                if self.profile is not None:
-                    break
-            if self.profile is None:
+        self.profile = profile
+        if self.profile is None:
+            if self.adv is not None and len(self.adv.service_uuids) > 0:
+                for service_uuid in self.adv.service_uuids:
+                    self.profile = self.get_profile(service_uuid)
+                    if self.profile is not None:
+                        break
+                if self.profile is None:
+                    self.profile = ThreespaceBLEComClass.DEFAULT_PROFILE
+                    raise Exception(f"Unknown Service UUIDS: {self.adv.service_uuids}")
+            else:
                 self.profile = ThreespaceBLEComClass.DEFAULT_PROFILE
-                raise Exception(f"Unknown Service UUIDS: {self.adv.service_uuids}")
-        else:
-            self.profile = ThreespaceBLEComClass.DEFAULT_PROFILE
 
         self.__timeout = self.DEFAULT_TIMEOUT
 
