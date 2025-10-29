@@ -2,6 +2,8 @@ from yostlabs.communication.socket import ThreespaceSocketComClass
 import bluetooth
 import time
 import threading
+import sys
+import math
 
 from dataclasses import dataclass
 from typing import Callable, Generator
@@ -94,17 +96,21 @@ class ScannerResult:
 
 class Scanner:
 
-    def __init__(self, interval=5):
+    def __init__(self, desired_scan_time=5):
         self.enabled = False
         self.done = True
 
-        self.nearby = None
-        self.thread = None
-        self.updated = False
-        self.duration = int(interval / 1.2)
+        self.continous = False      #If true, will constantly update the nearby devices
+        self.execute = False        #Set to true to trigger a read when not in continous mode
+        self.nearby = None          #The list of nearby devices
+        self.thread = None          #The thread running the asynchronous scanner
+        self.updated = False        #Set to true when self.nearby has been updated
+        self.duration = math.ceil(desired_scan_time / 1.28) * 1.28  #The time, in second, each scan lasts. Scanning is in 1.28 second intervals, so this may differ from the desired scan time
 
     def start(self):
-        if not self.done: return
+        if not self.done:
+            self.execute = True
+            return
         self.thread = threading.Thread(target=self.process, daemon=True)
         self.enabled = True
         self.done = False
@@ -113,6 +119,9 @@ class Scanner:
 
     def stop(self):
         self.enabled = False
+
+    def set_continous(self, continous: bool):
+        self.continous = continous
 
     def get_most_recent(self):
         if not self.updated: return None
@@ -125,20 +134,57 @@ class Scanner:
 
     def process(self):
         while self.enabled:
-            nearby = bluetooth.discover_devices(duration=self.duration, lookup_names=True, lookup_class=True)
+            if not self.continous and not self.execute: continue
+            nearby = bluetooth.discover_devices(duration=math.ceil(self.duration/1.28), lookup_names=True, lookup_class=True)
             self.nearby = [ScannerResult(addr, name, decode_class_of_device(cod)) for addr, name, cod in nearby]
+            self.execute = False
             self.updated = True
         self.done = True
 
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    # Define BLUETOOTH_ADDRESS structure
+    class BLUETOOTH_ADDRESS(ctypes.Structure):
+        _fields_ = [("rgBytes", ctypes.c_byte * 6)]
+
+    # Load Bluetooth API
+    win_bluetooth = ctypes.WinDLL("BluetoothAPIs.dll")
+
+    # Define function prototype
+    BluetoothRemoveDevice = win_bluetooth.BluetoothRemoveDevice
+    BluetoothRemoveDevice.argtypes = [ctypes.POINTER(BLUETOOTH_ADDRESS)]
+    BluetoothRemoveDevice.restype = wintypes.BOOL
+
+    def remove_device(mac_address: str):
+        # Convert MAC string "XX:XX:XX:XX:XX:XX" -> bytes reversed
+        addr_bytes = bytes.fromhex(mac_address.replace(":", ""))[::-1]
+        addr = BLUETOOTH_ADDRESS()
+        ctypes.memmove(addr.rgBytes, addr_bytes, 6)
+
+        err = BluetoothRemoveDevice(ctypes.byref(addr))
+        print("Remove device status:", err)
+        if not err:
+            print(f"Successfully removed device {mac_address}")
+        else:
+            if err == 1168:  # ERROR_NOT_FOUND
+                print(f"Device {mac_address} not found or already unpaired.")
+            else:
+                print(f"Failed to remove device {mac_address}. Error code: {err}")
+else:
+    def remove_device(mac_address: str):
+        raise NotImplementedError("Only implemented on windows")
+
 class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
 
-    SCANNER = None
+    SCANNER: Scanner = None
 
     def __init__(self, addr: str, name: str = None, connection_timeout=None):
         super().__init__(bluetooth.BluetoothSocket(bluetooth.Protocols.RFCOMM), (addr, 1), connection_timeout=connection_timeout)
         self.address = addr
         self.__name = name or addr
-    
+
     @property
     def name(self) -> str:
         return self.__name
@@ -162,6 +208,7 @@ class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
         cls.__lazy_init_scanner()
         if filter is None: 
             filter = cls.__default_filter
+        cls.SCANNER.start()
         if wait_for_update:
             cls.SCANNER.updated = False
             while not cls.SCANNER.updated: time.sleep(0.1)
@@ -170,6 +217,10 @@ class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
             if not filter(device_info): continue
             name = device_info.name or None
             yield ThreespaceBluetoothComClass(device_info.address, name)
+
+    @staticmethod
+    def unpair(address: str):
+        remove_device(address)
 
 
 if __name__ == "__main__":
