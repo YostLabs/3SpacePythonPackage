@@ -30,7 +30,7 @@ def quat_rotate_vec(quat: list[float], vec: list[float]):
     final = quat_mul(halfway, inv)
     return [final[0], final[1], final[2]]
 
-def angles_to_quaternion(angles: list[float], order: str, degrees=True):
+def angles_to_quaternion(angles: list[float], order: str, degrees=True, extrinsic=False):
     quat = [0, 0, 0, 1]
     for i in range(len(angles)):
         axis = order[i]
@@ -42,8 +42,17 @@ def angles_to_quaternion(angles: list[float], order: str, degrees=True):
         imaginary = math.sin(angle / 2)
         unit_vec = [v * imaginary for v in unit_vec]
         angle_quat = [*unit_vec, w]
-        quat = quat_mul(quat, angle_quat)
+        if extrinsic:
+            quat = quat_mul(angle_quat, quat)
+        else:
+            quat = quat_mul(quat, angle_quat)
     return quat
+
+def quat_from_angles(angles: list[float], order: str, degrees=True, extrinsic=False):
+    return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
+
+def quat_from_euler(angles: list[float], order: list[int], degrees=False, extrinsic=False):
+    return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
 
 def quat_from_axis_angle(axis: list[float], angle: float):
     imaginary = math.sin(angle / 2)
@@ -133,6 +142,133 @@ def quaternion_to_3x3_rotation_matrix(quat):
         [out[3], out[4], out[5]],
         [out[6], out[7], out[8]],
     ]
+
+#Quat is expected in XYZW order
+#https://www.euclideanspace.com/maths/geometry/rotations/conversions/quaternionToEuler/quat_2_euler_paper_ver2-1.pdf
+def q2ea(in_quat: list[float], order: list[int]) -> list[float]:
+    X, Y, Z, W = 0, 1, 2, 3 #Index order helpers
+    if len(order) != 3: raise Exception()
+    if len(in_quat) != 4: raise Exception()
+    out = [0, 0, 0]
+
+    i1, i2, i3 = order
+    i1n = (i1+ 1) % 3
+    i1nn = (i1n + 1) % 3
+
+    v3_rot = [0, 0, 0]
+    v3_rot[i3] = 1 
+    v3_rot = quat_rotate_vec(in_quat, v3_rot)
+
+    #NOTE: Whenever using asin/acos, ensure the input is in range of -1 <= x <= 1
+    #All this math should result in that, but floating point sometimes causes values like 1.0000002 which can cause NANs
+    v3_rot = [max(-1, min(1, v)) for v in v3_rot]
+
+    #Can now discover the first 2 rotations
+
+	#Non-Circular, Repeated Axes
+    #XZX, YXY, ZYZ
+    if (i1 == 0 and i2 == 2 and i3 == 0) or     \
+    (i1 == 1 and i2 == 0 and i3 == 1) or        \
+    (i1 == 2 and i2 == 1 and i3 == 2):      
+        out[0] = math.atan2(v3_rot[i1nn], v3_rot[i1n])
+        out[1] = math.acos(v3_rot[i1])
+	#Non-Circular, Non-Repeated Axes
+    #XZY, YXZ, ZYX
+    elif (i1 == 0 and i2 == 2 and i3 == 1) or   \
+    (i1 == 1 and i2 == 0 and i3 == 2) or        \
+    (i1 == 2 and i2 == 1 and i3 == 0):          
+        out[0] = math.atan2(v3_rot[i1nn], v3_rot[i1n])
+        out[1] = -math.asin(v3_rot[i1])
+	#Circular, Repeated Axes
+    #XYX, YZY, ZXZ
+    elif (i1 == 0 and i2 == 1 and i3 == 0) or   \
+    (i1 == 1 and i2 == 2 and i3 == 1) or        \
+    (i1 == 2 and i2 == 0 and i3 == 2):
+        out[0] = math.atan2(v3_rot[i1n], -v3_rot[i1nn])
+        out[1] = math.acos(v3_rot[i1])
+	#Circular, Non-Repeated Axes
+    #XYZ, YZX, ZXY
+    elif (i1 == 0 and i2 == 1 and i3 == 2) or   \
+    (i1 == 1 and i2 == 2 and i3 == 0) or        \
+    (i1 == 2 and i2 == 0 and i3 == 1):
+        out[0] = math.atan2(-v3_rot[i1n], v3_rot[i1nn])
+        out[1] = math.asin(v3_rot[i1]) #Note, the paper incorrectly says -asin
+    else:
+        raise ValueError("Invalid Order")
+
+    #Now compute the third angle
+
+    #Create a quaternion that applies the first two rotations
+    q1_rotation = [0, 0, 0, 0]
+    q1_rotation[W] = math.cos(out[0] / 2)
+    q1_rotation[i1] = math.sin(out[0] / 2)
+
+    q2_rotation = [0, 0, 0, 0]
+    q2_rotation[W] = math.cos(out[1] / 2)
+    q2_rotation[i2] = math.sin(out[1] / 2)
+
+    q12 = quat_mul(q1_rotation, q2_rotation)
+
+    #Now apply that quaternion and the original quaternion to the axis that will be rotated by the last axis
+    i3n = (i3 + 1) % 3
+    v3n = [0, 0, 0]
+    v3n[i3n] = 1
+
+    v3_q12 = v3n.copy()
+    v3_q = v3n.copy()
+    v3_q12 = quat_rotate_vec(q12, v3_q12)
+    v3_q = quat_rotate_vec(in_quat, v3_q)
+
+    #Now do trig to figure out how much rotation, and what direction, is needed to rotate v3_q12 to v3_q
+    d = _vec.vec_dot(v3_q12, v3_q) #Get angle between the two, ensure in range of acos
+    d = max(-1, min(1, d))
+    magnitude = math.acos(d)
+
+    #Determine the sign of the rotation
+    cross = _vec.vec_cross(v3_q12, v3_q)
+    sign = _vec.vec_dot(cross, v3_rot)
+    if sign < 0: sign = -1
+    else: sign = 1
+
+    out[2] = sign * abs(magnitude)
+
+    return out
+
+def string_order_to_indices(order: str):
+    order = order.lower()
+    int_order = []
+    if len(order) != 3: raise ValueError()
+    for c in order:
+        if c == 'x': int_order.append(0)
+        elif c == 'y': int_order.append(1)
+        elif c == 'z': int_order.append(2)
+        else: raise ValueError()
+    
+    return int_order
+
+def quat_to_euler_angles(in_quat: list[float], order: str|list[int], extrinsic=False):
+    if isinstance(order, str):
+        if 'e' in order.lower():
+            extrinsic = True
+        elif 'i' in order.lower():
+            extrinsic = False
+        #Only care about the first 3 chars, the 4th optional char is extrinsic vs intrinsic
+        order = string_order_to_indices(order[:3])
+    
+    #Extrinsic is performing the rotations around the axes of the original fixed system (Rotates around world axes)
+    #Intrinsic is performing the rotations around the axes of a coordinate system that rotates with each step (It rotates around the local axes of the rotating object).
+    #These two representations are very similar, and even related. An extrinsic rotation is the same as an intrinsic rotation by the same angles, but with the order inverted.
+    if extrinsic:
+        #Taking advantage of the above info that intrinsic = extrinsic but in reverse and vice versa.
+        order[0], order[2] = order[2], order[0]
+    
+    angles = q2ea(in_quat, order)
+
+    if extrinsic:
+        #Swap back to the original desired order
+        angles[0], angles[2] = angles[2], angles[0]
+    
+    return angles
 
 def quaternion_global_to_local(quat, vec):
     inverse = quat_inverse(quat)

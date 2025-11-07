@@ -33,7 +33,8 @@ def vec_is_right_handed(order: str, negations: list[bool] = None):
     return right_handed
 
 def axis_to_unit_vector(axis: str):
-    axis = axis.lower()
+    if isinstance(axis, str):
+        axis = axis.lower()
     if axis == 'x' or axis == 0: return [1, 0, 0]
     if axis == 'y' or axis == 1: return [0, 1, 0]
     if axis == 'z' or axis == 2: return [0, 0, 1]
