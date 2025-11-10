@@ -63,6 +63,9 @@ class ThreespaceCommand:
     BINARY_START_BYTE = 0xf7
     BINARY_START_BYTE_HEADER = 0xf9
 
+    BINARY_READ_SETTINGS_START_BYTE = 0xFA
+    BINARY_READ_SETTINGS_START_BYTE_HEADER = 0xFC
+
     def __init__(self, name: str, num: int, in_format: str, out_format: str, custom_func: Callable = None):
         self.info = ThreespaceCommandInfo(name, num, in_format, out_format)
         self.in_format = _3space_format_to_external(self.info.in_format)
@@ -82,7 +85,7 @@ class ThreespaceCommand:
 
     def send_command(self, com: ThreespaceOutputStream, *args, header_enabled = False):
         cmd = self.format_cmd(*args, header_enabled=header_enabled)
-        com.write(cmd)
+        com.write(cmd) 
 
     #Read the command result from an already read buffer. This will modify the given buffer to remove
     #that data as well
@@ -917,6 +920,40 @@ class ThreespaceSensor:
             return list(response_dict.values())[0]
         return response_dict
 
+    """
+    WIP. Currently does not work with string values or have full validation.
+    """
+    def get_setting_binary(self, key: str, format: str, use_threespace_format=True):
+        if use_threespace_format:
+            format = _3space_format_to_external(format)
+        checksum = sum(ord(v) for v in key) % 256
+        #Format = StartByte + Key + Null Terminator of key + Checksum
+        cmd = struct.pack(f"<B{len(key)}sBB", ThreespaceCommand.BINARY_READ_SETTINGS_START_BYTE_HEADER, key.encode(), 0, checksum)
+        self.com.write(cmd)
+        try:
+            min_response_len = key.index(';')
+        except ValueError:
+            min_response_len = len(key)
+        if min_response_len < len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE):
+            min_response_len = len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE)
+        min_response_len += (1 + THREESPACE_BINARY_SETTINGS_ID_SIZE) #Null terminator and header size
+        if self.__await_get_settings_binary(min_response_len) != THREESPACE_AWAIT_COMMAND_FOUND:
+            raise RuntimeError(f"Failed to get binary setting: {key}")
+        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the Header ID
+        
+        try:
+            echoed_key = self.com.read_until(b'\0')[:-1].decode()
+            if echoed_key != key.lower():
+                raise ValueError()
+        except:
+            raise ValueError()
+        result = struct.unpack(f"<{format}", self.com.read(struct.calcsize(format)))
+        self.com.read(2) #Remove the null terminator and the checksum
+        if len(result) == 1:
+            return result[0]
+        return result
+
+
     #-----------Base Settings Parsing----------------
 
     def __await_set_settings(self, timeout=2):
@@ -1001,6 +1038,31 @@ class ThreespaceSensor:
                 self.__internal_update(self.__try_peek_header())
                 continue
             
+            self.misaligned = False
+            return THREESPACE_AWAIT_COMMAND_FOUND
+
+    """
+    Incomplete, binary settings protocol is Work In Progress
+    """
+    def __await_get_settings_binary(self, min_resp_length: int, timeout=2, check_bootloader=False):
+        start_time = time.time()
+
+        while True:
+            remaining_time = timeout - (time.time() - start_time)
+            if remaining_time <= 0:
+                return THREESPACE_AWAIT_COMMAND_TIMEOUT
+            
+            if self.com.length < min_resp_length: continue
+            if check_bootloader and self.com.peek(2) == b'OK':
+                return THREESPACE_AWAIT_BOOTLOADER
+            
+            id = self.com.peek(THREESPACE_BINARY_SETTINGS_ID_SIZE)
+            if struct.unpack("<L", id)[0] != THREESPACE_BINARY_READ_SETTINGS_ID:
+                self.__internal_update(self.__try_peek_header())
+                continue
+            
+            #TODO: Check the rest of the message structure, not just the ID
+
             self.misaligned = False
             return THREESPACE_AWAIT_COMMAND_FOUND
 
