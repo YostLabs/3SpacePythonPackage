@@ -418,6 +418,7 @@ class StreamableCommands(Enum):
     GetBatteryPercent = 202
     GetBatteryStatus = 203
 
+    GetGpsActiveState = 214
     GetGpsCoord = 215
     GetGpsAltitude = 216
     GetGpsFixState = 217
@@ -1713,6 +1714,7 @@ class ThreespaceSensor:
     def getBatteryVoltage(self) -> ThreespaceCmdResult[float]: ...
     def getBatteryPercent(self) -> ThreespaceCmdResult[int]: ...
     def getBatteryStatus(self) -> ThreespaceCmdResult[int]: ...     
+    def getGpsActiveState(self) -> ThreespaceCmdResult[bool]: ...
     def getGpsCoord(self) -> ThreespaceCmdResult[list[float]]: ...
     def getGpsAltitude(self) -> ThreespaceCmdResult[float]: ...
     def getGpsFixState(self) -> ThreespaceCmdResult[int]: ...
@@ -1872,6 +1874,7 @@ _threespace_commands: list[ThreespaceCommand] = [
     ThreespaceCommand("getBatteryPercent", 202, "", "b"),
     ThreespaceCommand("getBatteryStatus", 203, "", "b"),
 
+    ThreespaceCommand("getGpsActiveState", 214, "", "b"),
     ThreespaceCommand("getGpsCoord", 215, "", "dd"),
     ThreespaceCommand("getGpsAltitude", 216, "", "f"),
     ThreespaceCommand("getGpsFixState", 217, "", "b"),
