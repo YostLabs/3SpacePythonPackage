@@ -46,7 +46,7 @@ def parse_axis_string(axis: str):
     axis = axis.lower()
     order = [0, 1, 2]
     multipliers = [1, 1, 1]
-    if 'x' in axis: #Using XYZ notation
+    if any(c in axis for c in ['x', 'y', 'z']): #Using XYZ notation
         index = 0
         for c in axis:
             if c == '-':

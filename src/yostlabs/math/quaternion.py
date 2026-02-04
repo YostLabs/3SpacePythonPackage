@@ -155,6 +155,8 @@ def q2ea(in_quat: list[float], order: list[int]) -> list[float]:
     i1n = (i1+ 1) % 3
     i1nn = (i1n + 1) % 3
 
+    #Find the direction the final axis ends up pointing after the full rotation
+    #Note that this vector does not change when the third rotation is being applied.
     v3_rot = [0, 0, 0]
     v3_rot[i3] = 1 
     v3_rot = quat_rotate_vec(in_quat, v3_rot)
@@ -164,6 +166,10 @@ def q2ea(in_quat: list[float], order: list[int]) -> list[float]:
     v3_rot = [max(-1, min(1, v)) for v in v3_rot]
 
     #Can now discover the first 2 rotations
+    #This is because the first two rotations determine the direction of the final axis,
+    #and each rotation only affects 1 plane, therefore think of it like the first rotation
+    #positions the third axis underneath its final spot, and the second rotation swings it up to its final position.
+    #These can be calculated using trig and the known axis pattern.
 
 	#Non-Circular, Repeated Axes
     #XZX, YXY, ZYZ
@@ -210,6 +216,8 @@ def q2ea(in_quat: list[float], order: list[int]) -> list[float]:
     q12 = quat_mul(q1_rotation, q2_rotation)
 
     #Now apply that quaternion and the original quaternion to the axis that will be rotated by the last axis
+    #(Rotating along Axis 3 does not change the position of Axis 3, this is done to obtain an axis that will be rotated
+    #so that the difference can be computed to decide how much rotation is needed for the last angle)
     i3n = (i3 + 1) % 3
     v3n = [0, 0, 0]
     v3n[i3n] = 1
@@ -262,6 +270,7 @@ def quat_to_euler_angles(in_quat: list[float], order: str|list[int], extrinsic=F
         #Taking advantage of the above info that intrinsic = extrinsic but in reverse and vice versa.
         order[0], order[2] = order[2], order[0]
     
+    #Actual conversion, everything else is just setup
     angles = q2ea(in_quat, order)
 
     if extrinsic:
@@ -269,6 +278,28 @@ def quat_to_euler_angles(in_quat: list[float], order: str|list[int], extrinsic=F
         angles[0], angles[2] = angles[2], angles[0]
     
     return angles
+
+def quat_from_euler_angles(angles: list[float], order: list[int], degrees=False, extrinsic=False):
+    if isinstance(order, str):
+        order = _vec.parse_axis_string(order)[0]
+    quat = [0, 0, 0, 1]
+    for i in range(len(angles)):
+        axis = order[i]
+        angle = angles[i]
+        if degrees:
+            angle = math.radians(angle)
+
+        #Create unit vector for this
+        unit_vec = [0, 0, 0]
+        unit_vec[axis] = 1
+
+        #Create quaternion for this rotation and apply to overall rotation
+        angle_quat = quat_from_axis_angle(unit_vec, angle)
+        if extrinsic:
+            quat = quat_mul(angle_quat, quat)
+        else:
+            quat = quat_mul(quat, angle_quat)
+    return quat
 
 def quaternion_global_to_local(quat, vec):
     inverse = quat_inverse(quat)
