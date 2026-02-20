@@ -1,5 +1,6 @@
 import math
 import yostlabs.math.vector as _vec
+from yostlabs.math.axes import AxisOrder
 
 def quat_mul(a: list[float], b: list[float]):
     out = [0, 0, 0, 0]
@@ -23,6 +24,13 @@ def quat_inverse(quat: list[float]):
     #as it will conflict with rotating vectors, which are not rotations, by quaternions
     return [-quat[0], -quat[1], -quat[2], quat[3]]
 
+def quaternion_global_to_local(quat, vec):
+    inverse = quat_inverse(quat)
+    return quat_rotate_vec(inverse, vec)
+
+def quaternion_local_to_global(quat, vec):
+    return quat_rotate_vec(quat, vec)
+
 def quat_rotate_vec(quat: list[float], vec: list[float]):
     inv = quat_inverse(quat)
     tmp = [vec[0], vec[1], vec[2], 0]
@@ -30,34 +38,11 @@ def quat_rotate_vec(quat: list[float], vec: list[float]):
     final = quat_mul(halfway, inv)
     return [final[0], final[1], final[2]]
 
-def angles_to_quaternion(angles: list[float], order: str, degrees=True, extrinsic=False):
-    quat = [0, 0, 0, 1]
-    for i in range(len(angles)):
-        axis = order[i]
-        angle = angles[i]
-        if degrees:
-            angle = math.radians(angle)
-        unit_vec = _vec.axis_to_unit_vector(axis)
-        w = math.cos(angle / 2)
-        imaginary = math.sin(angle / 2)
-        unit_vec = [v * imaginary for v in unit_vec]
-        angle_quat = [*unit_vec, w]
-        if extrinsic:
-            quat = quat_mul(angle_quat, quat)
-        else:
-            quat = quat_mul(quat, angle_quat)
-    return quat
-
-def quat_from_angles(angles: list[float], order: str, degrees=True, extrinsic=False):
-    return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
-
-def quat_from_euler(angles: list[float], order: list[int], degrees=False, extrinsic=False):
-    return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
-
 def quat_from_axis_angle(axis: list[float], angle: float):
     imaginary = math.sin(angle / 2)
     quat = [imaginary * v for v in axis]
     quat.append(math.cos(angle / 2))
+
     return quat
 
 #There are multiple valid quats that can be returned by this. The intention of this function
@@ -279,21 +264,14 @@ def quat_to_euler_angles(in_quat: list[float], order: str|list[int], extrinsic=F
     
     return angles
 
-def quat_from_euler_angles(angles: list[float], order: list[int], degrees=False, extrinsic=False):
-    if isinstance(order, str):
-        order = _vec.parse_axis_string(order)[0]
+def angles_to_quaternion(angles: list[float], order: str, degrees=True, extrinsic=False):
     quat = [0, 0, 0, 1]
     for i in range(len(angles)):
         axis = order[i]
         angle = angles[i]
         if degrees:
             angle = math.radians(angle)
-
-        #Create unit vector for this
-        unit_vec = [0, 0, 0]
-        unit_vec[axis] = 1
-
-        #Create quaternion for this rotation and apply to overall rotation
+        unit_vec = _vec.axis_to_unit_vector(axis)
         angle_quat = quat_from_axis_angle(unit_vec, angle)
         if extrinsic:
             quat = quat_mul(angle_quat, quat)
@@ -301,18 +279,38 @@ def quat_from_euler_angles(angles: list[float], order: list[int], degrees=False,
             quat = quat_mul(quat, angle_quat)
     return quat
 
-def quaternion_global_to_local(quat, vec):
-    inverse = quat_inverse(quat)
-    return quat_rotate_vec(inverse, vec)
+def quat_from_angles(angles: list[float], order: str, degrees=True, extrinsic=False):
+    return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
 
-def quaternion_local_to_global(quat, vec):
-    return quat_rotate_vec(quat, vec)
+def quat_from_euler(angles: list[float], order: list[int], degrees=False, extrinsic=False):
+    return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
+
+#https://splines.readthedocs.io/en/latest/rotation/slerp.html
+def slerp(a, b, t):
+    dot = _vec.vec_dot(a, b)
+    if dot < 0: #To force it to be the shortest route
+        b = [-v for v in b]
+
+    theta = math.acos(dot)
+    sin_theta = math.sin(theta)
+    r1 = math.sin(1 - t) * theta / sin_theta
+    r2 = math.sin(t * theta) / sin_theta
+    a = [r1 * v for v in a]
+    b = [r2 * v for v in b]
+    return _vec.vec_normalize([v + w for v, w in zip(a, b)])
+
+#-------------------------------DEPRECATED FUNCTIONS-------------------------------
 
 def quaternion_swap_axes(quat: list, old_order: str, new_order: str):
+    """
+    DEPRECATED: Use AxisOrder class from axes.py instead.
+    """
     return quaternion_swap_axes_fast(quat, _vec.parse_axis_string_info(old_order), _vec.parse_axis_string_info(new_order))
 
 def quaternion_swap_axes_fast(quat: list, old_parsed_order: list[list, list, bool], new_parsed_order: list[list, list, bool]):
     """
+    DEPRECATED: Use AxisOrder class from axes.py instead.
+
     Like quaternion_swap_axes but uses the inputs of parsing the axis strings to avoid having to recompute
     the storage types.
 
@@ -338,17 +336,3 @@ def quaternion_swap_axes_fast(quat: list, old_parsed_order: list[list, list, boo
         new_quat = quat_inverse(new_quat)
 
     return new_quat
-
-#https://splines.readthedocs.io/en/latest/rotation/slerp.html
-def slerp(a, b, t):
-    dot = _vec.vec_dot(a, b)
-    if dot < 0: #To force it to be the shortest route
-        b = [-v for v in b]
-
-    theta = math.acos(dot)
-    sin_theta = math.sin(theta)
-    r1 = math.sin(1 - t) * theta / sin_theta
-    r2 = math.sin(t * theta) / sin_theta
-    a = [r1 * v for v in a]
-    b = [r2 * v for v in b]
-    return _vec.vec_normalize([v + w for v, w in zip(a, b)])

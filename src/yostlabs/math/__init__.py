@@ -1,1 +1,1 @@
-__all__ = ["quaternion", "vector"]
+__all__ = ["quaternion", "vector", "axes"]

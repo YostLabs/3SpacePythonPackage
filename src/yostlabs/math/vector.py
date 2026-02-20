@@ -17,7 +17,13 @@ def vec_normalize(vec: list[float]):
         return vec
     return [v / l for v in vec]
 
+#Backwards compatability, make this available from this file
+from yostlabs.math.axes import axis_to_unit_vector
+
 def vec_is_right_handed(order: str, negations: list[bool] = None):
+    """
+    DEPRECATED: Use AxisOrder class from axes.py instead.
+    """
     order = order.lower()
     if negations is None: #Must build the negation list
         base_order = order.replace('-', '')
@@ -32,15 +38,10 @@ def vec_is_right_handed(order: str, negations: list[bool] = None):
     
     return right_handed
 
-def axis_to_unit_vector(axis: str):
-    if isinstance(axis, str):
-        axis = axis.lower()
-    if axis == 'x' or axis == 0: return [1, 0, 0]
-    if axis == 'y' or axis == 1: return [0, 1, 0]
-    if axis == 'z' or axis == 2: return [0, 0, 1]
-
 def parse_axis_string(axis: str):
     """
+    DEPRECATED: Use AxisOrder class from axes.py instead.
+    
     Given an axis order string, convert it to an array representing the axis order and negations/multipliers
     """
     axis = axis.lower()
@@ -65,11 +66,17 @@ def parse_axis_string(axis: str):
     return order, multipliers
 
 def parse_axis_string_info(axis: str):
+    """
+    DEPRECATED: Use AxisOrder class from axes.py instead.
+    """
     order, mult = parse_axis_string(axis)
     right_handed = axis_is_righthanded(order, mult)
     return [order, mult, right_handed]
 
 def axis_is_righthanded(order: list[int], negations: list[int]):
+    """
+    DEPRECATED: Use AxisOrder.is_right_handed from axes.py instead.
+    """
     num_swaps = 0
     for i in range(3):
         if i != order[i]:
