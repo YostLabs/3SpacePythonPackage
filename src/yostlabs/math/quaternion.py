@@ -128,6 +128,67 @@ def quaternion_to_3x3_rotation_matrix(quat):
         [out[6], out[7], out[8]],
     ]
 
+def quaternion_from_3x3_rotation_matrix(matrix):
+    """
+    Convert a 3x3 rotation matrix to a quaternion in XYZW form.
+    https://www.researchgate.net/publication/325950745_Accurate_Computation_of_Quaternions_from_Rotation_Matrices
+
+    Parameters
+    ----------
+    matrix : list or nested list
+        Either a flat list of 9 elements or a 3x3 nested list representing the rotation matrix
+    
+    Returns
+    -------
+    list[float]
+        Quaternion in XYZW format
+    """
+    # Handle both flat and nested list formats
+    if isinstance(matrix[0], list):
+        m = [matrix[0][0], matrix[0][1], matrix[0][2],
+             matrix[1][0], matrix[1][1], matrix[1][2],
+             matrix[2][0], matrix[2][1], matrix[2][2]]
+    else:
+        m = matrix
+    
+    trace = m[0] + m[4] + m[8]
+    
+    #4 Different cases depending on which quat component is largest, to ensure numerical stability
+    if trace > 0:
+        # w is the largest component
+        s = (trace + 1.0) ** 0.5
+        w = s * 0.5
+        s = 0.5 / s
+        x = (m[7] - m[5]) * s
+        y = (m[2] - m[6]) * s
+        z = (m[3] - m[1]) * s
+    elif m[0] > m[4] and m[0] > m[8]:
+        # x is the largest component
+        s = (1.0 + m[0] - m[4] - m[8]) ** 0.5
+        x = s * 0.5
+        s = 0.5 / s
+        y = (m[1] + m[3]) * s
+        z = (m[2] + m[6]) * s
+        w = (m[7] - m[5]) * s
+    elif m[4] > m[8]:
+        # y is the largest component
+        s = (1.0 + m[4] - m[0] - m[8]) ** 0.5
+        y = s * 0.5
+        s = 0.5 / s
+        x = (m[1] + m[3]) * s
+        z = (m[5] + m[7]) * s
+        w = (m[2] - m[6]) * s
+    else:
+        # z is the largest component
+        s = (1.0 + m[8] - m[0] - m[4]) ** 0.5
+        z = s * 0.5
+        s = 0.5 / s
+        x = (m[2] + m[6]) * s
+        y = (m[5] + m[7]) * s
+        w = (m[3] - m[1]) * s
+    
+    return [x, y, z, w]
+
 #Quat is expected in XYZW order
 #https://www.euclideanspace.com/maths/geometry/rotations/conversions/quaternionToEuler/quat_2_euler_paper_ver2-1.pdf
 def q2ea(in_quat: list[float], order: list[int]) -> list[float]:
@@ -264,7 +325,7 @@ def quat_to_euler_angles(in_quat: list[float], order: str|list[int], extrinsic=F
     
     return angles
 
-def angles_to_quaternion(angles: list[float], order: str, degrees=True, extrinsic=False):
+def angles_to_quaternion(angles: list[float], order: str|list[int], degrees=True, extrinsic=False):
     quat = [0, 0, 0, 1]
     for i in range(len(angles)):
         axis = order[i]
@@ -279,10 +340,10 @@ def angles_to_quaternion(angles: list[float], order: str, degrees=True, extrinsi
             quat = quat_mul(quat, angle_quat)
     return quat
 
-def quat_from_angles(angles: list[float], order: str, degrees=True, extrinsic=False):
+def quat_from_angles(angles: list[float], order: str|list[int], degrees=True, extrinsic=False):
     return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
 
-def quat_from_euler(angles: list[float], order: list[int], degrees=False, extrinsic=False):
+def quat_from_euler(angles: list[float], order: str|list[int], degrees=False, extrinsic=False):
     return angles_to_quaternion(angles, order, degrees=degrees, extrinsic=extrinsic)
 
 #https://splines.readthedocs.io/en/latest/rotation/slerp.html
