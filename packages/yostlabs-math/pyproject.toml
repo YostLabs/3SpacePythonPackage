@@ -10,6 +10,7 @@ authors = [
   { name="Andy Riedlinger", email="techsupport@yostlabs.com" },
 ]
 description = "Math utilities for Yost Labs products (quaternions, vectors, axes)"
+readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 4 - Beta",
