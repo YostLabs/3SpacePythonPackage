@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "yostlabs-math"
+version = "2026.2.23.dev3"
+authors = [
+  { name="Yost Labs Inc.", email="techsupport@yostlabs.com" },
+  { name="Andy Riedlinger", email="techsupport@yostlabs.com" },
+]
+description = "Math utilities for Yost Labs products (quaternions, vectors, axes)"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+keywords = ["quaternion", "vector", "3space", "threespace", "yost", "math"]
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yostlabs"]
+
+[project.urls]
+Homepage = "https://yostlabs.com/"
+Repository = "https://github.com/YostLabs/3SpacePythonPackage"
+Issues = "https://github.com/YostLabs/3SpacePythonPackage/issues"

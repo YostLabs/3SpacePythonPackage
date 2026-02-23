@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "yostlabs"
 #If uploading again on the same day, add a fourth number
-version = "2026.2.23.dev1"
+version = "2026.2.23.dev4"
 authors = [
   { name="Yost Labs Inc.", email="techsupport@yostlabs.com" },
   { name="Andy Riedlinger", email="techsupport@yostlabs.com" },
 ]
 description = "Python resources and API for 3Space sensors from Yost Labs Inc."
-readme = "README.md"
+readme = "../../README.md"
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -19,10 +19,11 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-keywords = ["3space", "threespace", "yost"]
+keywords = ["3space", "threespace", "yost", "yostlabs"]
 dependencies = [
   "pyserial",
   "numpy",
+  "yostlabs-math",
   "bleak",
   "async-timeout"
 ]
@@ -40,3 +41,9 @@ dependencies = [
 Homepage = "https://yostlabs.com/"
 Repository = "https://github.com/YostLabs/3SpacePythonPackage/tree/main"
 Issues = "https://github.com/YostLabs/3SpacePythonPackage/issues"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../Examples" = "Examples" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yostlabs"]
