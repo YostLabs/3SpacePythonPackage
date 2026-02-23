@@ -8,13 +8,17 @@ from dataclasses import dataclass
 from typing import Callable, Generator
 
 #Bluetooth is an optional install, so we need to handle the case where pybluez2 is not installed
-#pip install yostlabs[bluetooth]
+#pip install pybluez2 (May need to do git+https://github.com/airgproducts/pybluez2.git instead for it to work)
+#pybluez2 is not included as an optional dependency because the pypi installation is likely to fail.
 try:
     import bluetooth
     BLUETOOTH_AVAILABLE = True
 except ImportError:
     BLUETOOTH_AVAILABLE = False
     bluetooth = None
+    print("pybluez2 is not installed. Bluetooth functionality will be unavailable. Install it with:\n" \
+          "    pip install pybluez2\n" \
+          "    pip install git+https://github.com/airgproducts/pybluez2.git (May be required for newer versions of python)")
 
 @dataclass
 class COD:
@@ -142,7 +146,7 @@ class Scanner:
 
     def process(self):
         if not BLUETOOTH_AVAILABLE:
-            raise ImportError("pybluez2 is not installed. Install it with: pip install yostlabs[bluetooth]")
+            raise ImportError("pybluez2 is not installed. Install it with: pip install git+https://github.com/airgproducts/pybluez2.git")
         while self.enabled:
             if not self.continous and not self.execute: continue
             nearby = bluetooth.discover_devices(duration=math.ceil(self.duration/1.28), lookup_names=True, lookup_class=True)
@@ -192,7 +196,7 @@ class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
 
     def __init__(self, addr: str, name: str = None, connection_timeout=None):
         if not BLUETOOTH_AVAILABLE:
-            raise ImportError("pybluez2 is not installed. Install it with: pip install yostlabs[bluetooth]")
+            raise ImportError("pybluez2 is not installed. Install it with: pip install pybluez2 (May need to do git+https://github.com/airgproducts/pybluez2.git instead for it to work)")
         super().__init__(bluetooth.BluetoothSocket(bluetooth.Protocols.RFCOMM), (addr, 1), connection_timeout=connection_timeout)
         self.address = addr
         self.__name = name or addr

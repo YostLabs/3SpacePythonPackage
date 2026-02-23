@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "yostlabs"
 #If uploading again on the same day, add a fourth number
-version = "2026.2.4"
+version = "2026.2.23.dev1"
 authors = [
   { name="Yost Labs Inc.", email="techsupport@yostlabs.com" },
   { name="Andy Riedlinger", email="techsupport@yostlabs.com" },
@@ -27,10 +27,14 @@ dependencies = [
   "async-timeout"
 ]
 
-[project.optional-dependencies]
-bluetooth = [
-  "pybluez2 @ git+https://github.com/airgproducts/pybluez2.git"
-]
+# [project.optional-dependencies]
+# Pypi does not allow direct dependencies, however pybluez2 pypi
+# install does not work for newer versions of python.
+# Leaving this here as docummentation of the requirement without
+# making it part of the pypi package.
+# bluetooth = [
+#   "pybluez2 @ git+https://github.com/airgproducts/pybluez2.git"
+# ]
 
 [project.urls]
 Homepage = "https://yostlabs.com/"
