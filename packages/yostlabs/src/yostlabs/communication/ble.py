@@ -53,7 +53,7 @@ class ThreespaceBLEComClass(ThreespaceComClass):
             cls.EVENT_LOOP_THREAD = threading.Thread(target=ylBleEventLoopThread, args=(cls.EVENT_LOOP,), daemon=True)
             cls.EVENT_LOOP_THREAD.start()
 
-    def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=5, error_on_disconnect=True, adv: AdvertisementData = None, profile: ThreespaceBLENordicUartProfile=None):
+    def __init__(self, ble: BleakClient | BLEDevice | str, discover_name: bool = True, discovery_timeout=10, error_on_disconnect=True, adv: AdvertisementData = None, profile: ThreespaceBLENordicUartProfile=None):
         """
         Parameters
         ----------
