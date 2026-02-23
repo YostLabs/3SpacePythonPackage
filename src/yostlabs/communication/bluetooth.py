@@ -1,5 +1,4 @@
 from yostlabs.communication.socket import ThreespaceSocketComClass
-import bluetooth
 import time
 import threading
 import sys
@@ -7,6 +6,15 @@ import math
 
 from dataclasses import dataclass
 from typing import Callable, Generator
+
+#Bluetooth is an optional install, so we need to handle the case where pybluez2 is not installed
+#pip install yostlabs[bluetooth]
+try:
+    import bluetooth
+    BLUETOOTH_AVAILABLE = True
+except ImportError:
+    BLUETOOTH_AVAILABLE = False
+    bluetooth = None
 
 @dataclass
 class COD:
@@ -133,6 +141,8 @@ class Scanner:
         return self.done
 
     def process(self):
+        if not BLUETOOTH_AVAILABLE:
+            raise ImportError("pybluez2 is not installed. Install it with: pip install yostlabs[bluetooth]")
         while self.enabled:
             if not self.continous and not self.execute: continue
             nearby = bluetooth.discover_devices(duration=math.ceil(self.duration/1.28), lookup_names=True, lookup_class=True)
@@ -181,6 +191,8 @@ class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
     SCANNER: Scanner = None
 
     def __init__(self, addr: str, name: str = None, connection_timeout=None):
+        if not BLUETOOTH_AVAILABLE:
+            raise ImportError("pybluez2 is not installed. Install it with: pip install yostlabs[bluetooth]")
         super().__init__(bluetooth.BluetoothSocket(bluetooth.Protocols.RFCOMM), (addr, 1), connection_timeout=connection_timeout)
         self.address = addr
         self.__name = name or addr

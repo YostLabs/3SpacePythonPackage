@@ -24,8 +24,12 @@ dependencies = [
   "pyserial",
   "numpy",
   "bleak",
-  "async-timeout",
-  "pybluez2"
+  "async-timeout"
+]
+
+[project.optional-dependencies]
+bluetooth = [
+  "pybluez2 @ git+https://github.com/airgproducts/pybluez2.git"
 ]
 
 [project.urls]
