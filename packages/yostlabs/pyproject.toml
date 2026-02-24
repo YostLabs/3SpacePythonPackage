@@ -42,8 +42,8 @@ Homepage = "https://yostlabs.com/"
 Repository = "https://github.com/YostLabs/3SpacePythonPackage/tree/main"
 Issues = "https://github.com/YostLabs/3SpacePythonPackage/issues"
 
-[tool.hatch.build.targets.sdist]
-force-include = { "../../Examples" = "Examples" }
+[tool.hatch.build.targets.sdist.force-include]
+"../../Examples" = "Examples"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/yostlabs"]
