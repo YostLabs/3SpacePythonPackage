@@ -1,8 +1,24 @@
 <center><h4>API and Resources for Yost Labs 3.0 Threespace sensors.</h4></center>
 
+## YostLabs Namespace Package System
+
+This package is part of the YostLabs namespace package environment for working with Yost Labs sensors. Available packages include:
+
+- **yostlabs** - Sensor communication and API for 3Space sensors
+- **yostlabs-math** - Math utilities for quaternions, vectors, and coordinate transformations
+- **yostlabs-graphics** - Graphic API for sensor data visualization
+
+
 ## Installation
 
 `python -m pip install yostlabs`
+
+**⚠️ Important Upgrade Notice:** If you are upgrading from a previous version, the namespace structure has changed and may cause installation conflicts. If you encounter issues during the upgrade, uninstall all existing `yostlabs` packages first and then reinstall the newest versions:
+
+```bash
+python -m pip uninstall yostlabs yostlabs-math yostlabs-graphics
+python -m pip install yostlabs
+```
 
 ## Basic Usage
 
