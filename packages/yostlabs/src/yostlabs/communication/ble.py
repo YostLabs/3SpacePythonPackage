@@ -440,6 +440,9 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         """
         cls = ThreespaceBLEComClass
         cls.update_nearby_devices()
+        # Copy devices while holding lock, then yield without holding lock to avoid deadlock
+        # if the user decides to interact with the com class inside the loop
         with cls.SCANNER_LOCK:
-            for device_info in cls.discovered_devices.values():
-                yield(ThreespaceBLEComClass(device_info["device"], adv=device_info["adv"]))
+            devices_snapshot = list(cls.discovered_devices.values())
+        for device_info in devices_snapshot:
+            yield(ThreespaceBLEComClass(device_info["device"], adv=device_info["adv"]))
