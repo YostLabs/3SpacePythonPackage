@@ -54,42 +54,49 @@ def quat_from_one_vector(vec: list[float]):
     angle = math.acos(_vec.vec_dot([0, 0, 1], vec))
     return quat_from_axis_angle(perpendicular, angle)
 
-def quat_from_two_vectors(forward: list[float], down: list[float]):
-    """
-    This function requires two orthogonal vectors to work
-    """
-    forward_reference = [0, 0, 1]
-    down_reference = [0, -1, 0]
+def quat_to_two_vectors(quat, axis_order: AxisOrder = AxisOrder("xyz")):
+    default_order = AxisOrder("xyz")
+    forward = [0, 0, 1]
+    down = [0, -1, 0]
 
+    forward = default_order.swap_to(axis_order, forward)
+    down = default_order.swap_to(axis_order, down)
+
+    forward = quat_rotate_vec(quat, forward)
+    down = quat_rotate_vec(quat, down)
+
+    return forward, down
+
+def quat_from_two_vectors(forward, down, axis_order: AxisOrder = AxisOrder("xyz")):
+    # Convert vectors back to default xyz order
+    default_order = AxisOrder("xyz")
+    forward = axis_order.swap_to(default_order, forward)
+    down = axis_order.swap_to(default_order, down)
+    
+    # Normalize the input vectors
     forward = _vec.vec_normalize(forward)
     down = _vec.vec_normalize(down)
+    
+    # Compute the third orthogonal vector (right = forward × down)
+    # In default order: forward is +Z, down is -Y, so right should be +X
+    right = _vec.vec_cross(forward, down)
+    right = _vec.vec_normalize(right)
+    
+    # Build rotation matrix from the three vectors
+    # The columns of the matrix are the transformed basis vectors
+    # X-axis (right), Y-axis (-down), Z-axis (forward)
+    rotation_matrix = [
+        [right[0], -down[0], forward[0]],
+        [right[1], -down[1], forward[1]],
+        [right[2], -down[2], forward[2]]
+    ]
+    
+    # Convert rotation matrix to quaternion
+    quat = quaternion_from_3x3_rotation_matrix(rotation_matrix)
 
-    #Create the first rotation to align the forward axis
-    axis_of_rotation = _vec.vec_cross(forward_reference, forward)
-    axis_of_rotation = _vec.vec_normalize(axis_of_rotation)
-    if not any(abs(v) > 0 for v in axis_of_rotation):
-        axis_of_rotation = down_reference #This is just a direct 180 degree rotation around any orthogonal axis, so just use the down_ref
-    dot = min(1, max(-1, _vec.vec_dot(forward_reference, forward)))
-    angle1 = math.acos(dot)
-    imaginary = math.sin(angle1/2)
-    quat = [v * imaginary for v in axis_of_rotation] #XYZ
-    quat.append(math.cos(angle1/2)) #W
-
-    #Update the reference to figure out where it is after the turn
-    down_reference = quat_rotate_vec(quat, down_reference)
-
-    #find the rotation to make the remaining reference align with its given value
-    axis_of_rotation = _vec.vec_cross(down_reference, down)
-    axis_of_rotation = _vec.vec_normalize(axis_of_rotation)
-    if not any(abs(v) > 0 for v in axis_of_rotation):
-        axis_of_rotation = forward #Rotate along the final forward vector until up is aligned
-    dot = min(1, max(-1, _vec.vec_dot(down_reference, down)))
-    angle2 = math.acos(dot)
-    imaginary = math.sin(angle2/2)
-    rotation = [v * imaginary for v in axis_of_rotation] #XYZ
-    rotation.append(math.cos(angle2/2)) #W
-
-    quat = quat_mul(rotation, quat)
+    #Swap back to the used axis space
+    quat = default_order.swap_to(axis_order, quat, rotational=True)
+    
     return quat
 
 def quaternion_to_3x3_rotation_matrix(quat):
