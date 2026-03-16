@@ -142,6 +142,7 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     def serial_number(self) -> int:
         port = self.get_port_info()
         if port is None: return None
+        if port.serial_number is None: return None
         sn = port.serial_number
         #Basic validation. Windows for example puts a default serial number
         #that is not from the sensor and is not alphanumeric, so filter that out
