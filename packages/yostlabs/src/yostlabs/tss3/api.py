@@ -352,6 +352,60 @@ class ThreespaceHeader:
     def __iter__(self):
         return iter(self.raw)
 
+@dataclass
+class ThreespaceHardwareVersion:
+    """
+    Format from serial number:
+    XX iii C VV MM IIIIII
+    X = Family
+    i = Variation
+    C = Core version
+    V = Major version
+    M = Minor version
+    I = ID
+    """
+    serial_number: int
+
+    family_id: int
+    variation: int
+    core_version: int
+    major_revision: int
+    minor_revision: int
+
+    id: int
+
+    @staticmethod
+    def from_serial_string(serial_str: str):
+        return ThreespaceHardwareVersion.from_serial_number(int(serial_str, 16))
+
+    @staticmethod
+    def from_serial_number(serial_number: int):
+        family_id = (serial_number & THREESPACE_SN_FAMILY_MSK) >> THREESPACE_SN_FAMILY_POS
+        print(f"{family_id=} {serial_number=:x} {serial_number & THREESPACE_SN_FAMILY_MSK:x}")
+        variation = (serial_number & THREESPACE_SN_VARIATION_MSK) >> THREESPACE_SN_VARIATION_POS
+        core_version = (serial_number & THREESPACE_SN_VERSION_MSK) >> THREESPACE_SN_VERSION_POS
+        major_revision = (serial_number & THREESPACE_SN_MAJOR_REVISION_MSK) >> THREESPACE_SN_MAJOR_REVISION_POS
+        minor_revision = (serial_number & THREESPACE_SN_MINOR_REVISION_MSK) >> THREESPACE_SN_MINOR_REVISION_POS
+        id = (serial_number & THREESPACE_SN_INCREMENTOR_MSK) >> THREESPACE_SN_INCREMENTOR_POS
+
+        return ThreespaceHardwareVersion(serial_number, family_id, variation, core_version, major_revision, minor_revision, id)
+    
+    def __str__(self):
+        return f"{self.family_name} {self.variation:01X} V{self.core_version:01X}.{self.major_revision:01X}.{self.minor_revision:01X} {self.id:06X}"
+    
+    @property
+    def family_name(self):
+        return THREESPACE_SN_FAMILY_TO_NAME.get(self.family_id, "Unknown")
+    
+    @property
+    def short_serial_number(self):
+        """
+        Short SN is the 32 bit version of the u64 serial number
+        It is defined as the FamilyVersion (byte) << 24 | Incrementor (24 bits) 
+        """
+        return (self.family_id << 24) | self.id
+        
+
 class StreamableCommands(Enum):
     GetTaredOrientation = 0
     GetTaredOrientationAsEuler = 1
@@ -541,6 +595,7 @@ class ThreespaceSensor:
 
         #Used to ensure connecting to the correct sensor when reconnecting
         self.serial_number = None
+        self.hardware_version: ThreespaceHardwareVersion = None
         self.short_serial_number = None
         self.sensor_family = None
         self.firmware_version = None
@@ -742,15 +797,12 @@ class ThreespaceSensor:
         Doesn't actually retrieve the serial number, rather sets various properties based on the serial number
         """
         self.serial_number = serial_number
+        self.hardware_version = ThreespaceHardwareVersion.from_serial_number(serial_number)
 
-        #Short SN is the 32 bit version of the u64 serial number
-        #It is defined as the FamilyVersion (byte) << 24 | Incrementor (24 bits) 
-        family = (self.serial_number & THREESPACE_SN_FAMILY_MSK) >> THREESPACE_SN_FAMILY_POS
-        incrementor = (self.serial_number & THREESPACE_SN_INCREMENTOR_MSK) >> THREESPACE_SN_INCREMENTOR_POS
-        self.short_serial_number = family << 24 | incrementor
-        self.sensor_family = THREESPACE_SN_FAMILY_TO_NAME.get(family)
-        if self.sensor_family is None:
-            self.log(f"Unknown Sensor Family detected, {family}")
+        self.short_serial_number = self.hardware_version.short_serial_number
+        self.sensor_family = self.hardware_version.family_name
+        if self.sensor_family == "Unknown":
+            self.log(f"Unknown Sensor Family detected, {self.hardware_version.family_id}")
             
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
