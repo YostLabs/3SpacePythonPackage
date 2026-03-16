@@ -192,13 +192,16 @@ class ThreespaceStreamingManager:
                     slot_index += 1
                 
                 #Let all the callbacks know the data was updated
-                for cb in self.callbacks.values():
+                #Cache this to prevent concurrent modification issues if a callback tries to register/unregister
+                callbacks = list(self.callbacks.values())
+                for cb in callbacks:
                     if cb.only_newest: continue
                     cb.func(ThreespaceStreamingStatus.Data, cb.user_data)
 
                 result = self.sensor.getOldestStreamingPacket()
             
-            for cb in self.callbacks.values():
+            callbacks = list(self.callbacks.values())
+            for cb in callbacks:
                 if cb.only_newest:
                     cb.func(ThreespaceStreamingStatus.Data, cb.user_data)
                 cb.func(ThreespaceStreamingStatus.DataEnd, cb.user_data)
