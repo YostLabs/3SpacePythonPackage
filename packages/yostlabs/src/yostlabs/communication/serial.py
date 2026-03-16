@@ -25,7 +25,7 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     DEFAULT_BAUDRATE = 115200
     DEFAULT_TIMEOUT = 2
 
-    def __init__(self, ser: serial.Serial | str):
+    def __init__(self, ser: serial.Serial | str, port_info: ListPortInfo = None):
         if isinstance(ser, serial.Serial):
             self.ser = ser
         elif isinstance(ser, str):
@@ -33,6 +33,9 @@ class ThreespaceSerialComClass(ThreespaceComClass):
             self.ser.port = ser
         else:
             raise TypeError("Invalid type for creating a ThreespaceSerialComClass:", type(ser), ser)
+
+        #Cached port info
+        self.__port_info = port_info
 
         self.peek_buffer = bytearray()
         self.peek_length = 0
@@ -135,12 +138,31 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     def suffix(self) -> str:
         return self.pid_to_str(self.get_port_info().pid) 
     
+    @property
+    def serial_number(self) -> int:
+        port = self.get_port_info()
+        if port is None: return None
+        sn = port.serial_number
+        #Basic validation. Windows for example puts a default serial number
+        #that is not from the sensor and is not alphanumeric, so filter that out
+        if len(sn) == 16 and sn.isalnum():
+            try:
+                return int(sn, 16)
+            except:
+                return None
+        return None
+
     def get_port_info(self):
+        #Return cached port info
+        if self.__port_info is not None:
+            return self.__port_info
+        
+        #Otherwise, search for the port info and cache it
         ports = serial.tools.list_ports.comports()
         for port in ports:
             if port.device == self.ser.port:
-                return port
-        return None
+                self.__port_info = port
+        return self.__port_info
 
     @staticmethod
     def is_threespace_port(port: ListPortInfo):
@@ -168,7 +190,7 @@ class ThreespaceSerialComClass(ThreespaceComClass):
             if cls.is_threespace_port(port):
                 ser = serial.Serial(None, baudrate=default_baudrate, timeout=default_timeout) #By setting port as None, can create an object without immediately opening the port
                 ser.port = port.device #Now assign the port, allowing the serial object to exist without being opened yet
-                yield ThreespaceSerialComClass(ser)
+                yield ThreespaceSerialComClass(ser, port_info=port)
 
     @classmethod
     def pid_to_str(cls, pid):
