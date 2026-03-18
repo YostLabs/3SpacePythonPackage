@@ -109,9 +109,9 @@ class ThreespaceBinaryParser:
             self.data_stream = ThreespaceBufferInputStream()
         self.header_info = None
 
-        self.__parsing_header: ThreespaceHeader = None  #Used to optimize preventing reading to much by cacheing the header seperately from the cmd data
+        self.__parsing_header: ThreespaceHeader = None  #Used to optimize preventing reading to much by caching the header separately from the cmd data
         self.__parsing_command: ThreespaceCommand = None
-        self.__parsing_msg_length: int = None           #Used seperately from the __parsing_header so can handle msg lengths that are static without modifying the header
+        self.__parsing_msg_length: int = None           #Used separately from the __parsing_header so can handle msg lengths that are static without modifying the header
 
         self.misaligned = False
         self.verbose = verbose

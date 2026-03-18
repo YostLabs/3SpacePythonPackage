@@ -381,7 +381,6 @@ class ThreespaceHardwareVersion:
     @staticmethod
     def from_serial_number(serial_number: int):
         family_id = (serial_number & THREESPACE_SN_FAMILY_MSK) >> THREESPACE_SN_FAMILY_POS
-        print(f"{family_id=} {serial_number=:x} {serial_number & THREESPACE_SN_FAMILY_MSK:x}")
         variation = (serial_number & THREESPACE_SN_VARIATION_MSK) >> THREESPACE_SN_VARIATION_POS
         core_version = (serial_number & THREESPACE_SN_VERSION_MSK) >> THREESPACE_SN_VERSION_POS
         major_revision = (serial_number & THREESPACE_SN_MAJOR_REVISION_MSK) >> THREESPACE_SN_MAJOR_REVISION_POS
@@ -477,7 +476,7 @@ class StreamableCommands(Enum):
     GetGpsAltitude = 216
     GetGpsFixState = 217
     GetGpsHdop = 218
-    GetGpsSattelites = 219
+    GetGpsSatellites = 219
 
     GetLedColor = 238
 
@@ -776,7 +775,7 @@ class ThreespaceSensor:
         
         #Don't allow the header to change while streaming
         #This is to prevent a situation where the header for streaming and commands are different
-        #since streaming caches the header. This would cause an issue where the echo byte could be in seperate
+        #since streaming caches the header. This would cause an issue where the echo byte could be in separate
         #positions, causing a situation where parsing a command and streaming at the same time breaks since it thinks both are valid cmd echoes.
         if self.is_streaming:
             self.log("Preventing header change due to currently streaming")
@@ -858,7 +857,7 @@ class ThreespaceSensor:
         else:
             return str(value)        
 
-    #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require cacheing the header
+    #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require caching the header
     HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
     def set_settings(self, param_string: str = None, **kwargs):
         self.check_dirty()
@@ -1037,7 +1036,7 @@ class ThreespaceSensor:
             v2 = 0
             try:
                 v1 = int(values[0].decode())
-                v2 = int(values[0].decode())
+                v2 = int(values[1].decode())
             except:
                 self.__internal_update(self.__try_peek_header())
                 continue
@@ -1415,13 +1414,13 @@ class ThreespaceSensor:
         start and recover from error conditions.
 
         This will stop streaming without validating it was streaming and ignoring any output of the
-        communication line. This is a destructive call that will lose data, but will gurantee stopping streaming
+        communication line. This is a destructive call that will lose data, but will guarantee stopping streaming
         and leave the communication line in a clean state.
         """
         cached_header_enabled = self.header_enabled
-        cahched_dirty = self.dirty_cache
+        cached_dirty = self.dirty_cache
 
-        #Must set these to gurantee it doesn't try and parse a response from anything since don't know the state of header
+        #Must set these to guarantee it doesn't try and parse a response from anything since don't know the state of header
         self.dirty_cache = False
         self.header_enabled = False #Keep off for the attempt at stop streaming since if in an invalid state, won't be able to get response
 
@@ -1443,7 +1442,7 @@ class ThreespaceSensor:
         
         #Restore
         self.header_enabled = cached_header_enabled
-        self.dirty_cache = cahched_dirty
+        self.dirty_cache = cached_dirty
 
 #-------------------------------------FILE STREAMING----------------------------------------------
 
@@ -1669,7 +1668,7 @@ class ThreespaceSensor:
 
                 #The sensor may or may not have this command registered. So just try it
                 try:
-                    #May not be opened, but also not cacheing that so just attempt to close.
+                    #May not be opened, but also not caching that so just attempt to close.
                     self.closeFile()
                 except: pass
         except Exception as e:

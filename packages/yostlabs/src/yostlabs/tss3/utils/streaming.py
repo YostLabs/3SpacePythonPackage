@@ -83,7 +83,7 @@ class ThreespaceStreamingManager:
         self.sample_count = 0
 
         self.enabled = False
-        self.is_streaming = False #Store this seperately to attempt to allow using both the regular streaming and streaming manager via pausing and such
+        self.is_streaming = False #Store this separately to attempt to allow using both the regular streaming and streaming manager via pausing and such
 
         #Set the initial streaming speed
         self.interval = int(self.sensor.get_settings("stream_interval"))   
@@ -144,7 +144,7 @@ class ThreespaceStreamingManager:
         """
         This still allows the streaming manager to operate and register new objects. However, registration
         is limited to commands and speeds that are already operatable. Essentially, after this is called,
-        it is not possible to do actions that require updating the sensors onboard settings/state. This gurantees
+        it is not possible to do actions that require updating the sensors onboard settings/state. This guarantees
         streaming will not be stopped/restarted for time sensitive applications. 
         Note: This INCLUDES pausing/resuming, enabling/disabling...
         If you need to lock modifications, then pause or resume. The locker should unlock modifications, call the necessary function, and then lock again
