@@ -89,7 +89,7 @@ class ThreespaceSocketComClass(ThreespaceComClass):
             length = len(self.buffer)
             if max_length is not None:
                 length = min(length, max_length)
-            result = self.buffer[length]
+            result = self.buffer[:length]
         return result
 
     def __update_while(self, condition: Callable):
