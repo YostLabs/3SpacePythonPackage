@@ -1,26 +1,29 @@
 from typing import Generator
+from abc import ABC, abstractmethod
 
-class ThreespaceInputStream:
+class ThreespaceInputStream(ABC):
 
-    """
-    Reads specified number of bytes. 
-    If that many bytes are not available after timeout, less data will be returned
-    """
+    @abstractmethod
     def read(self, num_bytes: int) -> bytes:
-        raise NotImplementedError()
+        """
+        Reads specified number of bytes. 
+        If that many bytes are not available after timeout, less data will be returned
+        """
+        ...
     
     def read_all(self):
         return self.read(self.length)
 
-    def read_until(self, expected: bytes) -> bytes:
-        raise NotImplementedError()
+    @abstractmethod
+    def read_until(self, expected: bytes) -> bytes: ...
 
-    """Allows reading without removing the data from the buffer"""
-    def peek(self, num_bytes: int) -> bytes:
-        raise NotImplementedError()
+    @abstractmethod
+    def peek(self, num_bytes: int) -> bytes: 
+        """Allows reading without removing the data from the buffer"""
+        ...
     
-    def peek_until(self, expected: bytes, max_length: int = None) -> bytes:
-        raise NotImplementedError()
+    @abstractmethod
+    def peek_until(self, expected: bytes, max_length: int = None) -> bytes: ...
     
     def readline(self) -> bytes:
         return self.read_until(b"\r\n")
@@ -30,22 +33,23 @@ class ThreespaceInputStream:
         return self.peek_until(b"\r\n", max_length=max_length)    
     
     @property
-    def length(self) -> int:
-        raise NotImplementedError()
+    @abstractmethod
+    def length(self) -> int: ...
     
     @property
-    def timeout(self) -> float:
-        raise NotImplementedError()
+    @abstractmethod
+    def timeout(self) -> float: ...
 
     @timeout.setter
-    def timeout(self, timeout: float):
-        raise NotImplementedError()    
+    @abstractmethod
+    def timeout(self, timeout: float): ...  
 
-class ThreespaceOutputStream:
+class ThreespaceOutputStream(ABC):
 
-    """Write the given bytes"""
+    @abstractmethod
     def write(self, bytes):
-        raise NotImplementedError()
+        """Write the given bytes"""
+        ...
 
 class ThreespaceComClass(ThreespaceInputStream, ThreespaceOutputStream):
     """
@@ -54,23 +58,26 @@ class ThreespaceComClass(ThreespaceInputStream, ThreespaceOutputStream):
     there open called before use
     """
     
-    def close(self):
-        raise NotImplementedError()
+    @abstractmethod
+    def close(self): ...
     
+    @abstractmethod
     def open(self) -> bool:
         """
         Should return True on success, False on failure
         If already open, should stay open
         """
-        raise NotImplementedError()
+        ...
     
+    @abstractmethod
     def check_open(self) -> bool:
         """
         Should return True if the port is currently open, False otherwise.
         Must give the current state, not a cached state
         """
-        raise NotImplementedError()
+        ...
     
+    #Not abstract because not making hard required.
     @staticmethod
     def auto_detect() -> Generator["ThreespaceComClass", None, None]:
         """
@@ -82,10 +89,13 @@ class ThreespaceComClass(ThreespaceInputStream, ThreespaceOutputStream):
     def reenumerates(self) -> bool:
         """
         If the device Re-Enumerates when going from bootloader to firmware or vice versa, this must return True.
-        This indicates to the API that it must search for the new com class representing the object when switching between bootloader and firmware
+        This indicates to the API that it must search for the new com class representing the object when switching between bootloader and firmware.
+
+        This is usually False, so returning that as the default. If this behavior is needed,
+        it should be overridden to return True in the com class implementation
         """
-        raise NotImplementedError
+        return False
     
     @property
     def name(self) -> str:
-        raise NotImplementedError()
+        return type(self).__name__
