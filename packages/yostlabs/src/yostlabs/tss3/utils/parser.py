@@ -125,7 +125,7 @@ class ThreespaceBinaryParser:
         read_size - 'auto' or int Required when registering a command that requires a given length such as fileReadBytes. If 'auto' will use the header length to determine length.
         """
         if isinstance(cmd, int):
-            cmd = threespaceCommandGet(cmd)
+            cmd = threespace_command_get(cmd)
             if cmd is None:
                 raise ValueError(f"Invalid Cmd {cmd}")
             

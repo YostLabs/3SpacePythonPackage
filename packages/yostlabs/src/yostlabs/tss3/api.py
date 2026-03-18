@@ -1,6 +1,7 @@
 from yostlabs.tss3.consts import *
 from yostlabs.communication.base import ThreespaceInputStream, ThreespaceOutputStream, ThreespaceComClass
 from yostlabs.communication.serial import ThreespaceSerialComClass
+from yostlabs.tss3.commands import *
 
 from enum import Enum
 from dataclasses import dataclass, field
@@ -11,188 +12,6 @@ import types
 import inspect
 import time
 import math
-
-
-#For converting from internal format specifiers to struct module specifiers
-__3space_format_conversion_dictionary = {
-    'f': {"c": 'f', "size": 4},
-    'd' : {"c": 'd', "size": 8},
-
-    'b' : {"c": 'B', "size": 1},
-    'B' : {"c": 'H', "size": 2},
-    "u" : {"c": 'L', "size": 4},
-    "U" : {"c": 'Q', "size": 8},
-
-    "i" : {"c": 'b', "size": 1},
-    "I" : {"c": 'h', "size": 2},
-    "l" : {"c": 'l', "size": 4},
-    "L" : {"c": 'q', "size": 8},
-
-    #Strings actually don't convert, they need handled special because
-    #struct unpack assumes static length strings, whereas the sensors
-    #use variable length null terminated strings
-    "s" : {"c": 's', "size": float('nan')},
-    "S" : {"c": 's', "size": float('nan')}
-}
-
-def _3space_format_get_size(format_str: str):
-    size = 0
-    for c in format_str:
-        size += __3space_format_conversion_dictionary[c]["size"]
-    return size
-
-def _3space_format_to_external(format_str: str):
-    return ''.join(__3space_format_conversion_dictionary[c]['c'] for c in format_str)
-
-@dataclass
-class ThreespaceCommandInfo:
-    name: str
-    num: int
-    in_format: str
-    out_format: str
-
-    num_out_params: int = field(init=False)
-    out_size: int = field(init=False,)
-
-    def __post_init__(self):
-        self.num_out_params = len(self.out_format)
-        self.out_size = _3space_format_get_size(self.out_format)
-
-class ThreespaceCommand:
-
-    BINARY_START_BYTE = 0xf7
-    BINARY_START_BYTE_HEADER = 0xf9
-
-    BINARY_READ_SETTINGS_START_BYTE = 0xFA
-    BINARY_READ_SETTINGS_START_BYTE_HEADER = 0xFC
-
-    def __init__(self, name: str, num: int, in_format: str, out_format: str, custom_func: Callable = None):
-        self.info = ThreespaceCommandInfo(name, num, in_format, out_format)
-        self.in_format = _3space_format_to_external(self.info.in_format)
-        self.out_format = _3space_format_to_external(self.info.out_format)
-        self.custom_func = custom_func
-
-    def format_cmd(self, *args, header_enabled=False):
-        cmd_data = struct.pack("<B", self.info.num)
-        for i, c in enumerate(self.in_format):
-            if c != 's':
-                cmd_data += struct.pack(f"<{c}", args[i])
-            else:
-                cmd_data += struct.pack(f"<{len(args[i])}sb", bytes(args[i], 'ascii'), 0)
-        checksum = sum(cmd_data) % 256
-        start_byte = ThreespaceCommand.BINARY_START_BYTE_HEADER if header_enabled else ThreespaceCommand.BINARY_START_BYTE
-        return struct.pack(f"<B{len(cmd_data)}sB", start_byte, cmd_data, checksum)
-
-    def send_command(self, com: ThreespaceOutputStream, *args, header_enabled = False):
-        cmd = self.format_cmd(*args, header_enabled=header_enabled)
-        com.write(cmd) 
-
-    #Read the command result from an already read buffer. This will modify the given buffer to remove
-    #that data as well
-    def parse_response(self, response: bytes):
-        if self.info.num_out_params == 0: return None
-        output = []
-        
-        if math.isnan(self.info.out_size): #Has strings in it, must slow parse
-            for c in self.out_format:
-                if c != 's':
-                    format_str = f"<{c}"
-                    size = struct.calcsize(format_str)
-                    output.append(struct.unpack(format_str, response[:size])[0])
-                    #TODO: Switch to using numpy views instead of slicing
-                    response = response[size:]
-                else: #Strings are special, find the null terminator
-                    str_len = response.index(0)
-                    output.append(struct.unpack(f"<{str_len}s", response[:str_len])[0])
-                    response = response[str_len + 1:] #+1 to skip past the null terminator character too
-        else: #Fast parse because no strings
-            output.extend(struct.unpack(f"<{self.out_format}", response[:self.info.out_size]))
-
-        
-        if self.info.num_out_params == 1:
-            return output[0]
-        return output
-
-    #Read the command dynamically from an input stream
-    def read_command(self, com: ThreespaceInputStream, verbose=False):
-        raw = bytearray([])
-        if self.info.num_out_params == 0: return None, raw
-        output = []
-
-        if not math.isnan(self.info.out_size):
-            #Fast read and parse
-            response = com.read(self.info.out_size)
-            raw += response
-            if len(response) != self.info.out_size:
-                if verbose:
-                    print(f"Failed to read {self.info.name} {len(response)} / {self.info.out_size}. Aborting...")
-            output.extend(struct.unpack(f"<{self.out_format}", response))
-        else:
-            #There is a string, so go element by element
-            i = 0
-            while i < len(self.out_format):
-                c = self.out_format[i]
-                if c != 's':
-                    end_index = self.out_format.find('s', i)
-                    if end_index == -1: end_index = len(self.out_format)
-                    format_str = f"<{self.out_format[i:end_index]}"
-                    size = struct.calcsize(format_str)
-                    response = com.read(size)
-                    raw += response
-                    if len(response) != size:
-                        if verbose:
-                            print(f"Failed to read {c} type. Aborting...")
-                        return None
-                    output.append(struct.unpack(format_str, response)[0])
-                    i = end_index
-                else:
-                    response = com.read_until(b'\0')
-                    raw += response
-                    if response[-1] != 0:
-                        if verbose:
-                            print(f"Failed to read string. Aborting...")
-                        return None
-                    output.append(response[:-1].decode())
-                    i += 1
-        
-        if self.info.num_out_params == 1:
-            return output[0], raw
-        return output, raw
-
-class ThreespaceGetStreamingBatchCommand(ThreespaceCommand):
-
-    def __init__(self, streaming_slots: list[ThreespaceCommand]):
-        self.commands = streaming_slots
-        combined_out_format = ''.join(slot.info.out_format for slot in streaming_slots if slot is not None)
-        super().__init__("getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", combined_out_format)
-        self.out_format = ''.join(slot.out_format for slot in streaming_slots if slot is not None)
-
-    def set_stream_slots(self, streaming_slots: list[ThreespaceCommand]):
-        self.commands = streaming_slots
-        self.out_format = ''.join(slot.out_format for slot in streaming_slots if slot is not None)
-        self.info.out_size = sum(slot.info.out_size for slot in streaming_slots if slot is not None)
-
-    def parse_response(self, response: bytes):
-        data = []
-        for command in self.commands:
-            if command is None: continue
-            cmd_response_size = command.info.out_size
-            data.append(command.parse_response(response))
-            response = response[cmd_response_size:]
-        
-        return data
-    
-    def read_command(self, com: ThreespaceInputStream, verbose=False):
-        #Get the response to all the streaming commands
-        response = []
-        raw_response = bytearray([])
-        for command in self.commands:
-            if command is None: continue
-            out, raw = command.read_command(com, verbose=verbose)
-            raw_response += raw
-            response.append(out)
-        
-        return response, raw_response
 
 THREESPACE_HEADER_FORMAT_CHARS = ['b', 'L', 'B', 'B', 'L', 'H']
 
@@ -403,84 +222,6 @@ class ThreespaceHardwareVersion:
         It is defined as the FamilyVersion (byte) << 24 | Incrementor (24 bits) 
         """
         return (self.family_id << 24) | self.id
-        
-
-class StreamableCommands(Enum):
-    GetTaredOrientation = 0
-    GetTaredOrientationAsEuler = 1
-    GetTaredOrientationAsMatrix = 2
-    GetTaredOrientationAsAxisAngle = 3
-    GetTaredOrientationAsTwoVector = 4
-
-    GetDifferenceQuaternion = 5
-
-    GetUntaredOrientation = 6
-    GetUntaredOrientationAsEuler = 7
-    GetUntaredOrientationAsMatrix = 8
-    GetUntaredOrientationAsAxisAngle = 9
-    GetUntaredOrientationAsTwoVector = 10
-
-    GetTaredOrientationAsTwoVectorSensorFrame = 11
-    GetUntaredOrientationAsTwoVectorSensorFrame = 12
-
-    GetPrimaryBarometerPressure = 13
-    GetPrimaryBarometerAltitude = 14
-    GetBarometerAltitudeById = 15
-    GetBarometerPressureById = 16
-
-    GetAllPrimaryNormalizedData = 32
-    GetPrimaryNormalizedGyroRate = 33
-    GetPrimaryNormalizedAccelVec = 34
-    GetPrimaryNormalizedMagVec = 35
-    
-    GetAllPrimaryCorrectedData = 37
-    GetPrimaryCorrectedGyroRate = 38
-    GetPrimaryCorrectedAccelVec = 39
-    GetPrimaryCorrectedMagVec = 40
-
-    GetPrimaryGlobalLinearAccel = 41
-    GetPrimaryLocalLinearAccel = 42
-
-    GetTemperatureCelsius = 43
-    GetTemperatureFahrenheit = 44
-    GetMotionlessConfidenceFactor = 45
-
-    GetNormalizedGyroRate = 51
-    GetNormalizedAccelVec = 52
-    GetNormalizedMagVec = 53
-
-    GetCorrectedGyroRate = 54
-    GetCorrectedAccelVec = 55
-    GetCorrectedMagVec = 56
-
-    GetDateTime = 63
-
-    GetRawGyroRate = 65
-    GetRawAccelVec = 66
-    GetRawMagVec = 67
-
-    GetEeptsOldestStep = 70
-    GetEeptsNewestStep = 71
-    GetEeptsNumStepsAvailable = 72
-
-    GetDateTimeString = 93
-    GetTimestamp = 94
-
-    GetBatteryCurrent = 200
-    GetBatteryVoltage = 201
-    GetBatteryPercent = 202
-    GetBatteryStatus = 203
-
-    GetGpsActiveState = 214
-    GetGpsCoord = 215
-    GetGpsAltitude = 216
-    GetGpsFixState = 217
-    GetGpsHdop = 218
-    GetGpsSatellites = 219
-
-    GetLedColor = 238
-
-    GetButtonState = 250
 
 THREESPACE_AWAIT_COMMAND_FOUND = 0
 THREESPACE_AWAIT_COMMAND_TIMEOUT = 1
@@ -698,7 +439,7 @@ class ThreespaceSensor:
         else:
             valid_commands = list(int(v) for v in valid_commands.split(','))
         
-        for command in _threespace_commands:
+        for command in THREESPACE_COMMANDS:
             #Skip commands that are not valid for this sensor
             if command.info.num not in valid_commands:
                 #Register as invalid.
@@ -726,9 +467,10 @@ class ThreespaceSensor:
 
         #This command type has special logic that requires its own function.
         #Make that function be called instead of using the generic execute that gets built
-        method = None
-        if command.custom_func is not None:
-            method = types.MethodType(command.custom_func, self)
+        custom_name = f"_{type(self).__name__}__{command.info.name}"
+        custom = getattr(self, custom_name, None)
+        if custom is not None:
+            method = custom
         else:
             #Build the actual method for executing the command
             code = f"def {command.info.name}(self, *args, **kwargs):\n"
@@ -977,7 +719,7 @@ class ThreespaceSensor:
     """
     def get_setting_binary(self, key: str, format: str, use_threespace_format=True):
         if use_threespace_format:
-            format = _3space_format_to_external(format)
+            format = yost_format_to_struct_format(format)
         checksum = sum(ord(v) for v in key) % 256
         #Format = StartByte + Key + Null Terminator of key + Checksum
         cmd = struct.pack(f"<B{len(key)}sBB", ThreespaceCommand.BINARY_READ_SETTINGS_START_BYTE_HEADER, key.encode(), 0, checksum)
@@ -1330,7 +1072,6 @@ class ThreespaceSensor:
             if command == None: continue
             self.streaming_packet_size += command.info.out_size
 
-    def startStreaming(self) -> ThreespaceCmdResult[None]: ...
     def __startStreaming(self) -> ThreespaceCmdResult[None]:
         if not self.is_data_streaming:
             self.streaming_packets.clear()
@@ -1340,7 +1081,6 @@ class ThreespaceSensor:
         self.is_data_streaming = True
         return result
 
-    def stopStreaming(self) -> ThreespaceCmdResult[None]: ...
     def __stopStreaming(self) -> ThreespaceCmdResult[None]:
         result = self.execute_command(self.commands[THREESPACE_STOP_STREAMING_COMMAND_NUM])
         self.is_data_streaming = False
@@ -1428,16 +1168,16 @@ class ThreespaceSensor:
         #since this sensor object may have yet to register these commands when calling force_stop_streaming
 
         #Stop base Streaming
-        self.execute_command(threespaceCommandGetByName("stopStreaming"))
+        self.execute_command(threespace_command_get_by_name("stopStreaming"))
         self.is_data_streaming = False
 
         #Stop file streaming
-        self.execute_command(threespaceCommandGetByName("fileStopStream"))
+        self.execute_command(threespace_command_get_by_name("fileStopStream"))
         self.is_file_streaming = False  
 
         #Stop logging streaming
         # #TODO: Change this to pause the data logging instead, then check the state and update
-        self.execute_command(threespaceCommandGetByName("stopDataLogging"))
+        self.execute_command(threespace_command_get_by_name("stopDataLogging"))
         self.is_log_streaming = False              
         
         #Restore
@@ -1446,15 +1186,13 @@ class ThreespaceSensor:
 
 #-------------------------------------FILE STREAMING----------------------------------------------
 
-    def fileStartStream(self) -> ThreespaceCmdResult[int]: ...
     def __fileStartStream(self) -> ThreespaceCmdResult[int]:
         result = self.execute_command(self.__get_command("fileStartStream"))
         self.file_stream_length = result.data
         if self.file_stream_length > 0:
             self.is_file_streaming = True
         return result
-    
-    def fileStopStream(self) -> ThreespaceCmdResult[None]: ...
+
     def __fileStopStream(self) -> ThreespaceCmdResult[None]:
         result = self.execute_command(self.__get_command("fileStopStream"))
         self.is_file_streaming = False
@@ -1481,9 +1219,22 @@ class ThreespaceSensor:
             if self.file_stream_length != 0:
                 self.log(f"File streaming stopped due to last packet. However still expected {self.file_stream_length} more bytes.")
 
+    def __fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]:    
+        self.check_dirty()
+        cmd = self.commands[THREESPACE_FILE_READ_BYTES_COMMAND_NUM]
+        cmd.send_command(self.com, num_bytes, header_enabled=self.header_enabled)
+        self.__await_command(cmd)
+        if self.header_enabled:
+            header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
+            num_bytes = min(num_bytes, header.length) #Its possible for less bytes to be returned when an error occurs (EX: Reading from unopened file)
+        else:
+            header = ThreespaceHeader()
+
+        response = self.com.read(num_bytes)
+        return ThreespaceCmdResult(response, header, data_raw_binary=response)
+
 #----------------------------DATA LOGGING--------------------------------------
 
-    def startDataLogging(self) -> ThreespaceCmdResult[None]: ...
     def __startDataLogging(self) -> ThreespaceCmdResult[None]:
         self.__cache_streaming_settings()
 
@@ -1497,7 +1248,6 @@ class ThreespaceSensor:
         self.is_log_streaming = streaming 
         return result
 
-    def stopDataLogging(self) -> ThreespaceCmdResult[None]: ...
     def __stopDataLogging(self) -> ThreespaceCmdResult[None]:
         result = self.execute_command(self.__get_command("stopDataLogging"))
         self.is_log_streaming = False
@@ -1515,7 +1265,6 @@ class ThreespaceSensor:
 
 #---------------------------------POWER STATE CHANGING COMMANDS & BOOTLOADER------------------------------------
 
-    def softwareReset(self): ...
     def __softwareReset(self):
         self.check_dirty()
         cmd = self.commands[THREESPACE_SOFTWARE_RESET_COMMAND_NUM]
@@ -1526,7 +1275,6 @@ class ThreespaceSensor:
         self.com.open()
         self.__firmware_init()
 
-    def enterBootloader(self): ...
     def __enterBootloader(self):
         if self.in_bootloader: return
 
@@ -1592,7 +1340,7 @@ class ThreespaceSensor:
         if len(result) != 9:
             raise Exception()
         #Note bootloader uses big endian instead of little for reasons
-        return struct.unpack(f">{_3space_format_to_external('U')}", result[:8])[0]
+        return struct.unpack(f">{yost_format_to_struct_format('U')}", result[:8])[0]
 
     def bootloader_boot_firmware(self):
         if not self.in_bootloader: return
@@ -1625,19 +1373,19 @@ class ThreespaceSensor:
     
     def bootloader_get_info(self):
         self.com.write('I'.encode())
-        memstart = struct.unpack(f">{_3space_format_to_external('l')}", self.com.read(4))[0]
-        memend = struct.unpack(f">{_3space_format_to_external('l')}", self.com.read(4))[0]
-        pagesize = struct.unpack(f">{_3space_format_to_external('I')}", self.com.read(2))[0]
-        bootversion = struct.unpack(f">{_3space_format_to_external('I')}", self.com.read(2))[0]
+        memstart = struct.unpack(f">{yost_format_to_struct_format('l')}", self.com.read(4))[0]
+        memend = struct.unpack(f">{yost_format_to_struct_format('l')}", self.com.read(4))[0]
+        pagesize = struct.unpack(f">{yost_format_to_struct_format('I')}", self.com.read(2))[0]
+        bootversion = struct.unpack(f">{yost_format_to_struct_format('I')}", self.com.read(2))[0]
         return ThreespaceBootloaderInfo(memstart, memend, pagesize, bootversion)
 
     def bootloader_prog_mem(self, bytes: bytearray, timeout=5):
         memsize = len(bytes)
         checksum = sum(bytes)
         self.com.write('C'.encode())
-        self.com.write(struct.pack(f">{_3space_format_to_external('I')}", memsize))
+        self.com.write(struct.pack(f">{yost_format_to_struct_format('I')}", memsize))
         self.com.write(bytes)
-        self.com.write(struct.pack(f">{_3space_format_to_external('B')}", checksum & 0xFFFF))
+        self.com.write(struct.pack(f">{yost_format_to_struct_format('B')}", checksum & 0xFFFF))
         start_time = time.perf_counter()
         result = []
         while len(result) == 0 and time.perf_counter() - start_time < timeout:
@@ -1648,7 +1396,7 @@ class ThreespaceSensor:
 
     def bootloader_get_state(self):
         self.com.write('OO'.encode()) #O is sent twice to compensate for a bug in some versions of the bootloader where the next character is ignored (except for R, do NOT send R after O, it will erase all settings)
-        state = struct.unpack(f">{_3space_format_to_external('u')}", self.com.read(4))[0]
+        state = struct.unpack(f">{yost_format_to_struct_format('u')}", self.com.read(4))[0]
         self.com.read_all() #Once the bootloader is fixed, it will respond twice instead of once. So consume any remainder
         return state
 
@@ -1683,31 +1431,106 @@ class ThreespaceSensor:
 #But basically, these are all just prototypes. Information about the commands is in the table
 #beneath here, and the API simply calls its execute_command function on the Command information objects defined.
 
+    def getTaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ...                        
+    def getTaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getDifferenceQuaternion(self) -> ThreespaceCmdResult[list[float]]: ... 
+
+    def getUntaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...  
+    def getUntaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getUntaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getUntaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getUntaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...    
+    def getUntaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...  
+
+    def getPrimaryBarometerPressure(self) -> ThreespaceCmdResult[float]: ...
+    def getPrimaryBarometerAltitude(self) -> ThreespaceCmdResult[float]: ...    
+    def getBarometerAltitude(self, id: int) -> ThreespaceCmdResult[float]: ...   
+    def getBarometerPressure(self, id: int) -> ThreespaceCmdResult[float]: ... 
+
+    def setOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+    def resetBaseOffset(self) -> ThreespaceCmdResult[None]: ...
+    def setBaseOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+
+    def getAllPrimaryNormalizedData(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getAllPrimaryCorrectedData(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getPrimaryGlobalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getPrimaryLocalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ... 
+
+    def getTemperatureCelsius(self) -> ThreespaceCmdResult[float]: ... 
+    def getTemperatureFahrenheit(self) -> ThreespaceCmdResult[float]: ...   
+
+    def getMotionlessConfidenceFactor(self) -> ThreespaceCmdResult[float]: ...
+
+    def correctRawGyroData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def correctRawAccelData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def correctRawMagData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getNormalizedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getNormalizedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getNormalizedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getCorrectedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getCorrectedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getCorrectedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
+    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
+    def disableMSC(self) -> ThreespaceCmdResult[None]: ...
+
+    def formatSd(self) -> ThreespaceCmdResult[None]: ...
+    def startDataLogging(self) -> ThreespaceCmdResult[None]: ...
+    def stopDataLogging(self) -> ThreespaceCmdResult[None]: ...
+
+    def setDateTime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> ThreespaceCmdResult[None]: ...
+    def getDateTime(self) -> ThreespaceCmdResult[list[int]]: ...
+
+    def getRawGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getRawAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getRawMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
     def eeptsStart(self) -> ThreespaceCmdResult[None]: ...
     def eeptsStop(self) -> ThreespaceCmdResult[None]: ...
     def eeptsGetOldestStep(self) -> ThreespaceCmdResult[list]: ...
     def eeptsGetNewestStep(self) -> ThreespaceCmdResult[list]: ...   
     def eeptsGetNumStepsAvailable(self) -> ThreespaceCmdResult[int]: ...    
     def eeptsInsertGPS(self, latitude: float, longitude: float) -> ThreespaceCmdResult[None]: ...
-    def eeptsAutoOffset(self) -> ThreespaceCmdResult[None]: ... 
-    def getRawGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getRawAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getRawMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ...                        
-    def getTaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getDifferenceQuaternion(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getUntaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...  
-    def getUntaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getUntaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getUntaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getUntaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
-    def commitSettings(self) -> ThreespaceCmdResult[None]: ...    
-    def getMotionlessConfidenceFactor(self) -> ThreespaceCmdResult[float]: ...
-    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
-    def disableMSC(self) -> ThreespaceCmdResult[None]: ...  
+    def eeptsAutoOffset(self) -> ThreespaceCmdResult[None]: ...
+
+    def getStreamingLabel(self, cmd_num: int) -> ThreespaceCmdResult[str]: ...
+    def getStreamingBatch(self) -> ThreespaceCmdResult[list]: ...
+    def startStreaming(self) -> ThreespaceCmdResult[None]: ...
+    def stopStreaming(self) -> ThreespaceCmdResult[None]: ...
+    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]: ...
+
+    def getDateTimeString(self) -> ThreespaceCmdResult[str]: ...
+    def getTimestamp(self) -> ThreespaceCmdResult[int]: ...
+
+    def tareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+    def setBaseTareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+
+    def resetFilter(self) -> ThreespaceCmdResult[None]: ...
+    def getNumDebugMessages(self) -> ThreespaceCmdResult[int]: ...
+    def getOldestDebugMessage(self) -> ThreespaceCmdResult[str]: ...
+    def selfTest(self) -> ThreespaceCmdResult[int]: ...
+
+    def beginPassiveAutoCalibration(self, enabled_bitfield: int) -> ThreespaceCmdResult[None]: ...
+    def getActivePassiveAutoCalibration(self) -> ThreespaceCmdResult[int]: ...
+    def beginActiveAutoCalibration(self) -> ThreespaceCmdResult[None]: ...
+    def isActiveAutoCalibrationActive(self) -> ThreespaceCmdResult[int]: ... 
+
+    def getLastLogCursorInfo(self) -> ThreespaceCmdResult[tuple[int,str]]: ... 
     def getNextDirectoryItem(self) -> ThreespaceCmdResult[list[int,str,int]]: ...
     def changeDirectory(self, path: str) -> ThreespaceCmdResult[None]: ...   
     def openFile(self, path: str) -> ThreespaceCmdResult[None]: ... 
@@ -1715,248 +1538,31 @@ class ThreespaceSensor:
     def fileGetRemainingSize(self) -> ThreespaceCmdResult[int]: ...
     def fileReadLine(self) -> ThreespaceCmdResult[str]: ... 
     def fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]: ...
-    def __fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]:    
-        self.check_dirty()
-        cmd = self.commands[THREESPACE_FILE_READ_BYTES_COMMAND_NUM]
-        cmd.send_command(self.com, num_bytes, header_enabled=self.header_enabled)
-        self.__await_command(cmd)
-        if self.header_enabled:
-            header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
-            num_bytes = min(num_bytes, header.length) #Its possible for less bytes to be returned when an error occurs (EX: Reading from unopened file)
-        else:
-            header = ThreespaceHeader()
-
-        response = self.com.read(num_bytes)
-        return ThreespaceCmdResult(response, header, data_raw_binary=response)
-
     def deleteFile(self, path: str) -> ThreespaceCmdResult[None]: ...
-    def getStreamingBatch(self) -> ThreespaceCmdResult[list]: ...
-    def setOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
-    def resetBaseOffset(self) -> ThreespaceCmdResult[None]: ...
-    def setBaseOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...    
-    def getTaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...    
-    def getUntaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...        
-    def getPrimaryBarometerPressure(self) -> ThreespaceCmdResult[float]: ...
-    def getPrimaryBarometerAltitude(self) -> ThreespaceCmdResult[float]: ...    
-    def getBarometerAltitude(self, id: int) -> ThreespaceCmdResult[float]: ...   
-    def getBarometerPressure(self, id: int) -> ThreespaceCmdResult[float]: ...      
-    def getAllPrimaryNormalizedData(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryNormalizedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryNormalizedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryNormalizedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getAllPrimaryCorrectedData(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryCorrectedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryCorrectedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryCorrectedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...    
-    def getPrimaryGlobalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getPrimaryLocalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ...         
-    def getTemperatureCelsius(self) -> ThreespaceCmdResult[float]: ... 
-    def getTemperatureFahrenheit(self) -> ThreespaceCmdResult[float]: ...     
-    def getNormalizedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getNormalizedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getNormalizedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...     
-    def getCorrectedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getCorrectedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getCorrectedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...    
-    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
-    def disableMSC(self) -> ThreespaceCmdResult[None]: ...
-    def getDateTimeString(self) -> ThreespaceCmdResult[str]: ...
-    def getTimestamp(self) -> ThreespaceCmdResult[int]: ...
+    def setCursor(self, cursor_index: int) -> ThreespaceCmdResult[None]: ...
+    def fileStartStream(self) -> ThreespaceCmdResult[int]: ...
+    def fileStopStream(self) -> ThreespaceCmdResult[None]: ...
+
+    def getBatteryCurrent(self) -> ThreespaceCmdResult[float]: ...
     def getBatteryVoltage(self) -> ThreespaceCmdResult[float]: ...
     def getBatteryPercent(self) -> ThreespaceCmdResult[int]: ...
-    def getBatteryStatus(self) -> ThreespaceCmdResult[int]: ...     
+    def getBatteryStatus(self) -> ThreespaceCmdResult[int]: ... 
+
     def getGpsActiveState(self) -> ThreespaceCmdResult[bool]: ...
     def getGpsCoord(self) -> ThreespaceCmdResult[list[float]]: ...
     def getGpsAltitude(self) -> ThreespaceCmdResult[float]: ...
     def getGpsFixState(self) -> ThreespaceCmdResult[int]: ...
     def getGpsHdop(self) -> ThreespaceCmdResult[float]: ...
-    def getGpsSatellites(self) -> ThreespaceCmdResult[int]: ...             
+    def getGpsSatellites(self) -> ThreespaceCmdResult[int]: ...
+
+    def commitSettings(self) -> ThreespaceCmdResult[None]: ...
+    def softwareReset(self): ...
+    def enterBootloader(self): ...      
+
+    def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...
     def getButtonState(self) -> ThreespaceCmdResult[int]: ...
-    def correctRawGyroData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def correctRawAccelData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def correctRawMagData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def formatSd(self) -> ThreespaceCmdResult[None]: ...
-    def setDateTime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> ThreespaceCmdResult[None]: ...
-    def getDateTime(self) -> ThreespaceCmdResult[list[int]]: ...
-    def tareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
-    def setBaseTareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ... 
-    def resetFilter(self) -> ThreespaceCmdResult[None]: ...
-    def getNumDebugMessages(self) -> ThreespaceCmdResult[int]: ...
-    def getOldestDebugMessage(self) -> ThreespaceCmdResult[str]: ...
-    def selfTest(self) -> ThreespaceCmdResult[int]: ...
-    def beginPassiveAutoCalibration(self, enabled_bitfield: int) -> ThreespaceCmdResult[None]: ...
-    def getActivePassiveAutoCalibration(self) -> ThreespaceCmdResult[int]: ...
-    def beginActiveAutoCalibration(self) -> ThreespaceCmdResult[None]: ...
-    def isActiveAutoCalibrationActive(self) -> ThreespaceCmdResult[int]: ...            
-    def getStreamingLabel(self, cmd_num: int) -> ThreespaceCmdResult[str]: ...
-    def setCursor(self, cursor_index: int) -> ThreespaceCmdResult[None]: ...
-    def getLastLogCursorInfo(self) -> ThreespaceCmdResult[tuple[int,str]]: ...
-    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]: ...  
-    def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...           
-
-THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM = 84
-THREESPACE_START_STREAMING_COMMAND_NUM = 85
-THREESPACE_STOP_STREAMING_COMMAND_NUM = 86
-THREESPACE_FILE_READ_BYTES_COMMAND_NUM = 177
-THREESPACE_SOFTWARE_RESET_COMMAND_NUM = 226
-THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM = 229
-
-#Acutal command definitions
-_threespace_commands: list[ThreespaceCommand] = [
-    #Tared Orientation
-    ThreespaceCommand("getTaredOrientation", 0, "", "ffff"),
-    ThreespaceCommand("getTaredOrientationAsEulerAngles", 1, "", "fff"),
-    ThreespaceCommand("getTaredOrientationAsRotationMatrix", 2, "", "fffffffff"),
-    ThreespaceCommand("getTaredOrientationAsAxisAngles", 3, "", "ffff"),
-    ThreespaceCommand("getTaredOrientationAsTwoVector", 4, "", "ffffff"),
-
-    #Weird
-    ThreespaceCommand("getDifferenceQuaternion", 5, "", "ffff"),
-
-    #Untared Orientation
-    ThreespaceCommand("getUntaredOrientation", 6, "", "ffff"),
-    ThreespaceCommand("getUntaredOrientationAsEulerAngles", 7, "", "fff"),
-    ThreespaceCommand("getUntaredOrientationAsRotationMatrix", 8, "", "fffffffff"),
-    ThreespaceCommand("getUntaredOrientationAsAxisAngles", 9, "", "ffff"),
-    ThreespaceCommand("getUntaredOrientationAsTwoVector", 10, "", "ffffff"),
-    
-    #Late orientation additions
-    ThreespaceCommand("getTaredTwoVectorInSensorFrame", 11, "", "ffffff"),
-    ThreespaceCommand("getUntaredTwoVectorInSensorFrame", 12, "", "ffffff"),
-
-    ThreespaceCommand("getPrimaryBarometerPressure", 13, "", "f"),
-    ThreespaceCommand("getPrimaryBarometerAltitude", 14, "", "f"),
-    ThreespaceCommand("getBarometerAltitude", 15, "b", "f"),
-    ThreespaceCommand("getBarometerPressure", 16, "b", "f"),
-
-    ThreespaceCommand("setOffsetWithCurrentOrientation", 19, "", ""),
-    ThreespaceCommand("resetBaseOffset", 20, "", ""),
-    ThreespaceCommand("setBaseOffsetWithCurrentOrientation", 22, "", ""),
-
-    ThreespaceCommand("getAllPrimaryNormalizedData", 32, "", "fffffffff"),
-    ThreespaceCommand("getPrimaryNormalizedGyroRate", 33, "", "fff"),
-    ThreespaceCommand("getPrimaryNormalizedAccelVec", 34, "", "fff"),
-    ThreespaceCommand("getPrimaryNormalizedMagVec", 35, "", "fff"),
-
-    ThreespaceCommand("getAllPrimaryCorrectedData", 37, "", "fffffffff"),
-    ThreespaceCommand("getPrimaryCorrectedGyroRate", 38, "", "fff"),
-    ThreespaceCommand("getPrimaryCorrectedAccelVec", 39, "", "fff"),
-    ThreespaceCommand("getPrimaryCorrectedMagVec", 40, "", "fff"),
-
-    ThreespaceCommand("getPrimaryGlobalLinearAccel", 41, "", "fff"),
-    ThreespaceCommand("getPrimaryLocalLinearAccel", 42, "", "fff"),
-
-    ThreespaceCommand("getTemperatureCelsius", 43, "", "f"),
-    ThreespaceCommand("getTemperatureFahrenheit", 44, "", "f"),
-
-    ThreespaceCommand("getMotionlessConfidenceFactor", 45, "", "f"),
-
-    ThreespaceCommand("correctRawGyroData", 48, "fffb", "fff"),
-    ThreespaceCommand("correctRawAccelData", 49, "fffb", "fff"),
-    ThreespaceCommand("correctRawMagData", 50, "fffb", "fff"),
-
-    ThreespaceCommand("getNormalizedGyroRate", 51, "b", "fff"),
-    ThreespaceCommand("getNormalizedAccelVec", 52, "b", "fff"),
-    ThreespaceCommand("getNormalizedMagVec", 53, "b", "fff"),
-
-    ThreespaceCommand("getCorrectedGyroRate", 54, "b", "fff"),
-    ThreespaceCommand("getCorrectedAccelVec", 55, "b", "fff"),
-    ThreespaceCommand("getCorrectedMagVec", 56, "b", "fff"),
-
-    ThreespaceCommand("enableMSC", 57, "", ""),
-    ThreespaceCommand("disableMSC", 58, "", ""),
-
-    ThreespaceCommand("formatSd", 59, "", ""),
-    ThreespaceCommand("startDataLogging", 60, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__startDataLogging),
-    ThreespaceCommand("stopDataLogging", 61, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__stopDataLogging),
-
-    ThreespaceCommand("setDateTime", 62, "Bbbbbb", ""),
-    ThreespaceCommand("getDateTime", 63, "", "Bbbbbb"),
-
-    ThreespaceCommand("getRawGyroRate", 65, "b", "fff"),
-    ThreespaceCommand("getRawAccelVec", 66, "b", "fff"),
-    ThreespaceCommand("getRawMagVec", 67, "b", "fff"),
-
-    ThreespaceCommand("eeptsStart", 68, "", ""),
-    ThreespaceCommand("eeptsStop", 69, "", ""),
-    ThreespaceCommand("eeptsGetOldestStep", 70, "", "uuddffffffbbff"),
-    ThreespaceCommand("eeptsGetNewestStep", 71, "", "uuddffffffbbff"),
-    ThreespaceCommand("eeptsGetNumStepsAvailable", 72, "", "b"),
-    ThreespaceCommand("eeptsInsertGPS", 73, "dd", ""),
-    ThreespaceCommand("eeptsAutoOffset", 74, "", ""),
-
-    ThreespaceCommand("getStreamingLabel", 83, "b", "S"),
-    ThreespaceCommand("getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
-    ThreespaceCommand("startStreaming", THREESPACE_START_STREAMING_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__startStreaming),
-    ThreespaceCommand("stopStreaming", THREESPACE_STOP_STREAMING_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__stopStreaming),
-    ThreespaceCommand("pauseLogStreaming", 87, "b", ""),
-    
-    ThreespaceCommand("getDateTimeString", 93, "", "S"),
-    ThreespaceCommand("getTimestamp", 94, "", "U"),
-
-    ThreespaceCommand("tareWithCurrentOrientation", 96, "", ""),
-    ThreespaceCommand("setBaseTareWithCurrentOrientation", 97, "", ""),
-
-    ThreespaceCommand("resetFilter", 120, "", ""),
-    ThreespaceCommand("getNumDebugMessages", 126, "", "B"),
-    ThreespaceCommand("getOldestDebugMessage", 127, "", "S"),
-    ThreespaceCommand("selfTest", 128, "", "u"),
-
-    ThreespaceCommand("beginPassiveAutoCalibration", 165, "b", ""),
-    ThreespaceCommand("getActivePassiveAutoCalibration", 166, "", "b"),
-    ThreespaceCommand("beginActiveAutoCalibration", 167, "", ""),
-    ThreespaceCommand("isActiveAutoCalibrationActive", 168, "", "b"),
-
-    ThreespaceCommand("getLastLogCursorInfo", 170, "", "US"),
-    ThreespaceCommand("getNextDirectoryItem", 171, "", "bsU"),
-    ThreespaceCommand("changeDirectory", 172, "S", ""),
-    ThreespaceCommand("openFile", 173, "S", ""),
-    ThreespaceCommand("closeFile", 174, "", ""),
-    ThreespaceCommand("fileGetRemainingSize", 175, "", "U"),
-    ThreespaceCommand("fileReadLine", 176, "", "S"),
-    ThreespaceCommand("fileReadBytes", THREESPACE_FILE_READ_BYTES_COMMAND_NUM, "B", "S", custom_func=ThreespaceSensor._ThreespaceSensor__fileReadBytes), #This has to be handled specially as the output is variable length BYTES not STRING
-    ThreespaceCommand("deleteFile", 178, "S", ""),
-    ThreespaceCommand("setCursor", 179, "U", ""),
-    ThreespaceCommand("fileStartStream", 180, "", "U", custom_func=ThreespaceSensor._ThreespaceSensor__fileStartStream),
-    ThreespaceCommand("fileStopStream", 181, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__fileStopStream),
-
-    ThreespaceCommand("getBatteryCurrent", 200, "", "I"),
-    ThreespaceCommand("getBatteryVoltage", 201, "", "f"),
-    ThreespaceCommand("getBatteryPercent", 202, "", "b"),
-    ThreespaceCommand("getBatteryStatus", 203, "", "b"),
-
-    ThreespaceCommand("getGpsActiveState", 214, "", "b"),
-    ThreespaceCommand("getGpsCoord", 215, "", "dd"),
-    ThreespaceCommand("getGpsAltitude", 216, "", "f"),
-    ThreespaceCommand("getGpsFixState", 217, "", "b"),
-    ThreespaceCommand("getGpsHdop", 218, "", "f"),
-    ThreespaceCommand("getGpsSatellites", 219, "", "b"),
-
-    ThreespaceCommand("commitSettings", 225, "", ""),
-    ThreespaceCommand("softwareReset", THREESPACE_SOFTWARE_RESET_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__softwareReset),
-    ThreespaceCommand("enterBootloader", THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__enterBootloader),
-
-    ThreespaceCommand("getLedColor", 238, "", "fff"),
-
-    ThreespaceCommand("getButtonState", 250, "", "b"),
-]
-
-def threespaceCommandGet(cmd_num: int):
-    for command in _threespace_commands:
-        if command.info.num == cmd_num:
-            return command
-    return None
-
-def threespaceCommandGetByName(name: str):
-    for command in _threespace_commands:
-        if command.info.name == name:
-            return command
-    return None
-
-def threespaceCommandGetInfo(cmd_num: int):
-    command = threespaceCommandGet(cmd_num)
-    if command is None: return None
-    return command.info
+                                               
+               
 
 def threespaceGetHeaderLabels(header_info: ThreespaceHeaderInfo):
     order = []
