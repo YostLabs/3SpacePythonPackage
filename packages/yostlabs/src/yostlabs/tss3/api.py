@@ -15,6 +15,7 @@ import struct
 import types
 import inspect
 import time
+import warnings
 
 #Response codes for when awaiting a command response. Used to determine if successfully parsed a response,
 #there was an error, or an intermediate response was detected.
@@ -144,7 +145,7 @@ class ThreespaceSensor:
         self.dirty_cache = False #No longer dirty cause initializing
         
         #Only reinitialize settings if detected firmware version changed (Or on startup)
-        version = self.get_settings("version_firmware")
+        version = self.read_settings("version_firmware")["version_firmware"]
         if version != self.firmware_version:
             self.firmware_version = version
             self.__initialize_commands()
@@ -173,9 +174,9 @@ class ThreespaceSensor:
         self.streaming_packet_size = 0
         self._force_stop_streaming()
 
-        self.__cache_serial_number(int(self.get_settings("serial_number"), 16))
+        self.__cache_serial_number(self.read_settings("serial_number")["serial_number"])
         self.__empty_debug_cache()
-        self.immediate_debug = int(self.get_settings("debug_mode")) == 1 #Needed for some startup processes when restarting
+        self.immediate_debug = self.read_settings("debug_mode")["debug_mode"] == 1 #Needed for some startup processes when restarting
 
         #Now reinitialize the cached settings
         self.__cache_header_settings()
@@ -186,7 +187,7 @@ class ThreespaceSensor:
         self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
         self.funcs = {}
 
-        valid_commands = self.get_settings("valid_commands")
+        valid_commands = self.read_settings("valid_commands")["valid_commands"]
         if valid_commands == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
             #Treat all commands as valid because firmware is too old to have this setting
             valid_commands = list(range(256))
@@ -211,7 +212,7 @@ class ThreespaceSensor:
 #------------------------------INITIALIZATION HELPERS--------------------------------------------
 
     def __get_valid_components(self, key: str):
-        valid = self.get_settings(key)
+        valid = self.read_settings(key)[key]
         if len(valid) == 0: return []
         return [int(v) for v in valid.split(',')]
 
@@ -264,8 +265,7 @@ class ThreespaceSensor:
         """
         Should be called any time changes are made to the header. Will normally be called via the check_dirty/reinit
         """
-        result = self.get_settings("header")
-        header = int(result)
+        header = self.read_settings("header")["header"]
         #API requires these bits to be enabled, so don't let them be disabled
         required_header = header | THREESPACE_REQUIRED_HEADER
         if header == self.header_info.bitfield and header == required_header: return #Nothing to update
@@ -276,12 +276,12 @@ class ThreespaceSensor:
         #positions, causing a situation where parsing a command and streaming at the same time breaks since it thinks both are valid cmd echoes.
         if self.is_streaming:
             self.log("Preventing header change due to currently streaming")
-            self.set_settings(header=self.header_info.bitfield)
+            self.write_settings(header=self.header_info.bitfield)
             return
         
         if required_header != header:
             self.log(f"Forcing header checksum, echo, and length enabled")
-            self.set_settings(header=required_header)
+            self.write_settings(header=required_header)
             return
         
         #Current/New header is valid, so can cache it
@@ -299,7 +299,9 @@ class ThreespaceSensor:
         self.sensor_family = self.hardware_version.family_name
         if self.sensor_family == "Unknown":
             self.log(f"Unknown Sensor Family detected, {self.hardware_version.family_id}")
-            
+
+    def __cache_debug_mode(self):
+        self.immediate_debug = self.read_settings("debug_mode")["debug_mode"] == 1  
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
     def set_cached_settings_dirty(self):
@@ -343,83 +345,14 @@ class ThreespaceSensor:
 
 #-----------------------------------------------BASE SETTINGS PROTOCOL------------------------------------------------
 
-    #Helper for converting python types to strings that set_settings can understand
-    def __internal_str(self, value):
-        if isinstance(value, float):
-            return f"{value:.10f}"
-        elif isinstance(value, bool):
-            return int(value)
-        elif isinstance(value, Enum):
-            return str(value.value)
-        else:
-            return str(value)        
-
-    #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require caching the header
-    HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
-    def set_settings(self, param_string: str = None, **kwargs):
-        self.check_dirty()
-        #Build cmd string
-        params = []
-        if param_string is not None:
-            params.append(param_string)
-        
-        for key, value in kwargs.items():
-            if isinstance(value, list):
-                value = [self.__internal_str(v) for v in value]
-                value = ','.join(value)
-            else:
-                value = self.__internal_str(value)
-            params.append(f"{key}={value}")
-        cmd = f"!{';'.join(params)}\n"
-
-        if len(cmd) > 2048:
-            self.log("Too many settings in one set_settings call. Max str length is 2048 but got", len(cmd))
-            return 0xFF, 0xFF
-
-        #For dirty check
-        param_dict = threespace_settings_string_to_dict(cmd[1:-1])
-
-        #Must enable this before sending the set so can properly handle reading the response
-        if "debug_mode=1" in cmd:
-            self.immediate_debug = True
-
-        #Send cmd
-        self.com.write(cmd.encode())
-
-        #Default values
-        err = 3
-        num_successes = 0
-
-        response = self.__await_set_settings(self.com.timeout)
-        if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
-            self.log("Failed to get set_settings response")
-            return err, num_successes
-
-        #Decode response
-        response = self.com.readline()
-        response = response.decode().strip()
-        err, num_successes = response.split(',')
-        err = int(err)
-        num_successes = int(num_successes)    
-
-        #Handle updating state variables based on settings
-        #If the user modified the header, need to cache the settings so the API knows how to interpret responses
-        if "header" in cmd.lower(): #First do a quick check
-            if any(v in param_dict.keys() for v in ThreespaceSensor.HEADER_KEYS): #Then do a longer check
-                self.__cache_header_settings()
-        
-        if "stream_slots" in cmd.lower():
-            self.__cache_streaming_settings()
-        
-        #All the settings changed, just need to mark dirty
-        if any(v in param_dict.keys() for v in ("default", "reboot")):
-            self.set_cached_settings_dirty()
-
-        if err:
-            self.log(f"Err setting {cmd}: {err=} {num_successes=}")
-        return err, num_successes
+#---------------------------------------BINARY SETTINGS PROTOCOL------------------------------------------------
 
     def read_settings(self, *keys: str) -> dict[str, Any]:
+        """
+        Read multiple settings at once using the binary settings protocol.
+        The values will be returned in a dictionary with the setting keys as the keys and the parsed values as the values.
+        The values will be parsed according to their data type, not just as strings.
+        """
         self.check_dirty()
 
         keystr = ';'.join(keys)
@@ -447,7 +380,6 @@ class ThreespaceSensor:
 
         #Parse the actual settings
         return self.__parse_read_setting_response(keystr)
-        
 
     def __parse_read_setting_response(self, keystring: str):
         settings = {}
@@ -533,7 +465,184 @@ class ThreespaceSensor:
             #Good enough, this is more then likely a read setting response.
             return THREESPACE_AWAIT_COMMAND_FOUND
 
-    def get_settings(self, *args: str, format="Mixed") -> dict[str, str] | str:
+        return THREESPACE_AWAIT_COMMAND_TIMEOUT
+
+    #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require caching the header
+    HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
+    def write_settings(self, **kwargs):
+        self.check_dirty()
+
+        #Check to see if debug mode is being updated. This must be done before sending the command so that the API can properly
+        #handle the response if debug mode is being turned on
+        if "debug_mode" in kwargs and int(kwargs["debug_mode"]) == 1:
+            self.immediate_debug = True
+        
+        #Build cmd string and send
+        cmd = bytearray([THREESPACE_BINARY_WRITE_SETTINGS_START_BYTE_HEADER])
+        checksum = 0
+        for key, value in kwargs.items():
+            setting = threespace_setting_get(key)
+            if setting is None:
+                raise RuntimeError(f"Failed to write setting, unregistered key: {key}")
+            if setting.in_format is None:
+                raise RuntimeError(f"Failed to write setting, key is not writable: {key}")
+            
+            #Add the key
+            key_bytes = key.encode() + b'\0'
+            cmd.extend(key_bytes)
+            checksum += sum(key_bytes)
+
+            #Add the value
+            if hasattr(value, '__iter__') and not isinstance(value, (str, bytes, bytearray)):
+                #Must unpack if list/tuple since format expects individual values
+                value_bytes = setting.in_format.format_data(*value)
+            else:
+                #Singular Value
+                value_bytes = setting.in_format.format_data(value)
+
+            cmd.extend(value_bytes)
+            checksum += sum(value_bytes)
+
+            cmd.append(ord(';'))
+            checksum += ord(';')
+
+        #Done writing keys and values, remove the last ';' and add the null terminator
+        checksum -= ord(';')
+        cmd[-1] = 0
+        cmd.append(checksum % 256)
+        self.com.write(cmd)
+
+        #Await Response
+        if self.__await_write_settings_response(len(kwargs)) != THREESPACE_AWAIT_COMMAND_FOUND:
+            raise RuntimeError("Failed to get write_settings response")
+
+        #Read in Response
+        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the header ID
+        err, num_successes, checksum = self.com.read(3)
+        if err:
+            self.log(f"Err setting {cmd}: {err=} {num_successes=}")
+
+        if any(v in kwargs.keys() for v in ("default", "reboot")):
+            self.log("Settings that require reboot changed, marking cache as dirty")
+            self.set_cached_settings_dirty()
+
+        #Handle caching any settings that need to be cached when changed.
+        if b"header" in cmd:
+            if any(v in kwargs.keys() for v in ThreespaceSensor.HEADER_KEYS):
+                self.__cache_header_settings()
+        
+        if "stream_slots" in kwargs:
+            self.__cache_streaming_settings()
+
+        if "debug_mode" in kwargs:
+            self.__cache_debug_mode()
+
+        return err, num_successes
+
+    def __await_write_settings_response(self, num_keys: int):
+        start_time = time.perf_counter()
+        while time.perf_counter() - start_time < self.com.timeout:
+            if self.com.length < THREESPACE_BINARY_WRITE_SETTING_WITH_HEADER_RESPONSE_LEN:
+                continue
+
+            #Check for the ID/ECHO for writing settings
+            id = self.com.peek(THREESPACE_BINARY_SETTINGS_ID_SIZE)
+            id = struct.unpack("<I", id)[0]
+            if id != THREESPACE_BINARY_WRITE_SETTINGS_ID:
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            #Peek full response and validate checksum and proper format
+            response = self.com.peek(THREESPACE_BINARY_WRITE_SETTING_WITH_HEADER_RESPONSE_LEN)[THREESPACE_BINARY_SETTINGS_ID_SIZE:]
+            err, num_successes, checksum = response
+            if  (checksum != err + num_successes) or        \
+                (err == 0 and num_successes != num_keys) or \
+                (err != 0 and num_successes >= num_keys) or \
+                (num_successes > num_keys):
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            return THREESPACE_AWAIT_COMMAND_FOUND
+    
+        return THREESPACE_AWAIT_COMMAND_TIMEOUT
+
+#-------------------------------------ASCII SETTINGS PROTOCOL------------------------------------------------
+
+    #Helper for converting python types to strings that set_settings can understand
+    def __internal_str(self, value):
+        if isinstance(value, float):
+            return f"{value:.10f}"
+        elif isinstance(value, bool):
+            return int(value)
+        elif isinstance(value, Enum):
+            return str(value.value)
+        else:
+            return str(value)        
+
+    def write_settings_ascii(self, param_string: str = None, **kwargs):
+        self.check_dirty()
+        #Build cmd string
+        params = []
+        if param_string is not None:
+            params.append(param_string)
+        
+        for key, value in kwargs.items():
+            if isinstance(value, list):
+                value = [self.__internal_str(v) for v in value]
+                value = ','.join(value)
+            else:
+                value = self.__internal_str(value)
+            params.append(f"{key}={value}")
+        cmd = f"!{';'.join(params)}\n"
+
+        if len(cmd) > 2048:
+            self.log("Too many settings in one set_settings call. Max str length is 2048 but got", len(cmd))
+            return 0xFF, 0xFF
+
+        #For dirty check
+        param_dict = threespace_settings_string_to_dict(cmd[1:-1])
+
+        #Must enable this before sending the set so can properly handle reading the response
+        if "debug_mode=1" in cmd:
+            self.immediate_debug = True
+
+        #Send cmd
+        self.com.write(cmd.encode())
+
+        #Default values
+        err = 3
+        num_successes = 0
+
+        response = self.__await_set_settings_ascii(self.com.timeout)
+        if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
+            self.log("Failed to get set_settings response")
+            return err, num_successes
+
+        #Decode response
+        response = self.com.readline()
+        response = response.decode().strip()
+        err, num_successes = response.split(',')
+        err = int(err)
+        num_successes = int(num_successes)    
+
+        #Handle updating state variables based on settings
+        #If the user modified the header, need to cache the settings so the API knows how to interpret responses
+        if "header" in cmd.lower(): #First do a quick check
+            if any(v in param_dict.keys() for v in ThreespaceSensor.HEADER_KEYS): #Then do a longer check
+                self.__cache_header_settings()
+        
+        if "stream_slots" in cmd.lower():
+            self.__cache_streaming_settings()
+        
+        #All the settings changed, just need to mark dirty
+        if any(v in param_dict.keys() for v in ("default", "reboot")):
+            self.set_cached_settings_dirty()
+
+        if err:
+            self.log(f"Err setting {cmd}: {err=} {num_successes=}")
+        return err, num_successes
+
+    def read_settings_ascii(self, *args: str, format="Mixed") -> dict[str, str] | str:
         """
         Gets the values for all requested settings. Settings are request by their string name. The result will be
         the string response to that setting.
@@ -557,7 +666,7 @@ class ThreespaceSensor:
             min_resp_length += min(len(key) + 1, error_response_len)
         
         
-        response = self.__await_get_settings(min_resp_length, timeout=self.com.timeout)
+        response = self.__await_get_settings_ascii(min_resp_length, timeout=self.com.timeout)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
             self.log("Requested:", cmd)
             self.log("Potential response:", self.com.peekline())
@@ -582,10 +691,20 @@ class ThreespaceSensor:
         if len(response_dict) == 1 and format == "Mixed":
             return list(response_dict.values())[0]
         return response_dict
+    
+    def set_settings(self, param_string: str = None, **kwargs):
+        """Deprecated: Use write_settings instead."""
+        warnings.warn("set_settings is deprecated, use write_settings instead.", DeprecationWarning, stacklevel=2)
+        return self.write_settings_ascii(param_string, **kwargs)
+
+    def get_settings(self, *args: str, format="Mixed") -> dict[str, str] | str:
+        """Deprecated: Use read_settings instead."""
+        warnings.warn("get_settings is deprecated, use read_settings instead.", DeprecationWarning, stacklevel=2)
+        return self.read_settings_ascii(*args, format=format)
 
     #-----------Base Settings Parsing----------------
 
-    def __await_set_settings(self, timeout=2):
+    def __await_set_settings_ascii(self, timeout=2):
         start_time = time.perf_counter()
         MINIMUM_LENGTH = len("0,0\r\n")
         MAXIMUM_LENGTH = len("255,255\r\n")
@@ -625,7 +744,7 @@ class ThreespaceSensor:
             self.misaligned = False
             return THREESPACE_AWAIT_COMMAND_FOUND
             
-    def __await_get_settings(self, min_resp_length: int, timeout=2, check_bootloader=False):
+    def __await_get_settings_ascii(self, min_resp_length: int, timeout=2, check_bootloader=False):
         start_time = time.perf_counter()
 
         while True:
@@ -667,31 +786,6 @@ class ThreespaceSensor:
                 self.__internal_update(self.__try_peek_header())
                 continue
             
-            self.misaligned = False
-            return THREESPACE_AWAIT_COMMAND_FOUND
-
-    """
-    Incomplete, binary settings protocol is Work In Progress
-    """
-    def __await_get_settings_binary(self, min_resp_length: int, timeout=2, check_bootloader=False):
-        start_time = time.perf_counter()
-
-        while True:
-            remaining_time = timeout - (time.perf_counter() - start_time)
-            if remaining_time <= 0:
-                return THREESPACE_AWAIT_COMMAND_TIMEOUT
-            
-            if self.com.length < min_resp_length: continue
-            if check_bootloader and self.com.peek(2) == b'OK':
-                return THREESPACE_AWAIT_BOOTLOADER
-            
-            id = self.com.peek(THREESPACE_BINARY_SETTINGS_ID_SIZE)
-            if struct.unpack("<L", id)[0] != THREESPACE_BINARY_READ_SETTINGS_ID:
-                self.__internal_update(self.__try_peek_header())
-                continue
-            
-            #TODO: Check the rest of the message structure, not just the ID
-
             self.misaligned = False
             return THREESPACE_AWAIT_COMMAND_FOUND
 
@@ -892,7 +986,7 @@ class ThreespaceSensor:
 
     def __cache_streaming_settings(self):
         cached_slots: list[ThreespaceCommand] = []
-        slots: str = self.get_settings("stream_slots")
+        slots: str = self.read_settings("stream_slots")["stream_slots"]
         slots = slots.split(',')
         for slot in slots:
             slot = int(slot.split(':')[0]) #Ignore parameters if any
@@ -1074,9 +1168,9 @@ class ThreespaceSensor:
         self.__cache_streaming_settings()
 
         #Must check whether streaming is being done alongside logging or not. Also configure required settings if it is
-        streaming = bool(int(self.get_settings("log_immediate_output")))
+        streaming = bool(self.read_settings("log_immediate_output")["log_immediate_output"])
         if streaming:
-            self.set_settings(log_immediate_output_header_enabled=1,
+            self.write_settings(log_immediate_output_header_enabled=1,
                                 log_immediate_output_header_mode=THREESPACE_OUTPUT_MODE_BINARY) #Must have header enabled in the log messages for this to work and must use binary for the header
         
         result = self.execute_command(self.__get_command("startDataLogging"))
@@ -1153,7 +1247,7 @@ class ThreespaceSensor:
         #By then adding a ?UUU, that will trigger a <KEY_ERROR> if in firmware. So, can tell if in bootloader or firmware by checking for OK or <KEY_ERROR>
         bootloader = False
         self.com.write("UUU?UUU\n".encode())
-        response = self.__await_get_settings(2, check_bootloader=True)
+        response = self.__await_get_settings_ascii(2, check_bootloader=True)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT: 
             self.log("Requested Bootloader, Got:")
             self.log(self.com.peek(self.com.length))
