@@ -127,8 +127,8 @@ class ThreespaceSensor:
         if refresh_timeout is None: return
         while len(data) > 0: #Continue until all data is cleared
             self.log(f"Refresh clear Length: {len(data)}")
-            start_time = time.time()
-            while time.time() - start_time < refresh_timeout: #Wait up to refresh time for a new message
+            start_time = time.perf_counter()
+            while time.perf_counter() - start_time < refresh_timeout: #Wait up to refresh time for a new message
                 data = self.com.read_all()
                 if len(data) > 0:
                     break #Refresh the start time and wait for more data
@@ -503,12 +503,12 @@ class ThreespaceSensor:
     #-----------Base Settings Parsing----------------
 
     def __await_set_settings(self, timeout=2):
-        start_time = time.time()
+        start_time = time.perf_counter()
         MINIMUM_LENGTH = len("0,0\r\n")
         MAXIMUM_LENGTH = len("255,255\r\n")
 
         while True:
-            remaining_time = timeout - (time.time() - start_time)
+            remaining_time = timeout - (time.perf_counter() - start_time)
             if remaining_time <= 0:
                 return THREESPACE_AWAIT_COMMAND_TIMEOUT
             if self.com.length < MINIMUM_LENGTH: continue
@@ -543,10 +543,10 @@ class ThreespaceSensor:
             return THREESPACE_AWAIT_COMMAND_FOUND
             
     def __await_get_settings(self, min_resp_length: int, timeout=2, check_bootloader=False):
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         while True:
-            remaining_time = timeout - (time.time() - start_time)
+            remaining_time = timeout - (time.perf_counter() - start_time)
             if remaining_time <= 0:
                 return THREESPACE_AWAIT_COMMAND_TIMEOUT
             
@@ -591,10 +591,10 @@ class ThreespaceSensor:
     Incomplete, binary settings protocol is Work In Progress
     """
     def __await_get_settings_binary(self, min_resp_length: int, timeout=2, check_bootloader=False):
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         while True:
-            remaining_time = timeout - (time.time() - start_time)
+            remaining_time = timeout - (time.perf_counter() - start_time)
             if remaining_time <= 0:
                 return THREESPACE_AWAIT_COMMAND_TIMEOUT
             
@@ -658,12 +658,12 @@ class ThreespaceSensor:
     def __await_command(self, cmd: ThreespaceCommand, timeout=2):
         #Header isn't enabled, nothing can do. Just pretend we found it
         if not self.header_enabled: return THREESPACE_AWAIT_COMMAND_FOUND
-
-        start_time = time.time()
+        
+        start_time = time.perf_counter()
 
         #Update the streaming until the result for this command is next in the buffer
         while True:
-            if time.time() - start_time > timeout:
+            if time.perf_counter() - start_time > timeout:
                 return THREESPACE_AWAIT_COMMAND_TIMEOUT
             
             #Get potential header
