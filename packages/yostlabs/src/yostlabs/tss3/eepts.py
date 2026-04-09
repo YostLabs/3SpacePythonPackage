@@ -85,8 +85,8 @@ class YL_EEPTS_OUTPUT_DATA:
     last_event_confidence: float = 1
     overall_confidence: float = 1
 
-    LOCMOTION_DICT: ClassVar[dict[int, str]] = { YL_LOCOMOTION_IDLE : "Idle", YL_LOCOMOTION_WALKING : "Walking", YL_LOCOMOTION_JOGGING : "Jogging", YL_LOCOMOTION_RUNNING : "Running", YL_LOCOMOTION_CRAWLING: "Crawling", YL_LOCOMOTION_OTHER: "Other", YL_LOCOMOTION_UNKNOWN: "Unknown" } 
-    LOCATION_DICT: ClassVar[dict[int, str]] = { YL_SENSOR_UNKNOWN : "Unknown", YL_SENSOR_CHEST : "Chest", YL_SENSOR_WAIST : "Waist", YL_SENSOR_BACK : "Back", YL_SENSOR_RHAND : "RHand", YL_SENSOR_RSHOULDER : "RShoulder" }
+    LOCMOTION_DICT: ClassVar[dict[int, str]] = LocomotionModes
+    LOCATION_DICT: ClassVar[dict[int, str]] = SensorLocations
 
     def clone(self, other: "YL_EEPTS_OUTPUT_DATA"):
         self.segment_count = other.segment_count

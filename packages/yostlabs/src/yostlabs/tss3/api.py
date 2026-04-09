@@ -1,278 +1,30 @@
-from yostlabs.tss3.consts import *
-from yostlabs.communication.base import ThreespaceInputStream, ThreespaceOutputStream, ThreespaceComClass
+from yostlabs.communication.base import ThreespaceComClass
 from yostlabs.communication.serial import ThreespaceSerialComClass
+
+from yostlabs.tss3.consts import *
 from yostlabs.tss3.commands import *
+from yostlabs.tss3.types import ThreespaceCmdResult, ThreespaceBootloaderInfo, \
+    ThreespaceHardwareVersion, ThreespaceHeader, ThreespaceHeaderInfo
 
 from enum import Enum
-from dataclasses import dataclass, field
-from typing import TypeVar, Generic
 from collections.abc import Callable
 import struct
 import types
 import inspect
 import time
-import math
 
-THREESPACE_HEADER_FORMAT_CHARS = ['b', 'L', 'B', 'B', 'L', 'H']
-
-@dataclass
-class ThreespaceHeaderInfo:
-    __bitfield: int = 0
-    format: str = ""
-    size: int = 0
-
-    def get_start_byte(self, header_field: int):
-        """
-        Given a header field, give the initial byte offset for that field when
-        using binary mode
-        """
-        if not header_field & self.__bitfield: return None #The bit is not enabled, no start byte
-        #Get the index of the bit
-        bit_pos = 0
-        header_field >>= 1
-        while header_field > 0:
-            bit_pos += 1
-            header_field >>= 1
-
-        #Add up the size of everything before this field
-        start = 0
-        for i in range(bit_pos):
-            if (1 << i) & self.__bitfield:
-                start += struct.calcsize(THREESPACE_HEADER_FORMAT_CHARS[i])
-        return start
-    
-    def get_index(self, header_field: int):
-        if not header_field & self.__bitfield: return None
-        index = 0
-        bit = 1
-        while bit < header_field:
-            if bit & self.__bitfield:
-                index += 1
-            bit <<= 1
-        return index
-
-    def __update(self):
-        self.format = "<"
-        for i in range(THREESPACE_HEADER_NUM_BITS):
-            if self.__bitfield & (1 << i):
-                self.format += THREESPACE_HEADER_FORMAT_CHARS[i]
-        self.size = struct.calcsize(self.format)
-
-    @property
-    def bitfield(self):
-        return self.__bitfield
-    
-    @bitfield.setter
-    def bitfield(self, value):
-        self.__bitfield = value
-        self.__update()
-    
-    @property
-    def status_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_STATUS_BIT)
-    
-    @status_enabled.setter
-    def status_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_STATUS_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_STATUS_BIT
-        self.__update()
-    
-    @property
-    def timestamp_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_TIMESTAMP_BIT)
-    
-    @timestamp_enabled.setter
-    def timestamp_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_TIMESTAMP_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_TIMESTAMP_BIT
-        self.__update()
-
-    @property
-    def echo_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_ECHO_BIT)
-    
-    @echo_enabled.setter
-    def echo_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_ECHO_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_ECHO_BIT
-        self.__update()       
-
-    @property
-    def checksum_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_CHECKSUM_BIT)
-    
-    @checksum_enabled.setter
-    def checksum_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_CHECKSUM_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_CHECKSUM_BIT     
-        self.__update()
-
-    @property
-    def serial_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_SERIAL_BIT)
-    
-    @serial_enabled.setter
-    def serial_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_SERIAL_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_SERIAL_BIT  
-        self.__update()
-
-    @property
-    def length_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_LENGTH_BIT)
-    
-    @length_enabled.setter
-    def length_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_LENGTH_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_LENGTH_BIT      
-        self.__update()              
-
-
-@dataclass
-class ThreespaceHeader:
-    raw: tuple = field(default=None, repr=False)
-
-    #Order here matters
-    status: int = None
-    timestamp: int = None
-    echo: int = None
-    checksum: int = None
-    serial: int = None
-    length: int = None
-
-    raw_binary: bytes = field(repr=False, default_factory=lambda: bytes([]))
-    info: ThreespaceHeaderInfo = field(default_factory=lambda: ThreespaceHeaderInfo(), repr=False)
-
-    @staticmethod
-    def from_tuple(data, info: ThreespaceHeaderInfo):
-        raw_expanded = []
-        cur_index = 0
-        for i in range(THREESPACE_HEADER_NUM_BITS):
-            if info.bitfield & (1 << i): 
-                raw_expanded.append(data[cur_index])
-                cur_index += 1
-            else:
-                raw_expanded.append(None)
-        return ThreespaceHeader(data, *raw_expanded, info=info)
-
-    @staticmethod
-    def from_bytes(byte_data: bytes, info: ThreespaceHeaderInfo):
-        if info.size == 0: return ThreespaceHeader()
-        header = ThreespaceHeader.from_tuple(struct.unpack(info.format, byte_data[:info.size]), info)
-        header.raw_binary = byte_data
-        return header
-
-    def __getitem__(self, key):
-        return self.raw[key]
-    
-    def __len__(self):
-        return len(self.raw)
-    
-    def __iter__(self):
-        return iter(self.raw)
-
-@dataclass
-class ThreespaceHardwareVersion:
-    """
-    Format from serial number:
-    XX iii C VV MM IIIIII
-    X = Family
-    i = Variation
-    C = Core version
-    V = Major version
-    M = Minor version
-    I = ID
-    """
-    serial_number: int
-
-    family_id: int
-    variation: int
-    core_version: int
-    major_revision: int
-    minor_revision: int
-
-    id: int
-
-    @staticmethod
-    def from_serial_string(serial_str: str):
-        return ThreespaceHardwareVersion.from_serial_number(int(serial_str, 16))
-
-    @staticmethod
-    def from_serial_number(serial_number: int):
-        family_id = (serial_number & THREESPACE_SN_FAMILY_MSK) >> THREESPACE_SN_FAMILY_POS
-        variation = (serial_number & THREESPACE_SN_VARIATION_MSK) >> THREESPACE_SN_VARIATION_POS
-        core_version = (serial_number & THREESPACE_SN_VERSION_MSK) >> THREESPACE_SN_VERSION_POS
-        major_revision = (serial_number & THREESPACE_SN_MAJOR_REVISION_MSK) >> THREESPACE_SN_MAJOR_REVISION_POS
-        minor_revision = (serial_number & THREESPACE_SN_MINOR_REVISION_MSK) >> THREESPACE_SN_MINOR_REVISION_POS
-        id = (serial_number & THREESPACE_SN_INCREMENTOR_MSK) >> THREESPACE_SN_INCREMENTOR_POS
-
-        return ThreespaceHardwareVersion(serial_number, family_id, variation, core_version, major_revision, minor_revision, id)
-    
-    def __str__(self):
-        return f"{self.family_name} {self.variation:01X} V{self.core_version:01X}.{self.major_revision:01X}.{self.minor_revision:01X} {self.id:06X}"
-    
-    @property
-    def family_name(self):
-        return THREESPACE_SN_FAMILY_TO_NAME.get(self.family_id, "Unknown")
-    
-    @property
-    def short_serial_number(self):
-        """
-        Short SN is the 32 bit version of the u64 serial number
-        It is defined as the FamilyVersion (byte) << 24 | Incrementor (24 bits) 
-        """
-        return (self.family_id << 24) | self.id
-
+#Response codes for when awaiting a command response. Used to determine if successfully parsed a response,
+#there was an error, or an intermediate response was detected.
 THREESPACE_AWAIT_COMMAND_FOUND = 0
 THREESPACE_AWAIT_COMMAND_TIMEOUT = 1
 THREESPACE_AWAIT_BOOTLOADER = 2
 
+#Update Response Codes
 THREESPACE_UPDATE_COMMAND_PARSED = 0
 THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA = 1
 THREESPACE_UPDATE_COMMAND_MISALIGNED = 2
 
-T = TypeVar('T')
-
-@dataclass
-class ThreespaceCmdResult(Generic[T]):
-    raw: tuple = field(default=None, repr=False)
-
-    header: ThreespaceHeader = None
-    data: T = None
-    raw_data: bytes = field(default=None, repr=False)
-
-    def __init__(self, data: T, header: ThreespaceHeader, data_raw_binary: bytes = None):
-        self.header = header
-        self.data = data
-        self.raw = (header.raw, data)
-        self.raw_data = data_raw_binary
-
-    def __getitem__(self, key):
-        return self.raw[key]
-    
-    def __len__(self):
-        return len(self.raw)
-    
-    def __iter__(self):
-        return iter(self.raw)   
-    
-    @property
-    def raw_binary(self):
-        bin = bytearray([])
-        if self.header is not None and self.header.raw_binary is not None:
-            bin += self.header.raw_binary
-        if self.raw_data is not None:
-            bin += self.raw_data
-        return bin
-
-@dataclass
-class ThreespaceBootloaderInfo:
-    memstart: int
-    memend: int
-    pagesize: int
-    bootversion: int
-
-#Required for the API to work. The API will attempt to keep these enabled at all times.
+#Required for the API to work. The API will keep these enabled at all times.
 THREESPACE_REQUIRED_HEADER = THREESPACE_HEADER_ECHO_BIT | THREESPACE_HEADER_CHECKSUM_BIT | THREESPACE_HEADER_LENGTH_BIT
 class ThreespaceSensor:
     
@@ -622,7 +374,7 @@ class ThreespaceSensor:
             return 0xFF, 0xFF
 
         #For dirty check
-        param_dict = threespaceSetSettingsStringToDict(cmd[1:-1])
+        param_dict = threespace_settings_string_to_dict(cmd[1:-1])
 
         #Must enable this before sending the set so can properly handle reading the response
         if "debug_mode=1" in cmd:
@@ -1569,25 +1321,7 @@ class ThreespaceSensor:
     def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...
     def getButtonState(self) -> ThreespaceCmdResult[int]: ...
                                                
-               
-
-def threespaceGetHeaderLabels(header_info: ThreespaceHeaderInfo):
-    order = []
-    if header_info.status_enabled:
-        order.append("status")
-    if header_info.timestamp_enabled:
-        order.append("timestamp")
-    if header_info.echo_enabled:
-        order.append("echo")
-    if header_info.checksum_enabled:
-        order.append("checksum")
-    if header_info.serial_enabled:
-        order.append("serial#")
-    if header_info.length_enabled:
-        order.append("len")
-    return order
-
-def threespaceSetSettingsStringToDict(setting_string: str):
+def threespace_settings_string_to_dict(setting_string: str):
     d = {}
     for item in setting_string.split(';'):
         result = item.split('=')

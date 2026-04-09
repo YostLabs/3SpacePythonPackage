@@ -1,4 +1,4 @@
-from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands, ThreespaceCmdResult, threespaceGetHeaderLabels, \
+from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands, ThreespaceCmdResult, \
     ThreespaceGetStreamingBatchCommand, threespace_command_get
 
 from enum import Enum
@@ -434,7 +434,7 @@ class ThreespaceStreamingManager:
         return ','.join(cmd.labels for cmd in self.registered_commands.values())
     
     def get_header_labels(self):
-        order = threespaceGetHeaderLabels(self.sensor.header_info)
+        order = self.sensor.header_info.get_labels()
         return ','.join(order)
     
     def get_response_labels(self):
