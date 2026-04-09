@@ -1431,6 +1431,13 @@ class ThreespaceSensor:
 #But basically, these are all just prototypes. Information about the commands is in the table
 #beneath here, and the API simply calls its execute_command function on the Command information objects defined.
 
+#If there is a function in the class named __{command_name} it will be used as the function 
+#for that command. Otherwise, a default function will be used based on the available command info.
+#Most commands do not require a custom function like this.
+
+#Also note that all commands sent to the sensor are camelCase instead of snake_case to more
+#closely match the actual source.
+
     def getTaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...
     def getTaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ...                        
     def getTaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
