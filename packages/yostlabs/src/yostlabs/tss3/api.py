@@ -3,11 +3,14 @@ from yostlabs.communication.serial import ThreespaceSerialComClass
 
 from yostlabs.tss3.consts import *
 from yostlabs.tss3.commands import *
+from yostlabs.tss3.settings import *
 from yostlabs.tss3.types import ThreespaceCmdResult, ThreespaceBootloaderInfo, \
     ThreespaceHardwareVersion, ThreespaceHeader, ThreespaceHeaderInfo
 
 from enum import Enum
 from collections.abc import Callable
+from typing import Any
+
 import struct
 import types
 import inspect
@@ -416,6 +419,120 @@ class ThreespaceSensor:
             self.log(f"Err setting {cmd}: {err=} {num_successes=}")
         return err, num_successes
 
+    def read_settings(self, *keys: str) -> dict[str, Any]:
+        self.check_dirty()
+
+        keystr = ';'.join(keys)
+        if len(keystr) > THREESPACE_MAX_CMD_LEN-2: #-2 for room for null terminator and checksum if using binary format
+            raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystr)))
+        
+        checksum = sum(ord(v) for v in keystr) % 256
+        #StartByte, Message+Null Terminator, Checksum
+        message = struct.pack(f"<B{len(keystr)}sBB", THREESPACE_BINARY_READ_SETTINGS_START_BYTE_HEADER, keystr.encode(), 0, checksum)
+        self.com.write(message)
+
+        #Figure out how much data to expect in the response.
+        min_response_len = len(keystr)
+        if ';' in keystr:
+            min_response_len = len(keystr.split(';')[0])
+        if min_response_len > len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE):
+            min_response_len = len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE)
+        min_response_len += (1 + THREESPACE_BINARY_SETTINGS_ID_SIZE) #Null terminator and header size
+
+        if self.__await_read_settings_response(min_response_len) != THREESPACE_AWAIT_COMMAND_FOUND:
+            raise RuntimeError("Failed to get read_settings response")
+        
+        #Read the setting header id
+        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the Header ID
+
+        #Parse the actual settings
+        return self.__parse_read_setting_response(keystr)
+        
+
+    def __parse_read_setting_response(self, keystring: str):
+        settings = {}
+        checksum = 0
+        end_reached = False
+        while not end_reached:
+            key = self.com.read_until(b'\0')
+            if key[-1] != 0:
+                raise RuntimeError("Failed to read setting key")
+            key = key[:-1].decode()
+            setting = threespace_setting_get(key)
+
+            if setting is None:
+                if key == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
+                    raise RuntimeError(f"Failed to read setting, got error response from firmware for keystring: {keystring}")
+                raise RuntimeError(f"Failed to read setting, unregistered key: {key}")
+            if setting.out_format is None:
+                raise RuntimeError(f"Failed to read setting, setting does not have an out format: {key}")
+            
+            checksum += sum(ord(v) for v in key)
+
+            #Now parse the value
+            data, raw = setting.out_format.read_response(self.com)
+            settings[key] = data
+            checksum += sum(raw)
+
+            #Check if more to read or if this is the end of the response
+            buffer = self.com.read(1)
+            checksum += buffer[0]
+            if buffer[0] == 0:
+                end_reached = True
+            elif buffer[0] != ord(';'):
+                raise RuntimeError("Failed to read setting, expected ';' or null terminator but got:", buffer)
+        
+        #Reading key values has finished, not check the checksum
+        reported_checksum = self.com.read(1)
+        if reported_checksum[0] != checksum % 256:
+            raise RuntimeError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}")
+
+        return settings
+            
+    def __await_read_settings_response(self, min_len: int, check_bootloader: bool = False):
+        #Minimum size. Bootloader check may not have header though so it can be smaller in that case.
+        if min_len < THREESPACE_BINARY_SETTINGS_ID_SIZE and not check_bootloader:
+            min_len = THREESPACE_BINARY_SETTINGS_ID_SIZE
+
+        start_time = time.perf_counter()
+        while time.perf_counter() - start_time < self.com.timeout:
+            if self.com.length < min_len: continue
+            
+            #Check for bootloader response first since it may not have the header
+            if check_bootloader:
+                possible_bootloader_response = self.com.peek(2)
+                if possible_bootloader_response == b"OK":
+                    return THREESPACE_AWAIT_BOOTLOADER
+                
+                #Wasn't bootloader, wait for rest of response
+                if self.com.length < THREESPACE_BINARY_SETTINGS_ID_SIZE: 
+                    continue
+            
+            #Now check for the actual ID response
+            id = self.com.peek(THREESPACE_BINARY_SETTINGS_ID_SIZE)
+            id = struct.unpack("<I", id)[0]
+            if id != THREESPACE_BINARY_READ_SETTINGS_ID:
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            #The ID matched, now check to see if the response after looks like a setting
+            possible_response = self.com.peek_until(b'\0')[THREESPACE_BINARY_SETTINGS_ID_SIZE:]
+            if b'\0' not in possible_response:
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            #Check to see if the response is an actual setting response
+            key = possible_response[:-1].decode()
+            setting = threespace_setting_get(key)
+            if setting is None and key != THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
+                if key.isprintable():
+                    raise RuntimeError(f"Failed to read setting, unregistered key: {key}")
+                self.__internal_update(self.__try_peek_header())
+                continue
+            
+            #Good enough, this is more then likely a read setting response.
+            return THREESPACE_AWAIT_COMMAND_FOUND
+
     def get_settings(self, *args: str, format="Mixed") -> dict[str, str] | str:
         """
         Gets the values for all requested settings. Settings are request by their string name. The result will be
@@ -465,40 +582,6 @@ class ThreespaceSensor:
         if len(response_dict) == 1 and format == "Mixed":
             return list(response_dict.values())[0]
         return response_dict
-
-    """
-    WIP. Currently does not work with string values or have full validation.
-    """
-    def get_setting_binary(self, key: str, format: str, use_threespace_format=True):
-        if use_threespace_format:
-            format = yost_format_to_struct_format(format)
-        checksum = sum(ord(v) for v in key) % 256
-        #Format = StartByte + Key + Null Terminator of key + Checksum
-        cmd = struct.pack(f"<B{len(key)}sBB", ThreespaceCommand.BINARY_READ_SETTINGS_START_BYTE_HEADER, key.encode(), 0, checksum)
-        self.com.write(cmd)
-        try:
-            min_response_len = key.index(';')
-        except ValueError:
-            min_response_len = len(key)
-        if min_response_len < len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE):
-            min_response_len = len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE)
-        min_response_len += (1 + THREESPACE_BINARY_SETTINGS_ID_SIZE) #Null terminator and header size
-        if self.__await_get_settings_binary(min_response_len) != THREESPACE_AWAIT_COMMAND_FOUND:
-            raise RuntimeError(f"Failed to get binary setting: {key}")
-        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the Header ID
-        
-        try:
-            echoed_key = self.com.read_until(b'\0')[:-1].decode()
-            if echoed_key != key.lower():
-                raise ValueError()
-        except:
-            raise ValueError()
-        result = struct.unpack(f"<{format}", self.com.read(struct.calcsize(format)))
-        self.com.read(2) #Remove the null terminator and the checksum
-        if len(result) == 1:
-            return result[0]
-        return result
-
 
     #-----------Base Settings Parsing----------------
 

@@ -57,23 +57,17 @@ class ThreespaceCommandInfo:
         self.num_out_params = len(self.out_format)
         self.out_size = yost_format_get_size(self.out_format)
 
-class ThreespaceCommand:
+class ThreespaceFormat:
 
-    BINARY_START_BYTE = 0xf7
-    BINARY_START_BYTE_HEADER = 0xf9
+    def __init__(self, format_str: str):
+        self.internal_format = format_str
+        self.struct_format = yost_format_to_struct_format(format_str)
 
-    BINARY_READ_SETTINGS_START_BYTE = 0xFA
-    BINARY_READ_SETTINGS_START_BYTE_HEADER = 0xFC
+        self.num_params = len(format_str)
+        self.size = yost_format_get_size(format_str)
 
-    def __init__(self, name: str, num: int, in_format: str, out_format: str):
-        self.info = ThreespaceCommandInfo(name, num, in_format, out_format)
-        #These formats are in the struct module format
-        self.in_format = yost_format_to_struct_format(self.info.in_format)
-        self.out_format = yost_format_to_struct_format(self.info.out_format)
-        self.precompute_output_segments()
-
-    def precompute_output_segments(self):
-        """     
+    def precompute_segments(self):
+        """
         Precompute output format segments used by parse_response and read_command.
         Each entry is (struct_fmt, byte_size) for a bulk run of non-string fields,
         or None to indicate a single null-terminated string field.
@@ -81,35 +75,99 @@ class ThreespaceCommand:
         loop for parsing regardless of output format complexity.
         """
 
-        self.out_segments = []
-        if self.out_format:
+        self.segments = []
+        if self.struct_format:
             i = 0
-            fmt = self.out_format
+            fmt = self.struct_format
             while i < len(fmt):
                 if fmt[i] != 's':
                     end = fmt.find('s', i)
                     if end == -1: end = len(fmt)
                     seg = f"<{fmt[i:end]}"
-                    self.out_segments.append((seg, struct.calcsize(seg)))
+                    self.segments.append((seg, struct.calcsize(seg)))
                     i = end
                 else:
-                    self.out_segments.append(None)
+                    self.segments.append(None)
                     i += 1
 
-    def format_cmd(self, *args, header_enabled=False):
+    def parse_response(self, response: bytes):
+        """
+        Reads format result from an already prepared buffer.
+        The given buffer will be modified to remove the data read as well.
+        """
+        if self.num_params == 0: return None
+        output = []
+
+        for seg in self.segments:
+            if seg is not None: #Regular format string
+                fmt, size = seg
+                output.extend(struct.unpack(fmt, response[:size]))
+                #TODO: Switch to using numpy views instead of slicing
+                response = response[size:]
+            else: #Null-terminated string
+                str_len = response.index(0)
+                output.append(response[:str_len].decode())
+                response = response[str_len + 1:]
+
+        if self.num_params == 1:
+            return output[0]
+        return output
+    
+    #Read the response dynamically from an input stream
+    def read_response(self, com: ThreespaceInputStream):
+        raw = bytearray()
+        if self.num_params == 0: return None, raw
+        output = []
+
+        for seg in self.segments:
+            if seg is not None: #Regular format string
+                fmt, size = seg
+                response = com.read(size)
+                raw += response
+                if len(response) != size:
+                    return None, raw
+                output.extend(struct.unpack(fmt, response))
+            else: #Null-terminated string
+                response = com.read_until(b'\0')
+                raw += response
+                if response[-1] != 0:
+                    return None, raw
+                output.append(response[:-1].decode())
+
+        if self.num_params == 1:
+            return output[0], raw
+        return output, raw
+
+    def format_data(self, *args):
         #Gather the different data portions
-        data_parts = [struct.pack("<B", self.info.num)]
-        for i, c in enumerate(self.in_format):
+        data_parts = []
+        for i, c in enumerate(self.struct_format):
             if c != 's':
                 data_parts.append(struct.pack(f"<{c}", args[i]))
             else:
                 data_parts.append(struct.pack(f"<{len(args[i])}sb", bytes(args[i], 'ascii'), 0))
         
-        #Create the full command with the start, data, and checksum
         cmd_data = b''.join(data_parts)
-        checksum = sum(cmd_data) % 256
+        return cmd_data
+
+class ThreespaceCommand:
+
+    BINARY_START_BYTE = 0xf7
+    BINARY_START_BYTE_HEADER = 0xf9
+
+    def __init__(self, name: str, num: int, in_format: str, out_format: str):
+        self.info = ThreespaceCommandInfo(name, num, in_format, out_format)
+
+        self.in_format = ThreespaceFormat(in_format)
+        self.out_format = ThreespaceFormat(out_format)
+        self.out_format.precompute_segments()
+
+    def format_cmd(self, *args, header_enabled=False):
+        #Create the full command with the start, cmd, data, and checksum
+        cmd_data = self.in_format.format_data(*args)
+        checksum = (self.info.num + sum(cmd_data)) % 256
         start_byte = ThreespaceCommand.BINARY_START_BYTE_HEADER if header_enabled else ThreespaceCommand.BINARY_START_BYTE
-        return struct.pack(f"<B{len(cmd_data)}sB", start_byte, cmd_data, checksum)
+        return struct.pack(f"<BB{len(cmd_data)}sB", start_byte, self.info.num, cmd_data, checksum)
 
     def send_command(self, com: ThreespaceOutputStream, *args, header_enabled = False):
         cmd = self.format_cmd(*args, header_enabled=header_enabled)
@@ -122,52 +180,16 @@ class ThreespaceCommand:
         Reads command result from an already prepared buffer.
         The given buffer will be modified to remove the data read as well.
         """
-        if self.info.num_out_params == 0: return None
-        output = []
-
-        for seg in self.out_segments:
-            if seg is not None: #Regular format string
-                fmt, size = seg
-                output.extend(struct.unpack(fmt, response[:size]))
-                #TODO: Switch to using numpy views instead of slicing
-                response = response[size:]
-            else: #Null-terminated string
-                str_len = response.index(0)
-                output.append(response[:str_len].decode())
-                response = response[str_len + 1:]
-
-        if self.info.num_out_params == 1:
-            return output[0]
-        return output
+        return self.out_format.parse_response(response)
 
     #Read the command dynamically from an input stream
     def read_command(self, com: ThreespaceInputStream, verbose=False):
-        raw = bytearray()
-        if self.info.num_out_params == 0: return None, raw
-        output = []
-
-        for seg in self.out_segments:
-            if seg is not None: #Regular format string
-                fmt, size = seg
-                response = com.read(size)
-                raw += response
-                if len(response) != size:
-                    if verbose:
-                        print(f"Failed to read {self.info.name} {len(response)} / {size}. Aborting...")
-                    return None, raw
-                output.extend(struct.unpack(fmt, response))
-            else: #Null-terminated string
-                response = com.read_until(b'\0')
-                raw += response
-                if response[-1] != 0:
-                    if verbose:
-                        print(f"Failed to read string from {self.info.name}. Aborting...")
-                    return None, raw
-                output.append(response[:-1].decode())
-
-        if self.info.num_out_params == 1:
-            return output[0], raw
-        return output, raw
+        if self.out_format.num_params == 0: 
+            return None, bytearray()
+        data, raw = self.out_format.read_response(com)
+        if data is None and verbose:
+            print(f"Failed to read response for {self.info.name}. Raw data read: {raw}")
+        return data, raw
 
 #Command numbers with special handling. For quick lookup
 #of the command info.
@@ -413,8 +435,8 @@ class ThreespaceGetStreamingBatchCommand(ThreespaceCommand):
         self.info.compute_param_properties()
 
         #Update command formats for quick parsing
-        self.out_format = yost_format_to_struct_format(self.info.out_format)
-        self.precompute_output_segments()
+        self.out_format = ThreespaceFormat(self.info.out_format)
+        self.out_format.precompute_segments()
 
     def parse_response(self, response: bytes):
         data = []
