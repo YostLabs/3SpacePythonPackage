@@ -1,4 +1,4 @@
-from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
+from yostlabs.tss3 import ThreespaceSensor, StreamableCommands
 from yostlabs.communication.serial import ThreespaceSerialComClass
 from yostlabs.tss3.utils.parser import ThreespaceBinaryParser
 import time

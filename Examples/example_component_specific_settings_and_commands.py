@@ -1,5 +1,5 @@
 
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.communication.serial import ThreespaceSerialComClass
 
 """

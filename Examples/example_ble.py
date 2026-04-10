@@ -1,4 +1,4 @@
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.communication.ble import ThreespaceBLEComClass
 
 auto_detect = False
