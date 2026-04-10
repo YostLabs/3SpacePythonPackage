@@ -1,537 +1,47 @@
-from yostlabs.tss3.consts import *
-from yostlabs.communication.base import ThreespaceInputStream, ThreespaceOutputStream, ThreespaceComClass
+from yostlabs.communication.base import ThreespaceComClass
 from yostlabs.communication.serial import ThreespaceSerialComClass
 
+from yostlabs.tss3.consts import *
+from yostlabs.tss3.commands import *
+from yostlabs.tss3.settings import *
+from yostlabs.tss3.types import ThreespaceCmdResult, ThreespaceBootloaderInfo, \
+    ThreespaceHardwareVersion, ThreespaceHeader, ThreespaceHeaderInfo
+from yostlabs.tss3.errors import (
+    ThreespaceError,
+    DiscoveryError,
+    SensorConnectionError,
+    ResponseError,
+    ResponseTimeoutError,
+    ChecksumMismatchError,
+    SettingError,
+    UnregisteredKeyError,
+    InvalidKeyError,
+    SettingAccessError,
+    UnsupportedCommandError,
+)
+
 from enum import Enum
-from dataclasses import dataclass, field
-from typing import TypeVar, Generic
 from collections.abc import Callable
+from typing import Any
+
 import struct
 import types
 import inspect
 import time
-import math
+import warnings
 
-
-#For converting from internal format specifiers to struct module specifiers
-__3space_format_conversion_dictionary = {
-    'f': {"c": 'f', "size": 4},
-    'd' : {"c": 'd', "size": 8},
-
-    'b' : {"c": 'B', "size": 1},
-    'B' : {"c": 'H', "size": 2},
-    "u" : {"c": 'L', "size": 4},
-    "U" : {"c": 'Q', "size": 8},
-
-    "i" : {"c": 'b', "size": 1},
-    "I" : {"c": 'h', "size": 2},
-    "l" : {"c": 'l', "size": 4},
-    "L" : {"c": 'q', "size": 8},
-
-    #Strings actually don't convert, they need handled special because
-    #struct unpack assumes static length strings, whereas the sensors
-    #use variable length null terminated strings
-    "s" : {"c": 's', "size": float('nan')},
-    "S" : {"c": 's', "size": float('nan')}
-}
-
-def _3space_format_get_size(format_str: str):
-    size = 0
-    for c in format_str:
-        size += __3space_format_conversion_dictionary[c]["size"]
-    return size
-
-def _3space_format_to_external(format_str: str):
-    return ''.join(__3space_format_conversion_dictionary[c]['c'] for c in format_str)
-
-@dataclass
-class ThreespaceCommandInfo:
-    name: str
-    num: int
-    in_format: str
-    out_format: str
-
-    num_out_params: int = field(init=False)
-    out_size: int = field(init=False,)
-
-    def __post_init__(self):
-        self.num_out_params = len(self.out_format)
-        self.out_size = _3space_format_get_size(self.out_format)
-
-class ThreespaceCommand:
-
-    BINARY_START_BYTE = 0xf7
-    BINARY_START_BYTE_HEADER = 0xf9
-
-    BINARY_READ_SETTINGS_START_BYTE = 0xFA
-    BINARY_READ_SETTINGS_START_BYTE_HEADER = 0xFC
-
-    def __init__(self, name: str, num: int, in_format: str, out_format: str, custom_func: Callable = None):
-        self.info = ThreespaceCommandInfo(name, num, in_format, out_format)
-        self.in_format = _3space_format_to_external(self.info.in_format)
-        self.out_format = _3space_format_to_external(self.info.out_format)
-        self.custom_func = custom_func
-
-    def format_cmd(self, *args, header_enabled=False):
-        cmd_data = struct.pack("<B", self.info.num)
-        for i, c in enumerate(self.in_format):
-            if c != 's':
-                cmd_data += struct.pack(f"<{c}", args[i])
-            else:
-                cmd_data += struct.pack(f"<{len(args[i])}sb", bytes(args[i], 'ascii'), 0)
-        checksum = sum(cmd_data) % 256
-        start_byte = ThreespaceCommand.BINARY_START_BYTE_HEADER if header_enabled else ThreespaceCommand.BINARY_START_BYTE
-        return struct.pack(f"<B{len(cmd_data)}sB", start_byte, cmd_data, checksum)
-
-    def send_command(self, com: ThreespaceOutputStream, *args, header_enabled = False):
-        cmd = self.format_cmd(*args, header_enabled=header_enabled)
-        com.write(cmd) 
-
-    #Read the command result from an already read buffer. This will modify the given buffer to remove
-    #that data as well
-    def parse_response(self, response: bytes):
-        if self.info.num_out_params == 0: return None
-        output = []
-        
-        if math.isnan(self.info.out_size): #Has strings in it, must slow parse
-            for c in self.out_format:
-                if c != 's':
-                    format_str = f"<{c}"
-                    size = struct.calcsize(format_str)
-                    output.append(struct.unpack(format_str, response[:size])[0])
-                    #TODO: Switch to using numpy views instead of slicing
-                    response = response[size:]
-                else: #Strings are special, find the null terminator
-                    str_len = response.index(0)
-                    output.append(struct.unpack(f"<{str_len}s", response[:str_len])[0])
-                    response = response[str_len + 1:] #+1 to skip past the null terminator character too
-        else: #Fast parse because no strings
-            output.extend(struct.unpack(f"<{self.out_format}", response[:self.info.out_size]))
-
-        
-        if self.info.num_out_params == 1:
-            return output[0]
-        return output
-
-    #Read the command dynamically from an input stream
-    def read_command(self, com: ThreespaceInputStream, verbose=False):
-        raw = bytearray([])
-        if self.info.num_out_params == 0: return None, raw
-        output = []
-
-        if not math.isnan(self.info.out_size):
-            #Fast read and parse
-            response = com.read(self.info.out_size)
-            raw += response
-            if len(response) != self.info.out_size:
-                if verbose:
-                    print(f"Failed to read {self.info.name} {len(response)} / {self.info.out_size}. Aborting...")
-            output.extend(struct.unpack(f"<{self.out_format}", response))
-        else:
-            #There is a string, so go element by element
-            i = 0
-            while i < len(self.out_format):
-                c = self.out_format[i]
-                if c != 's':
-                    end_index = self.out_format.find('s', i)
-                    if end_index == -1: end_index = len(self.out_format)
-                    format_str = f"<{self.out_format[i:end_index]}"
-                    size = struct.calcsize(format_str)
-                    response = com.read(size)
-                    raw += response
-                    if len(response) != size:
-                        if verbose:
-                            print(f"Failed to read {c} type. Aborting...")
-                        return None
-                    output.append(struct.unpack(format_str, response)[0])
-                    i = end_index
-                else:
-                    response = com.read_until(b'\0')
-                    raw += response
-                    if response[-1] != 0:
-                        if verbose:
-                            print(f"Failed to read string. Aborting...")
-                        return None
-                    output.append(response[:-1].decode())
-                    i += 1
-        
-        if self.info.num_out_params == 1:
-            return output[0], raw
-        return output, raw
-
-class ThreespaceGetStreamingBatchCommand(ThreespaceCommand):
-
-    def __init__(self, streaming_slots: list[ThreespaceCommand]):
-        self.commands = streaming_slots
-        combined_out_format = ''.join(slot.info.out_format for slot in streaming_slots if slot is not None)
-        super().__init__("getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", combined_out_format)
-        self.out_format = ''.join(slot.out_format for slot in streaming_slots if slot is not None)
-
-    def set_stream_slots(self, streaming_slots: list[ThreespaceCommand]):
-        self.commands = streaming_slots
-        self.out_format = ''.join(slot.out_format for slot in streaming_slots if slot is not None)
-        self.info.out_size = sum(slot.info.out_size for slot in streaming_slots if slot is not None)
-
-    def parse_response(self, response: bytes):
-        data = []
-        for command in self.commands:
-            if command is None: continue
-            cmd_response_size = command.info.out_size
-            data.append(command.parse_response(response))
-            response = response[cmd_response_size:]
-        
-        return data
-    
-    def read_command(self, com: ThreespaceInputStream, verbose=False):
-        #Get the response to all the streaming commands
-        response = []
-        raw_response = bytearray([])
-        for command in self.commands:
-            if command is None: continue
-            out, raw = command.read_command(com, verbose=verbose)
-            raw_response += raw
-            response.append(out)
-        
-        return response, raw_response
-
-THREESPACE_HEADER_FORMAT_CHARS = ['b', 'L', 'B', 'B', 'L', 'H']
-
-@dataclass
-class ThreespaceHeaderInfo:
-    __bitfield: int = 0
-    format: str = ""
-    size: int = 0
-
-    def get_start_byte(self, header_field: int):
-        """
-        Given a header field, give the initial byte offset for that field when
-        using binary mode
-        """
-        if not header_field & self.__bitfield: return None #The bit is not enabled, no start byte
-        #Get the index of the bit
-        bit_pos = 0
-        header_field >>= 1
-        while header_field > 0:
-            bit_pos += 1
-            header_field >>= 1
-
-        #Add up the size of everything before this field
-        start = 0
-        for i in range(bit_pos):
-            if (1 << i) & self.__bitfield:
-                start += struct.calcsize(THREESPACE_HEADER_FORMAT_CHARS[i])
-        return start
-    
-    def get_index(self, header_field: int):
-        if not header_field & self.__bitfield: return None
-        index = 0
-        bit = 1
-        while bit < header_field:
-            if bit & self.__bitfield:
-                index += 1
-            bit <<= 1
-        return index
-
-    def __update(self):
-        self.format = "<"
-        for i in range(THREESPACE_HEADER_NUM_BITS):
-            if self.__bitfield & (1 << i):
-                self.format += THREESPACE_HEADER_FORMAT_CHARS[i]
-        self.size = struct.calcsize(self.format)
-
-    @property
-    def bitfield(self):
-        return self.__bitfield
-    
-    @bitfield.setter
-    def bitfield(self, value):
-        self.__bitfield = value
-        self.__update()
-    
-    @property
-    def status_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_STATUS_BIT)
-    
-    @status_enabled.setter
-    def status_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_STATUS_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_STATUS_BIT
-        self.__update()
-    
-    @property
-    def timestamp_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_TIMESTAMP_BIT)
-    
-    @timestamp_enabled.setter
-    def timestamp_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_TIMESTAMP_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_TIMESTAMP_BIT
-        self.__update()
-
-    @property
-    def echo_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_ECHO_BIT)
-    
-    @echo_enabled.setter
-    def echo_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_ECHO_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_ECHO_BIT
-        self.__update()       
-
-    @property
-    def checksum_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_CHECKSUM_BIT)
-    
-    @checksum_enabled.setter
-    def checksum_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_CHECKSUM_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_CHECKSUM_BIT     
-        self.__update()
-
-    @property
-    def serial_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_SERIAL_BIT)
-    
-    @serial_enabled.setter
-    def serial_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_SERIAL_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_SERIAL_BIT  
-        self.__update()
-
-    @property
-    def length_enabled(self):
-        return bool(self.__bitfield & THREESPACE_HEADER_LENGTH_BIT)
-    
-    @length_enabled.setter
-    def length_enabled(self, value: bool):
-        if value: self.__bitfield |= THREESPACE_HEADER_LENGTH_BIT
-        else: self.__bitfield &= ~THREESPACE_HEADER_LENGTH_BIT      
-        self.__update()              
-
-
-@dataclass
-class ThreespaceHeader:
-    raw: tuple = field(default=None, repr=False)
-
-    #Order here matters
-    status: int = None
-    timestamp: int = None
-    echo: int = None
-    checksum: int = None
-    serial: int = None
-    length: int = None
-
-    raw_binary: bytes = field(repr=False, default_factory=lambda: bytes([]))
-    info: ThreespaceHeaderInfo = field(default_factory=lambda: ThreespaceHeaderInfo(), repr=False)
-
-    @staticmethod
-    def from_tuple(data, info: ThreespaceHeaderInfo):
-        raw_expanded = []
-        cur_index = 0
-        for i in range(THREESPACE_HEADER_NUM_BITS):
-            if info.bitfield & (1 << i): 
-                raw_expanded.append(data[cur_index])
-                cur_index += 1
-            else:
-                raw_expanded.append(None)
-        return ThreespaceHeader(data, *raw_expanded, info=info)
-
-    @staticmethod
-    def from_bytes(byte_data: bytes, info: ThreespaceHeaderInfo):
-        if info.size == 0: return ThreespaceHeader()
-        header = ThreespaceHeader.from_tuple(struct.unpack(info.format, byte_data[:info.size]), info)
-        header.raw_binary = byte_data
-        return header
-
-    def __getitem__(self, key):
-        return self.raw[key]
-    
-    def __len__(self):
-        return len(self.raw)
-    
-    def __iter__(self):
-        return iter(self.raw)
-
-@dataclass
-class ThreespaceHardwareVersion:
-    """
-    Format from serial number:
-    XX iii C VV MM IIIIII
-    X = Family
-    i = Variation
-    C = Core version
-    V = Major version
-    M = Minor version
-    I = ID
-    """
-    serial_number: int
-
-    family_id: int
-    variation: int
-    core_version: int
-    major_revision: int
-    minor_revision: int
-
-    id: int
-
-    @staticmethod
-    def from_serial_string(serial_str: str):
-        return ThreespaceHardwareVersion.from_serial_number(int(serial_str, 16))
-
-    @staticmethod
-    def from_serial_number(serial_number: int):
-        family_id = (serial_number & THREESPACE_SN_FAMILY_MSK) >> THREESPACE_SN_FAMILY_POS
-        variation = (serial_number & THREESPACE_SN_VARIATION_MSK) >> THREESPACE_SN_VARIATION_POS
-        core_version = (serial_number & THREESPACE_SN_VERSION_MSK) >> THREESPACE_SN_VERSION_POS
-        major_revision = (serial_number & THREESPACE_SN_MAJOR_REVISION_MSK) >> THREESPACE_SN_MAJOR_REVISION_POS
-        minor_revision = (serial_number & THREESPACE_SN_MINOR_REVISION_MSK) >> THREESPACE_SN_MINOR_REVISION_POS
-        id = (serial_number & THREESPACE_SN_INCREMENTOR_MSK) >> THREESPACE_SN_INCREMENTOR_POS
-
-        return ThreespaceHardwareVersion(serial_number, family_id, variation, core_version, major_revision, minor_revision, id)
-    
-    def __str__(self):
-        return f"{self.family_name} {self.variation:01X} V{self.core_version:01X}.{self.major_revision:01X}.{self.minor_revision:01X} {self.id:06X}"
-    
-    @property
-    def family_name(self):
-        return THREESPACE_SN_FAMILY_TO_NAME.get(self.family_id, "Unknown")
-    
-    @property
-    def short_serial_number(self):
-        """
-        Short SN is the 32 bit version of the u64 serial number
-        It is defined as the FamilyVersion (byte) << 24 | Incrementor (24 bits) 
-        """
-        return (self.family_id << 24) | self.id
-        
-
-class StreamableCommands(Enum):
-    GetTaredOrientation = 0
-    GetTaredOrientationAsEuler = 1
-    GetTaredOrientationAsMatrix = 2
-    GetTaredOrientationAsAxisAngle = 3
-    GetTaredOrientationAsTwoVector = 4
-
-    GetDifferenceQuaternion = 5
-
-    GetUntaredOrientation = 6
-    GetUntaredOrientationAsEuler = 7
-    GetUntaredOrientationAsMatrix = 8
-    GetUntaredOrientationAsAxisAngle = 9
-    GetUntaredOrientationAsTwoVector = 10
-
-    GetTaredOrientationAsTwoVectorSensorFrame = 11
-    GetUntaredOrientationAsTwoVectorSensorFrame = 12
-
-    GetPrimaryBarometerPressure = 13
-    GetPrimaryBarometerAltitude = 14
-    GetBarometerAltitudeById = 15
-    GetBarometerPressureById = 16
-
-    GetAllPrimaryNormalizedData = 32
-    GetPrimaryNormalizedGyroRate = 33
-    GetPrimaryNormalizedAccelVec = 34
-    GetPrimaryNormalizedMagVec = 35
-    
-    GetAllPrimaryCorrectedData = 37
-    GetPrimaryCorrectedGyroRate = 38
-    GetPrimaryCorrectedAccelVec = 39
-    GetPrimaryCorrectedMagVec = 40
-
-    GetPrimaryGlobalLinearAccel = 41
-    GetPrimaryLocalLinearAccel = 42
-
-    GetTemperatureCelsius = 43
-    GetTemperatureFahrenheit = 44
-    GetMotionlessConfidenceFactor = 45
-
-    GetNormalizedGyroRate = 51
-    GetNormalizedAccelVec = 52
-    GetNormalizedMagVec = 53
-
-    GetCorrectedGyroRate = 54
-    GetCorrectedAccelVec = 55
-    GetCorrectedMagVec = 56
-
-    GetDateTime = 63
-
-    GetRawGyroRate = 65
-    GetRawAccelVec = 66
-    GetRawMagVec = 67
-
-    GetEeptsOldestStep = 70
-    GetEeptsNewestStep = 71
-    GetEeptsNumStepsAvailable = 72
-
-    GetDateTimeString = 93
-    GetTimestamp = 94
-
-    GetBatteryCurrent = 200
-    GetBatteryVoltage = 201
-    GetBatteryPercent = 202
-    GetBatteryStatus = 203
-
-    GetGpsActiveState = 214
-    GetGpsCoord = 215
-    GetGpsAltitude = 216
-    GetGpsFixState = 217
-    GetGpsHdop = 218
-    GetGpsSatellites = 219
-
-    GetLedColor = 238
-
-    GetButtonState = 250
-
+#Response codes for when awaiting a command response. Used to determine if successfully parsed a response,
+#there was an error, or an intermediate response was detected.
 THREESPACE_AWAIT_COMMAND_FOUND = 0
 THREESPACE_AWAIT_COMMAND_TIMEOUT = 1
 THREESPACE_AWAIT_BOOTLOADER = 2
 
+#Update Response Codes
 THREESPACE_UPDATE_COMMAND_PARSED = 0
 THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA = 1
 THREESPACE_UPDATE_COMMAND_MISALIGNED = 2
 
-T = TypeVar('T')
-
-@dataclass
-class ThreespaceCmdResult(Generic[T]):
-    raw: tuple = field(default=None, repr=False)
-
-    header: ThreespaceHeader = None
-    data: T = None
-    raw_data: bytes = field(default=None, repr=False)
-
-    def __init__(self, data: T, header: ThreespaceHeader, data_raw_binary: bytes = None):
-        self.header = header
-        self.data = data
-        self.raw = (header.raw, data)
-        self.raw_data = data_raw_binary
-
-    def __getitem__(self, key):
-        return self.raw[key]
-    
-    def __len__(self):
-        return len(self.raw)
-    
-    def __iter__(self):
-        return iter(self.raw)   
-    
-    @property
-    def raw_binary(self):
-        bin = bytearray([])
-        if self.header is not None and self.header.raw_binary is not None:
-            bin += self.header.raw_binary
-        if self.raw_data is not None:
-            bin += self.raw_data
-        return bin
-
-@dataclass
-class ThreespaceBootloaderInfo:
-    memstart: int
-    memend: int
-    pagesize: int
-    bootversion: int
-
-#Required for the API to work. The API will attempt to keep these enabled at all times.
+#Required for the API to work. The API will keep these enabled at all times.
 THREESPACE_REQUIRED_HEADER = THREESPACE_HEADER_ECHO_BIT | THREESPACE_HEADER_CHECKSUM_BIT | THREESPACE_HEADER_LENGTH_BIT
 class ThreespaceSensor:
     
@@ -549,7 +59,7 @@ class ThreespaceSensor:
                 new_com = serial_com
                 break #Exit after getting 1
             if new_com is None:
-                raise RuntimeError("Failed to auto discover com port")   
+                raise DiscoveryError("Failed to auto discover com port")   
             self.com = new_com
             manually_opened_com = True
             self.com.open()
@@ -634,8 +144,8 @@ class ThreespaceSensor:
         if refresh_timeout is None: return
         while len(data) > 0: #Continue until all data is cleared
             self.log(f"Refresh clear Length: {len(data)}")
-            start_time = time.time()
-            while time.time() - start_time < refresh_timeout: #Wait up to refresh time for a new message
+            start_time = time.perf_counter()
+            while time.perf_counter() - start_time < refresh_timeout: #Wait up to refresh time for a new message
                 data = self.com.read_all()
                 if len(data) > 0:
                     break #Refresh the start time and wait for more data
@@ -648,17 +158,17 @@ class ThreespaceSensor:
         self.dirty_cache = False #No longer dirty cause initializing
         
         #Only reinitialize settings if detected firmware version changed (Or on startup)
-        version = self.get_settings("version_firmware")
+        version = self.readVersionFirmware()
         if version != self.firmware_version:
             self.firmware_version = version
             self.__initialize_commands()
     
         self.__reinit_firmware()
         
-        self.valid_mags = self.__get_valid_components("valid_mags")
-        self.valid_accels = self.__get_valid_components("valid_accels")
-        self.valid_gyros = self.__get_valid_components("valid_gyros")
-        self.valid_baros = self.__get_valid_components("valid_baros")
+        self.valid_mags = self.__str_list_to_int_list(self.readValidMags())
+        self.valid_accels = self.__str_list_to_int_list(self.readValidAccels())
+        self.valid_gyros = self.__str_list_to_int_list(self.readValidGyros())
+        self.valid_baros = self.__str_list_to_int_list(self.readValidBaros())
 
     def __reinit_firmware(self):
         """
@@ -677,9 +187,9 @@ class ThreespaceSensor:
         self.streaming_packet_size = 0
         self._force_stop_streaming()
 
-        self.__cache_serial_number(int(self.get_settings("serial_number"), 16))
+        self.__cache_serial_number(self.readSerialNumber())
         self.__empty_debug_cache()
-        self.immediate_debug = int(self.get_settings("debug_mode")) == 1 #Needed for some startup processes when restarting
+        self.immediate_debug = self.readDebugMode() #Needed for some startup processes when restarting
 
         #Now reinitialize the cached settings
         self.__cache_header_settings()
@@ -690,7 +200,7 @@ class ThreespaceSensor:
         self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
         self.funcs = {}
 
-        valid_commands = self.get_settings("valid_commands")
+        valid_commands = self.readValidCommands()
         if valid_commands == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
             #Treat all commands as valid because firmware is too old to have this setting
             valid_commands = list(range(256))
@@ -698,7 +208,7 @@ class ThreespaceSensor:
         else:
             valid_commands = list(int(v) for v in valid_commands.split(','))
         
-        for command in _threespace_commands:
+        for command in THREESPACE_COMMANDS:
             #Skip commands that are not valid for this sensor
             if command.info.num not in valid_commands:
                 #Register as invalid.
@@ -714,10 +224,8 @@ class ThreespaceSensor:
 
 #------------------------------INITIALIZATION HELPERS--------------------------------------------
 
-    def __get_valid_components(self, key: str):
-        valid = self.get_settings(key)
-        if len(valid) == 0: return []
-        return [int(v) for v in valid.split(',')]
+    def __str_list_to_int_list(self, str_list: str):
+        return [int(v) for v in str_list.split(',') if v != '']
 
     def __add_command(self, command: ThreespaceCommand):
         if self.commands[command.info.num] != None:
@@ -726,9 +234,10 @@ class ThreespaceSensor:
 
         #This command type has special logic that requires its own function.
         #Make that function be called instead of using the generic execute that gets built
-        method = None
-        if command.custom_func is not None:
-            method = types.MethodType(command.custom_func, self)
+        custom_name = f"_{type(self).__name__}__{command.info.name}"
+        custom = getattr(self, custom_name, None)
+        if custom is not None:
+            method = custom
         else:
             #Build the actual method for executing the command
             code = f"def {command.info.name}(self, *args, **kwargs):\n"
@@ -767,8 +276,7 @@ class ThreespaceSensor:
         """
         Should be called any time changes are made to the header. Will normally be called via the check_dirty/reinit
         """
-        result = self.get_settings("header")
-        header = int(result)
+        header = self.readHeader()
         #API requires these bits to be enabled, so don't let them be disabled
         required_header = header | THREESPACE_REQUIRED_HEADER
         if header == self.header_info.bitfield and header == required_header: return #Nothing to update
@@ -779,12 +287,12 @@ class ThreespaceSensor:
         #positions, causing a situation where parsing a command and streaming at the same time breaks since it thinks both are valid cmd echoes.
         if self.is_streaming:
             self.log("Preventing header change due to currently streaming")
-            self.set_settings(header=self.header_info.bitfield)
+            self.writeHeader(self.header_info.bitfield)
             return
         
         if required_header != header:
             self.log(f"Forcing header checksum, echo, and length enabled")
-            self.set_settings(header=required_header)
+            self.writeHeader(required_header)
             return
         
         #Current/New header is valid, so can cache it
@@ -802,7 +310,9 @@ class ThreespaceSensor:
         self.sensor_family = self.hardware_version.family_name
         if self.sensor_family == "Unknown":
             self.log(f"Unknown Sensor Family detected, {self.hardware_version.family_id}")
-            
+
+    def __cache_debug_mode(self):
+        self.immediate_debug = self.readDebugMode()
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
     def set_cached_settings_dirty(self):
@@ -817,7 +327,7 @@ class ThreespaceSensor:
         if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
             success = self.__attempt_rediscover_self()
             if not success:
-                raise RuntimeError("Sensor connection lost")
+                raise SensorConnectionError("Sensor connection lost")
         
         self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
         was_in_bootloader = self.__cached_in_bootloader
@@ -846,6 +356,229 @@ class ThreespaceSensor:
 
 #-----------------------------------------------BASE SETTINGS PROTOCOL------------------------------------------------
 
+#---------------------------------------BINARY SETTINGS PROTOCOL------------------------------------------------
+
+    def read_settings(self, *keys: str) -> dict[str, Any]:
+        """
+        Read multiple settings at once using the binary settings protocol.
+        The values will be returned in a dictionary with the setting keys as the keys and the parsed values as the values.
+        The values will be parsed according to their data type, not just as strings.
+        """
+        self.check_dirty()
+
+        keystr = ';'.join(keys)
+        if len(keystr) > THREESPACE_MAX_CMD_LEN-2: #-2 for room for null terminator and checksum if using binary format
+            raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystr)))
+        
+        checksum = sum(ord(v) for v in keystr) % 256
+        #StartByte, Message+Null Terminator, Checksum
+        message = struct.pack(f"<B{len(keystr)}sBB", THREESPACE_BINARY_READ_SETTINGS_START_BYTE_HEADER, keystr.encode(), 0, checksum)
+        self.com.write(message)
+
+        #Figure out how much data to expect in the response.
+        min_response_len = len(keystr)
+        if ';' in keystr:
+            min_response_len = len(keystr.split(';')[0])
+        if min_response_len > len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE):
+            min_response_len = len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE)
+        min_response_len += (1 + THREESPACE_BINARY_SETTINGS_ID_SIZE) #Null terminator and header size
+
+        if self.__await_read_settings_response(min_response_len) != THREESPACE_AWAIT_COMMAND_FOUND:
+            raise ResponseTimeoutError("Failed to get read_settings response")
+        
+        #Read the setting header id
+        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the Header ID
+
+        #Parse the actual settings
+        return self.__parse_read_setting_response(keystr)
+
+    def __parse_read_setting_response(self, keystring: str):
+        settings = {}
+        checksum = 0
+        end_reached = False
+        while not end_reached:
+            key = self.com.read_until(b'\0')
+            if key[-1] != 0:
+                raise ResponseError("Failed to read setting key", result=settings)
+            key = key[:-1].decode()
+            setting = threespace_setting_get(key)
+
+            if setting is None:
+                if key == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
+                    raise InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}", result=settings)
+                raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}", result=settings)
+            if setting.out_format is None:
+                raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}", result=settings)
+            
+            checksum += sum(ord(v) for v in key)
+
+            #Now parse the value
+            data, raw = setting.out_format.read_response(self.com)
+            settings[key] = data
+            checksum += sum(raw)
+
+            #Check if more to read or if this is the end of the response
+            buffer = self.com.read(1)
+            checksum += buffer[0]
+            if buffer[0] == 0:
+                end_reached = True
+            elif buffer[0] != ord(';'):
+                raise ResponseError(f"Failed to read setting, expected ';' or null terminator but got: {buffer}", result=settings)
+        
+        #Reading key values has finished, not check the checksum
+        reported_checksum = self.com.read(1)
+        if reported_checksum[0] != checksum % 256:
+            raise ChecksumMismatchError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}", result=settings)
+
+        return settings
+            
+    def __await_read_settings_response(self, min_len: int, check_bootloader: bool = False):
+        #Minimum size. Bootloader check may not have header though so it can be smaller in that case.
+        if min_len < THREESPACE_BINARY_SETTINGS_ID_SIZE and not check_bootloader:
+            min_len = THREESPACE_BINARY_SETTINGS_ID_SIZE
+
+        start_time = time.perf_counter()
+        while time.perf_counter() - start_time < self.com.timeout:
+            if self.com.length < min_len: continue
+            
+            #Check for bootloader response first since it may not have the header
+            if check_bootloader:
+                possible_bootloader_response = self.com.peek(2)
+                if possible_bootloader_response == b"OK":
+                    return THREESPACE_AWAIT_BOOTLOADER
+                
+                #Wasn't bootloader, wait for rest of response
+                if self.com.length < THREESPACE_BINARY_SETTINGS_ID_SIZE: 
+                    continue
+            
+            #Now check for the actual ID response
+            id = self.com.peek(THREESPACE_BINARY_SETTINGS_ID_SIZE)
+            id = struct.unpack("<I", id)[0]
+            if id != THREESPACE_BINARY_READ_SETTINGS_ID:
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            #The ID matched, now check to see if the response after looks like a setting
+            possible_response = self.com.peek_until(b'\0')[THREESPACE_BINARY_SETTINGS_ID_SIZE:]
+            if b'\0' not in possible_response:
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            #Check to see if the response is an actual setting response
+            key = possible_response[:-1].decode()
+            setting = threespace_setting_get(key)
+            if setting is None and key != THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
+                if key.isprintable():
+                    raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}")
+                self.__internal_update(self.__try_peek_header())
+                continue
+            
+            #Good enough, this is more then likely a read setting response.
+            return THREESPACE_AWAIT_COMMAND_FOUND
+
+        return THREESPACE_AWAIT_COMMAND_TIMEOUT
+
+    #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require caching the header
+    HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
+    def write_settings(self, **kwargs):
+        self.check_dirty()
+
+        #Check to see if debug mode is being updated. This must be done before sending the command so that the API can properly
+        #handle the response if debug mode is being turned on
+        if "debug_mode" in kwargs and int(kwargs["debug_mode"]) == 1:
+            self.immediate_debug = True
+        
+        #Build cmd string and send
+        cmd = bytearray([THREESPACE_BINARY_WRITE_SETTINGS_START_BYTE_HEADER])
+        checksum = 0
+        for key, value in kwargs.items():
+            setting = threespace_setting_get(key)
+            if setting is None:
+                raise UnregisteredKeyError(f"Failed to write setting, unregistered key: {key}")
+            if setting.in_format is None:
+                raise SettingAccessError(f"Failed to write setting, key is not writable: {key}")
+            
+            #Add the key
+            key_bytes = key.encode() + b'\0'
+            cmd.extend(key_bytes)
+            checksum += sum(key_bytes)
+
+            #Add the value
+            if hasattr(value, '__iter__') and not isinstance(value, (str, bytes, bytearray)):
+                #Must unpack if list/tuple since format expects individual values
+                value_bytes = setting.in_format.format_data(*value)
+            else:
+                #Singular Value
+                value_bytes = setting.in_format.format_data(value)
+
+            cmd.extend(value_bytes)
+            checksum += sum(value_bytes)
+
+            cmd.append(ord(';'))
+            checksum += ord(';')
+
+        #Done writing keys and values, remove the last ';' and add the null terminator
+        checksum -= ord(';')
+        cmd[-1] = 0
+        cmd.append(checksum % 256)
+        self.com.write(cmd)
+
+        #Await Response
+        if self.__await_write_settings_response(len(kwargs)) != THREESPACE_AWAIT_COMMAND_FOUND:
+            raise ResponseTimeoutError("Failed to get write_settings response")
+
+        #Read in Response
+        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the header ID
+        err, num_successes, checksum = self.com.read(3)
+        if err:
+            self.log(f"Err setting {cmd}: {err=} {num_successes=}")
+
+        if any(v in kwargs.keys() for v in ("default", "reboot")):
+            self.log("Settings that require reboot changed, marking cache as dirty")
+            self.set_cached_settings_dirty()
+
+        #Handle caching any settings that need to be cached when changed.
+        if b"header" in cmd:
+            if any(v in kwargs.keys() for v in ThreespaceSensor.HEADER_KEYS):
+                self.__cache_header_settings()
+        
+        if "stream_slots" in kwargs:
+            self.__cache_streaming_settings()
+
+        if "debug_mode" in kwargs:
+            self.__cache_debug_mode()
+
+        return err, num_successes
+
+    def __await_write_settings_response(self, num_keys: int):
+        start_time = time.perf_counter()
+        while time.perf_counter() - start_time < self.com.timeout:
+            if self.com.length < THREESPACE_BINARY_WRITE_SETTING_WITH_HEADER_RESPONSE_LEN:
+                continue
+
+            #Check for the ID/ECHO for writing settings
+            id = self.com.peek(THREESPACE_BINARY_SETTINGS_ID_SIZE)
+            id = struct.unpack("<I", id)[0]
+            if id != THREESPACE_BINARY_WRITE_SETTINGS_ID:
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            #Peek full response and validate checksum and proper format
+            response = self.com.peek(THREESPACE_BINARY_WRITE_SETTING_WITH_HEADER_RESPONSE_LEN)[THREESPACE_BINARY_SETTINGS_ID_SIZE:]
+            err, num_successes, checksum = response
+            if  (checksum != err + num_successes) or        \
+                (err == 0 and num_successes != num_keys) or \
+                (err != 0 and num_successes >= num_keys) or \
+                (num_successes > num_keys):
+                self.__internal_update(self.__try_peek_header())
+                continue
+
+            return THREESPACE_AWAIT_COMMAND_FOUND
+    
+        return THREESPACE_AWAIT_COMMAND_TIMEOUT
+
+#-------------------------------------ASCII SETTINGS PROTOCOL------------------------------------------------
+
     #Helper for converting python types to strings that set_settings can understand
     def __internal_str(self, value):
         if isinstance(value, float):
@@ -857,9 +590,7 @@ class ThreespaceSensor:
         else:
             return str(value)        
 
-    #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require caching the header
-    HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
-    def set_settings(self, param_string: str = None, **kwargs):
+    def write_settings_ascii(self, param_string: str = None, **kwargs):
         self.check_dirty()
         #Build cmd string
         params = []
@@ -880,7 +611,7 @@ class ThreespaceSensor:
             return 0xFF, 0xFF
 
         #For dirty check
-        param_dict = threespaceSetSettingsStringToDict(cmd[1:-1])
+        param_dict = threespace_settings_string_to_dict(cmd[1:-1])
 
         #Must enable this before sending the set so can properly handle reading the response
         if "debug_mode=1" in cmd:
@@ -893,7 +624,7 @@ class ThreespaceSensor:
         err = 3
         num_successes = 0
 
-        response = self.__await_set_settings(self.com.timeout)
+        response = self.__await_set_settings_ascii(self.com.timeout)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
             self.log("Failed to get set_settings response")
             return err, num_successes
@@ -922,7 +653,7 @@ class ThreespaceSensor:
             self.log(f"Err setting {cmd}: {err=} {num_successes=}")
         return err, num_successes
 
-    def get_settings(self, *args: str, format="Mixed") -> dict[str, str] | str:
+    def read_settings_ascii(self, *args: str, format="Mixed") -> dict[str, str] | str:
         """
         Gets the values for all requested settings. Settings are request by their string name. The result will be
         the string response to that setting.
@@ -946,11 +677,11 @@ class ThreespaceSensor:
             min_resp_length += min(len(key) + 1, error_response_len)
         
         
-        response = self.__await_get_settings(min_resp_length, timeout=self.com.timeout)
+        response = self.__await_get_settings_ascii(min_resp_length, timeout=self.com.timeout)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
             self.log("Requested:", cmd)
             self.log("Potential response:", self.com.peekline())
-            raise RuntimeError("Failed to receive get_settings response")      
+            raise ResponseTimeoutError("Failed to receive get_settings response")      
 
         response = self.com.readline()
         response = response.decode().strip().split(';')
@@ -971,50 +702,26 @@ class ThreespaceSensor:
         if len(response_dict) == 1 and format == "Mixed":
             return list(response_dict.values())[0]
         return response_dict
+    
+    def set_settings(self, param_string: str = None, **kwargs):
+        """Deprecated: Use write_settings instead."""
+        warnings.warn("set_settings is deprecated, use write_settings instead.", DeprecationWarning, stacklevel=2)
+        return self.write_settings_ascii(param_string, **kwargs)
 
-    """
-    WIP. Currently does not work with string values or have full validation.
-    """
-    def get_setting_binary(self, key: str, format: str, use_threespace_format=True):
-        if use_threespace_format:
-            format = _3space_format_to_external(format)
-        checksum = sum(ord(v) for v in key) % 256
-        #Format = StartByte + Key + Null Terminator of key + Checksum
-        cmd = struct.pack(f"<B{len(key)}sBB", ThreespaceCommand.BINARY_READ_SETTINGS_START_BYTE_HEADER, key.encode(), 0, checksum)
-        self.com.write(cmd)
-        try:
-            min_response_len = key.index(';')
-        except ValueError:
-            min_response_len = len(key)
-        if min_response_len < len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE):
-            min_response_len = len(THREESPACE_GET_SETTINGS_ERROR_RESPONSE)
-        min_response_len += (1 + THREESPACE_BINARY_SETTINGS_ID_SIZE) #Null terminator and header size
-        if self.__await_get_settings_binary(min_response_len) != THREESPACE_AWAIT_COMMAND_FOUND:
-            raise RuntimeError(f"Failed to get binary setting: {key}")
-        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the Header ID
-        
-        try:
-            echoed_key = self.com.read_until(b'\0')[:-1].decode()
-            if echoed_key != key.lower():
-                raise ValueError()
-        except:
-            raise ValueError()
-        result = struct.unpack(f"<{format}", self.com.read(struct.calcsize(format)))
-        self.com.read(2) #Remove the null terminator and the checksum
-        if len(result) == 1:
-            return result[0]
-        return result
-
+    def get_settings(self, *args: str, format="Mixed") -> dict[str, str] | str:
+        """Deprecated: Use read_settings instead."""
+        warnings.warn("get_settings is deprecated, use read_settings instead.", DeprecationWarning, stacklevel=2)
+        return self.read_settings_ascii(*args, format=format)
 
     #-----------Base Settings Parsing----------------
 
-    def __await_set_settings(self, timeout=2):
-        start_time = time.time()
+    def __await_set_settings_ascii(self, timeout=2):
+        start_time = time.perf_counter()
         MINIMUM_LENGTH = len("0,0\r\n")
         MAXIMUM_LENGTH = len("255,255\r\n")
 
         while True:
-            remaining_time = timeout - (time.time() - start_time)
+            remaining_time = timeout - (time.perf_counter() - start_time)
             if remaining_time <= 0:
                 return THREESPACE_AWAIT_COMMAND_TIMEOUT
             if self.com.length < MINIMUM_LENGTH: continue
@@ -1048,11 +755,11 @@ class ThreespaceSensor:
             self.misaligned = False
             return THREESPACE_AWAIT_COMMAND_FOUND
             
-    def __await_get_settings(self, min_resp_length: int, timeout=2, check_bootloader=False):
-        start_time = time.time()
+    def __await_get_settings_ascii(self, min_resp_length: int, timeout=2, check_bootloader=False):
+        start_time = time.perf_counter()
 
         while True:
-            remaining_time = timeout - (time.time() - start_time)
+            remaining_time = timeout - (time.perf_counter() - start_time)
             if remaining_time <= 0:
                 return THREESPACE_AWAIT_COMMAND_TIMEOUT
             
@@ -1090,31 +797,6 @@ class ThreespaceSensor:
                 self.__internal_update(self.__try_peek_header())
                 continue
             
-            self.misaligned = False
-            return THREESPACE_AWAIT_COMMAND_FOUND
-
-    """
-    Incomplete, binary settings protocol is Work In Progress
-    """
-    def __await_get_settings_binary(self, min_resp_length: int, timeout=2, check_bootloader=False):
-        start_time = time.time()
-
-        while True:
-            remaining_time = timeout - (time.time() - start_time)
-            if remaining_time <= 0:
-                return THREESPACE_AWAIT_COMMAND_TIMEOUT
-            
-            if self.com.length < min_resp_length: continue
-            if check_bootloader and self.com.peek(2) == b'OK':
-                return THREESPACE_AWAIT_BOOTLOADER
-            
-            id = self.com.peek(THREESPACE_BINARY_SETTINGS_ID_SIZE)
-            if struct.unpack("<L", id)[0] != THREESPACE_BINARY_READ_SETTINGS_ID:
-                self.__internal_update(self.__try_peek_header())
-                continue
-            
-            #TODO: Check the rest of the message structure, not just the ID
-
             self.misaligned = False
             return THREESPACE_AWAIT_COMMAND_FOUND
 
@@ -1164,12 +846,12 @@ class ThreespaceSensor:
     def __await_command(self, cmd: ThreespaceCommand, timeout=2):
         #Header isn't enabled, nothing can do. Just pretend we found it
         if not self.header_enabled: return THREESPACE_AWAIT_COMMAND_FOUND
-
-        start_time = time.time()
+        
+        start_time = time.perf_counter()
 
         #Update the streaming until the result for this command is next in the buffer
         while True:
-            if time.time() - start_time > timeout:
+            if time.perf_counter() - start_time > timeout:
                 return THREESPACE_AWAIT_COMMAND_TIMEOUT
             
             #Get potential header
@@ -1292,12 +974,12 @@ class ThreespaceSensor:
             retries += 1
         
         if retries == MAX_RETRIES:
-            raise RuntimeError(f"Failed to get response to command {cmd.info.name}")
+            raise ResponseTimeoutError(f"Failed to get response to command {cmd.info.name}")
 
         return self.read_and_parse_command(cmd)
     
     def __invalid_command(self, *args):
-        raise NotImplementedError("This method is not available.")
+        raise UnsupportedCommandError("This command is not available on the connected sensor.")
 
     def read_and_parse_command(self, cmd: ThreespaceCommand):
         if self.header_enabled:
@@ -1315,7 +997,7 @@ class ThreespaceSensor:
 
     def __cache_streaming_settings(self):
         cached_slots: list[ThreespaceCommand] = []
-        slots: str = self.get_settings("stream_slots")
+        slots: str = self.readStreamSlots()
         slots = slots.split(',')
         for slot in slots:
             slot = int(slot.split(':')[0]) #Ignore parameters if any
@@ -1330,7 +1012,6 @@ class ThreespaceSensor:
             if command == None: continue
             self.streaming_packet_size += command.info.out_size
 
-    def startStreaming(self) -> ThreespaceCmdResult[None]: ...
     def __startStreaming(self) -> ThreespaceCmdResult[None]:
         if not self.is_data_streaming:
             self.streaming_packets.clear()
@@ -1340,7 +1021,6 @@ class ThreespaceSensor:
         self.is_data_streaming = True
         return result
 
-    def stopStreaming(self) -> ThreespaceCmdResult[None]: ...
     def __stopStreaming(self) -> ThreespaceCmdResult[None]:
         result = self.execute_command(self.commands[THREESPACE_STOP_STREAMING_COMMAND_NUM])
         self.is_data_streaming = False
@@ -1428,16 +1108,16 @@ class ThreespaceSensor:
         #since this sensor object may have yet to register these commands when calling force_stop_streaming
 
         #Stop base Streaming
-        self.execute_command(threespaceCommandGetByName("stopStreaming"))
+        self.execute_command(threespace_command_get_by_name("stopStreaming"))
         self.is_data_streaming = False
 
         #Stop file streaming
-        self.execute_command(threespaceCommandGetByName("fileStopStream"))
+        self.execute_command(threespace_command_get_by_name("fileStopStream"))
         self.is_file_streaming = False  
 
         #Stop logging streaming
         # #TODO: Change this to pause the data logging instead, then check the state and update
-        self.execute_command(threespaceCommandGetByName("stopDataLogging"))
+        self.execute_command(threespace_command_get_by_name("stopDataLogging"))
         self.is_log_streaming = False              
         
         #Restore
@@ -1446,15 +1126,13 @@ class ThreespaceSensor:
 
 #-------------------------------------FILE STREAMING----------------------------------------------
 
-    def fileStartStream(self) -> ThreespaceCmdResult[int]: ...
     def __fileStartStream(self) -> ThreespaceCmdResult[int]:
         result = self.execute_command(self.__get_command("fileStartStream"))
         self.file_stream_length = result.data
         if self.file_stream_length > 0:
             self.is_file_streaming = True
         return result
-    
-    def fileStopStream(self) -> ThreespaceCmdResult[None]: ...
+
     def __fileStopStream(self) -> ThreespaceCmdResult[None]:
         result = self.execute_command(self.__get_command("fileStopStream"))
         self.is_file_streaming = False
@@ -1481,23 +1159,35 @@ class ThreespaceSensor:
             if self.file_stream_length != 0:
                 self.log(f"File streaming stopped due to last packet. However still expected {self.file_stream_length} more bytes.")
 
+    def __fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]:    
+        self.check_dirty()
+        cmd = self.commands[THREESPACE_FILE_READ_BYTES_COMMAND_NUM]
+        cmd.send_command(self.com, num_bytes, header_enabled=self.header_enabled)
+        self.__await_command(cmd)
+        if self.header_enabled:
+            header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
+            num_bytes = min(num_bytes, header.length) #Its possible for less bytes to be returned when an error occurs (EX: Reading from unopened file)
+        else:
+            header = ThreespaceHeader()
+
+        response = self.com.read(num_bytes)
+        return ThreespaceCmdResult(response, header, data_raw_binary=response)
+
 #----------------------------DATA LOGGING--------------------------------------
 
-    def startDataLogging(self) -> ThreespaceCmdResult[None]: ...
     def __startDataLogging(self) -> ThreespaceCmdResult[None]:
         self.__cache_streaming_settings()
 
         #Must check whether streaming is being done alongside logging or not. Also configure required settings if it is
-        streaming = bool(int(self.get_settings("log_immediate_output")))
+        streaming = self.readLogImmediateOutput()
         if streaming:
-            self.set_settings(log_immediate_output_header_enabled=1,
+            self.write_settings(log_immediate_output_header_enabled=1,
                                 log_immediate_output_header_mode=THREESPACE_OUTPUT_MODE_BINARY) #Must have header enabled in the log messages for this to work and must use binary for the header
         
         result = self.execute_command(self.__get_command("startDataLogging"))
         self.is_log_streaming = streaming 
         return result
 
-    def stopDataLogging(self) -> ThreespaceCmdResult[None]: ...
     def __stopDataLogging(self) -> ThreespaceCmdResult[None]:
         result = self.execute_command(self.__get_command("stopDataLogging"))
         self.is_log_streaming = False
@@ -1515,7 +1205,6 @@ class ThreespaceSensor:
 
 #---------------------------------POWER STATE CHANGING COMMANDS & BOOTLOADER------------------------------------
 
-    def softwareReset(self): ...
     def __softwareReset(self):
         self.check_dirty()
         cmd = self.commands[THREESPACE_SOFTWARE_RESET_COMMAND_NUM]
@@ -1526,7 +1215,6 @@ class ThreespaceSensor:
         self.com.open()
         self.__firmware_init()
 
-    def enterBootloader(self): ...
     def __enterBootloader(self):
         if self.in_bootloader: return
 
@@ -1538,10 +1226,10 @@ class ThreespaceSensor:
             self.com.close()
             success = self.__attempt_rediscover_self()
             if not success:
-                raise RuntimeError("Failed to reconnect to sensor in bootloader")
+                raise SensorConnectionError("Failed to reconnect to sensor in bootloader")
         in_bootloader = self.__check_bootloader_status()
         if not in_bootloader:
-            raise RuntimeError("Failed to enter bootloader")
+            raise SensorConnectionError("Failed to enter bootloader")
         self.__cached_in_bootloader = True
         self.com.read_all() #Just in case any garbage floating around
 
@@ -1570,11 +1258,11 @@ class ThreespaceSensor:
         #By then adding a ?UUU, that will trigger a <KEY_ERROR> if in firmware. So, can tell if in bootloader or firmware by checking for OK or <KEY_ERROR>
         bootloader = False
         self.com.write("UUU?UUU\n".encode())
-        response = self.__await_get_settings(2, check_bootloader=True)
+        response = self.__await_get_settings_ascii(2, check_bootloader=True)
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT: 
             self.log("Requested Bootloader, Got:")
             self.log(self.com.peek(self.com.length))
-            raise RuntimeError("Failed to discover bootloader or firmware.")
+            raise DiscoveryError("Failed to discover bootloader or firmware.")
         if response == THREESPACE_AWAIT_BOOTLOADER:
             bootloader = True
             time.sleep(0.1) #Give time for all the OK responses to come in
@@ -1583,16 +1271,16 @@ class ThreespaceSensor:
             bootloader = False
             self.com.readline() #Clear the setting, no need to parse
         else:
-            raise Exception("Failed to detect if in bootloader or firmware")
+            raise DiscoveryError("Failed to detect if in bootloader or firmware")
         return bootloader
     
     def bootloader_get_sn(self):
         self.com.write("Q".encode())
         result = self.com.read(9) #9 Because it includes a line feed for reasons
         if len(result) != 9:
-            raise Exception()
+            raise ResponseError(f"Failed to read serial number from bootloader: expected 9 bytes, got {len(result)}")
         #Note bootloader uses big endian instead of little for reasons
-        return struct.unpack(f">{_3space_format_to_external('U')}", result[:8])[0]
+        return struct.unpack(f">{yost_format_to_struct_format('U')}", result[:8])[0]
 
     def bootloader_boot_firmware(self):
         if not self.in_bootloader: return
@@ -1602,10 +1290,10 @@ class ThreespaceSensor:
             self.com.close()
             success = self.__attempt_rediscover_self()
             if not success:
-                raise RuntimeError("Failed to reconnect to sensor in firmware")
+                raise SensorConnectionError("Failed to reconnect to sensor in firmware")
         in_bootloader = self.__check_bootloader_status()
         if in_bootloader:
-            raise RuntimeError("Failed to exit bootloader")
+            raise SensorConnectionError("Failed to exit bootloader")
         self.__cached_in_bootloader = False
         self.__firmware_init() 
     
@@ -1625,19 +1313,19 @@ class ThreespaceSensor:
     
     def bootloader_get_info(self):
         self.com.write('I'.encode())
-        memstart = struct.unpack(f">{_3space_format_to_external('l')}", self.com.read(4))[0]
-        memend = struct.unpack(f">{_3space_format_to_external('l')}", self.com.read(4))[0]
-        pagesize = struct.unpack(f">{_3space_format_to_external('I')}", self.com.read(2))[0]
-        bootversion = struct.unpack(f">{_3space_format_to_external('I')}", self.com.read(2))[0]
+        memstart = struct.unpack(f">{yost_format_to_struct_format('l')}", self.com.read(4))[0]
+        memend = struct.unpack(f">{yost_format_to_struct_format('l')}", self.com.read(4))[0]
+        pagesize = struct.unpack(f">{yost_format_to_struct_format('I')}", self.com.read(2))[0]
+        bootversion = struct.unpack(f">{yost_format_to_struct_format('I')}", self.com.read(2))[0]
         return ThreespaceBootloaderInfo(memstart, memend, pagesize, bootversion)
 
     def bootloader_prog_mem(self, bytes: bytearray, timeout=5):
         memsize = len(bytes)
         checksum = sum(bytes)
         self.com.write('C'.encode())
-        self.com.write(struct.pack(f">{_3space_format_to_external('I')}", memsize))
+        self.com.write(struct.pack(f">{yost_format_to_struct_format('I')}", memsize))
         self.com.write(bytes)
-        self.com.write(struct.pack(f">{_3space_format_to_external('B')}", checksum & 0xFFFF))
+        self.com.write(struct.pack(f">{yost_format_to_struct_format('B')}", checksum & 0xFFFF))
         start_time = time.perf_counter()
         result = []
         while len(result) == 0 and time.perf_counter() - start_time < timeout:
@@ -1648,7 +1336,7 @@ class ThreespaceSensor:
 
     def bootloader_get_state(self):
         self.com.write('OO'.encode()) #O is sent twice to compensate for a bug in some versions of the bootloader where the next character is ignored (except for R, do NOT send R after O, it will erase all settings)
-        state = struct.unpack(f">{_3space_format_to_external('u')}", self.com.read(4))[0]
+        state = struct.unpack(f">{yost_format_to_struct_format('u')}", self.com.read(4))[0]
         self.com.read_all() #Once the bootloader is fixed, it will respond twice instead of once. So consume any remainder
         return state
 
@@ -1683,31 +1371,113 @@ class ThreespaceSensor:
 #But basically, these are all just prototypes. Information about the commands is in the table
 #beneath here, and the API simply calls its execute_command function on the Command information objects defined.
 
+#If there is a function in the class named __{command_name} it will be used as the function 
+#for that command. Otherwise, a default function will be used based on the available command info.
+#Most commands do not require a custom function like this.
+
+#Also note that all commands sent to the sensor are camelCase instead of snake_case to more
+#closely match the actual source.
+
+    def getTaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ...                        
+    def getTaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getDifferenceQuaternion(self) -> ThreespaceCmdResult[list[float]]: ... 
+
+    def getUntaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...  
+    def getUntaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getUntaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getUntaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getUntaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getTaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...    
+    def getUntaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...  
+
+    def getPrimaryBarometerPressure(self) -> ThreespaceCmdResult[float]: ...
+    def getPrimaryBarometerAltitude(self) -> ThreespaceCmdResult[float]: ...    
+    def getBarometerAltitude(self, id: int) -> ThreespaceCmdResult[float]: ...   
+    def getBarometerPressure(self, id: int) -> ThreespaceCmdResult[float]: ... 
+
+    def setOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+    def resetBaseOffset(self) -> ThreespaceCmdResult[None]: ...
+    def setBaseOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+
+    def getAllPrimaryNormalizedData(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryNormalizedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getAllPrimaryCorrectedData(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
+    def getPrimaryCorrectedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getPrimaryGlobalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ... 
+    def getPrimaryLocalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ... 
+
+    def getTemperatureCelsius(self) -> ThreespaceCmdResult[float]: ... 
+    def getTemperatureFahrenheit(self) -> ThreespaceCmdResult[float]: ...   
+
+    def getMotionlessConfidenceFactor(self) -> ThreespaceCmdResult[float]: ...
+
+    def correctRawGyroData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def correctRawAccelData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def correctRawMagData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getNormalizedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getNormalizedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getNormalizedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
+    def getCorrectedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getCorrectedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getCorrectedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
+    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
+    def disableMSC(self) -> ThreespaceCmdResult[None]: ...
+
+    def formatSd(self) -> ThreespaceCmdResult[None]: ...
+    def startDataLogging(self) -> ThreespaceCmdResult[None]: ...
+    def stopDataLogging(self) -> ThreespaceCmdResult[None]: ...
+
+    def setDateTime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> ThreespaceCmdResult[None]: ...
+    def getDateTime(self) -> ThreespaceCmdResult[list[int]]: ...
+
+    def getRawGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getRawAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+    def getRawMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
+
     def eeptsStart(self) -> ThreespaceCmdResult[None]: ...
     def eeptsStop(self) -> ThreespaceCmdResult[None]: ...
     def eeptsGetOldestStep(self) -> ThreespaceCmdResult[list]: ...
     def eeptsGetNewestStep(self) -> ThreespaceCmdResult[list]: ...   
     def eeptsGetNumStepsAvailable(self) -> ThreespaceCmdResult[int]: ...    
     def eeptsInsertGPS(self, latitude: float, longitude: float) -> ThreespaceCmdResult[None]: ...
-    def eeptsAutoOffset(self) -> ThreespaceCmdResult[None]: ... 
-    def getRawGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getRawAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getRawMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ...                        
-    def getTaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getTaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getDifferenceQuaternion(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getUntaredOrientation(self) -> ThreespaceCmdResult[list[float]]: ...  
-    def getUntaredOrientationAsEulerAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getUntaredOrientationAsRotationMatrix(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getUntaredOrientationAsAxisAngles(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getUntaredOrientationAsTwoVector(self) -> ThreespaceCmdResult[list[float]]: ...
-    def commitSettings(self) -> ThreespaceCmdResult[None]: ...    
-    def getMotionlessConfidenceFactor(self) -> ThreespaceCmdResult[float]: ...
-    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
-    def disableMSC(self) -> ThreespaceCmdResult[None]: ...  
+    def eeptsAutoOffset(self) -> ThreespaceCmdResult[None]: ...
+
+    def getStreamingLabel(self, cmd_num: int) -> ThreespaceCmdResult[str]: ...
+    def getStreamingBatch(self) -> ThreespaceCmdResult[list]: ...
+    def startStreaming(self) -> ThreespaceCmdResult[None]: ...
+    def stopStreaming(self) -> ThreespaceCmdResult[None]: ...
+    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]: ...
+
+    def getDateTimeString(self) -> ThreespaceCmdResult[str]: ...
+    def getTimestamp(self) -> ThreespaceCmdResult[int]: ...
+
+    def tareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+    def setBaseTareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
+
+    def resetFilter(self) -> ThreespaceCmdResult[None]: ...
+    def getNumDebugMessages(self) -> ThreespaceCmdResult[int]: ...
+    def getOldestDebugMessage(self) -> ThreespaceCmdResult[str]: ...
+    def selfTest(self) -> ThreespaceCmdResult[int]: ...
+
+    def beginPassiveAutoCalibration(self, enabled_bitfield: int) -> ThreespaceCmdResult[None]: ...
+    def getActivePassiveAutoCalibration(self) -> ThreespaceCmdResult[int]: ...
+    def beginActiveAutoCalibration(self) -> ThreespaceCmdResult[None]: ...
+    def isActiveAutoCalibrationActive(self) -> ThreespaceCmdResult[int]: ... 
+
+    def getLastLogCursorInfo(self) -> ThreespaceCmdResult[tuple[int,str]]: ... 
     def getNextDirectoryItem(self) -> ThreespaceCmdResult[list[int,str,int]]: ...
     def changeDirectory(self, path: str) -> ThreespaceCmdResult[None]: ...   
     def openFile(self, path: str) -> ThreespaceCmdResult[None]: ... 
@@ -1715,274 +1485,1126 @@ class ThreespaceSensor:
     def fileGetRemainingSize(self) -> ThreespaceCmdResult[int]: ...
     def fileReadLine(self) -> ThreespaceCmdResult[str]: ... 
     def fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]: ...
-    def __fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]:    
-        self.check_dirty()
-        cmd = self.commands[THREESPACE_FILE_READ_BYTES_COMMAND_NUM]
-        cmd.send_command(self.com, num_bytes, header_enabled=self.header_enabled)
-        self.__await_command(cmd)
-        if self.header_enabled:
-            header = ThreespaceHeader.from_bytes(self.com.read(self.header_info.size), self.header_info)
-            num_bytes = min(num_bytes, header.length) #Its possible for less bytes to be returned when an error occurs (EX: Reading from unopened file)
-        else:
-            header = ThreespaceHeader()
-
-        response = self.com.read(num_bytes)
-        return ThreespaceCmdResult(response, header, data_raw_binary=response)
-
     def deleteFile(self, path: str) -> ThreespaceCmdResult[None]: ...
-    def getStreamingBatch(self) -> ThreespaceCmdResult[list]: ...
-    def setOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
-    def resetBaseOffset(self) -> ThreespaceCmdResult[None]: ...
-    def setBaseOffsetWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...    
-    def getTaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...    
-    def getUntaredTwoVectorInSensorFrame(self) -> ThreespaceCmdResult[list[float]]: ...        
-    def getPrimaryBarometerPressure(self) -> ThreespaceCmdResult[float]: ...
-    def getPrimaryBarometerAltitude(self) -> ThreespaceCmdResult[float]: ...    
-    def getBarometerAltitude(self, id: int) -> ThreespaceCmdResult[float]: ...   
-    def getBarometerPressure(self, id: int) -> ThreespaceCmdResult[float]: ...      
-    def getAllPrimaryNormalizedData(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryNormalizedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryNormalizedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryNormalizedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getAllPrimaryCorrectedData(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryCorrectedGyroRate(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryCorrectedAccelVec(self) -> ThreespaceCmdResult[list[float]]: ...
-    def getPrimaryCorrectedMagVec(self) -> ThreespaceCmdResult[list[float]]: ...    
-    def getPrimaryGlobalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ... 
-    def getPrimaryLocalLinearAccel(self) -> ThreespaceCmdResult[list[float]]: ...         
-    def getTemperatureCelsius(self) -> ThreespaceCmdResult[float]: ... 
-    def getTemperatureFahrenheit(self) -> ThreespaceCmdResult[float]: ...     
-    def getNormalizedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getNormalizedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getNormalizedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...     
-    def getCorrectedGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getCorrectedAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def getCorrectedMagVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...    
-    def enableMSC(self) -> ThreespaceCmdResult[None]: ...
-    def disableMSC(self) -> ThreespaceCmdResult[None]: ...
-    def getDateTimeString(self) -> ThreespaceCmdResult[str]: ...
-    def getTimestamp(self) -> ThreespaceCmdResult[int]: ...
+    def setCursor(self, cursor_index: int) -> ThreespaceCmdResult[None]: ...
+    def fileStartStream(self) -> ThreespaceCmdResult[int]: ...
+    def fileStopStream(self) -> ThreespaceCmdResult[None]: ...
+
+    def getBatteryCurrent(self) -> ThreespaceCmdResult[float]: ...
     def getBatteryVoltage(self) -> ThreespaceCmdResult[float]: ...
     def getBatteryPercent(self) -> ThreespaceCmdResult[int]: ...
-    def getBatteryStatus(self) -> ThreespaceCmdResult[int]: ...     
+    def getBatteryStatus(self) -> ThreespaceCmdResult[int]: ... 
+
     def getGpsActiveState(self) -> ThreespaceCmdResult[bool]: ...
     def getGpsCoord(self) -> ThreespaceCmdResult[list[float]]: ...
     def getGpsAltitude(self) -> ThreespaceCmdResult[float]: ...
     def getGpsFixState(self) -> ThreespaceCmdResult[int]: ...
     def getGpsHdop(self) -> ThreespaceCmdResult[float]: ...
-    def getGpsSatellites(self) -> ThreespaceCmdResult[int]: ...             
+    def getGpsSatellites(self) -> ThreespaceCmdResult[int]: ...
+
+    def commitSettings(self) -> ThreespaceCmdResult[None]: ...
+    def softwareReset(self): ...
+    def enterBootloader(self): ...
+
+    def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...
     def getButtonState(self) -> ThreespaceCmdResult[int]: ...
-    def correctRawGyroData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def correctRawAccelData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def correctRawMagData(self, x: float, y: float, z: float, id: int) -> ThreespaceCmdResult[list[float]]: ...
-    def formatSd(self) -> ThreespaceCmdResult[None]: ...
-    def setDateTime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> ThreespaceCmdResult[None]: ...
-    def getDateTime(self) -> ThreespaceCmdResult[list[int]]: ...
-    def tareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ...
-    def setBaseTareWithCurrentOrientation(self) -> ThreespaceCmdResult[None]: ... 
-    def resetFilter(self) -> ThreespaceCmdResult[None]: ...
-    def getNumDebugMessages(self) -> ThreespaceCmdResult[int]: ...
-    def getOldestDebugMessage(self) -> ThreespaceCmdResult[str]: ...
-    def selfTest(self) -> ThreespaceCmdResult[int]: ...
-    def beginPassiveAutoCalibration(self, enabled_bitfield: int) -> ThreespaceCmdResult[None]: ...
-    def getActivePassiveAutoCalibration(self) -> ThreespaceCmdResult[int]: ...
-    def beginActiveAutoCalibration(self) -> ThreespaceCmdResult[None]: ...
-    def isActiveAutoCalibrationActive(self) -> ThreespaceCmdResult[int]: ...            
-    def getStreamingLabel(self, cmd_num: int) -> ThreespaceCmdResult[str]: ...
-    def setCursor(self, cursor_index: int) -> ThreespaceCmdResult[None]: ...
-    def getLastLogCursorInfo(self) -> ThreespaceCmdResult[tuple[int,str]]: ...
-    def pauseLogStreaming(self, pause: bool) -> ThreespaceCmdResult[None]: ...  
-    def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...           
 
-THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM = 84
-THREESPACE_START_STREAMING_COMMAND_NUM = 85
-THREESPACE_STOP_STREAMING_COMMAND_NUM = 86
-THREESPACE_FILE_READ_BYTES_COMMAND_NUM = 177
-THREESPACE_SOFTWARE_RESET_COMMAND_NUM = 226
-THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM = 229
+#---------------------------------------SETTING PROTOTYPES----------------------------------------------
+    def restoreDefaultSettings(self) -> int:
+        return self.write_settings(default=None)[0]
 
-#Acutal command definitions
-_threespace_commands: list[ThreespaceCommand] = [
-    #Tared Orientation
-    ThreespaceCommand("getTaredOrientation", 0, "", "ffff"),
-    ThreespaceCommand("getTaredOrientationAsEulerAngles", 1, "", "fff"),
-    ThreespaceCommand("getTaredOrientationAsRotationMatrix", 2, "", "fffffffff"),
-    ThreespaceCommand("getTaredOrientationAsAxisAngles", 3, "", "ffff"),
-    ThreespaceCommand("getTaredOrientationAsTwoVector", 4, "", "ffffff"),
+    def readAllSettings(self) -> dict[str,Any]:
+        return self.read_settings("all")["all"]
 
-    #Weird
-    ThreespaceCommand("getDifferenceQuaternion", 5, "", "ffff"),
+    def readAllWritableSettings(self) -> dict[str,Any]:
+        return self.read_settings("settings")["settings"]
 
-    #Untared Orientation
-    ThreespaceCommand("getUntaredOrientation", 6, "", "ffff"),
-    ThreespaceCommand("getUntaredOrientationAsEulerAngles", 7, "", "fff"),
-    ThreespaceCommand("getUntaredOrientationAsRotationMatrix", 8, "", "fffffffff"),
-    ThreespaceCommand("getUntaredOrientationAsAxisAngles", 9, "", "ffff"),
-    ThreespaceCommand("getUntaredOrientationAsTwoVector", 10, "", "ffffff"),
-    
-    #Late orientation additions
-    ThreespaceCommand("getTaredTwoVectorInSensorFrame", 11, "", "ffffff"),
-    ThreespaceCommand("getUntaredTwoVectorInSensorFrame", 12, "", "ffffff"),
+    def readSerialNumber(self) -> int:
+        return self.read_settings("serial_number")["serial_number"]
 
-    ThreespaceCommand("getPrimaryBarometerPressure", 13, "", "f"),
-    ThreespaceCommand("getPrimaryBarometerAltitude", 14, "", "f"),
-    ThreespaceCommand("getBarometerAltitude", 15, "b", "f"),
-    ThreespaceCommand("getBarometerPressure", 16, "b", "f"),
+    def writeTimestamp(self, microseconds: int) -> int:
+        return self.write_settings(timestamp=microseconds)[0]
 
-    ThreespaceCommand("setOffsetWithCurrentOrientation", 19, "", ""),
-    ThreespaceCommand("resetBaseOffset", 20, "", ""),
-    ThreespaceCommand("setBaseOffsetWithCurrentOrientation", 22, "", ""),
+    def readTimestamp(self) -> int:
+        return self.read_settings("timestamp")["timestamp"]
 
-    ThreespaceCommand("getAllPrimaryNormalizedData", 32, "", "fffffffff"),
-    ThreespaceCommand("getPrimaryNormalizedGyroRate", 33, "", "fff"),
-    ThreespaceCommand("getPrimaryNormalizedAccelVec", 34, "", "fff"),
-    ThreespaceCommand("getPrimaryNormalizedMagVec", 35, "", "fff"),
+    def writeLedMode(self, value: int) -> int:
+        return self.write_settings(led_mode=value)[0]
 
-    ThreespaceCommand("getAllPrimaryCorrectedData", 37, "", "fffffffff"),
-    ThreespaceCommand("getPrimaryCorrectedGyroRate", 38, "", "fff"),
-    ThreespaceCommand("getPrimaryCorrectedAccelVec", 39, "", "fff"),
-    ThreespaceCommand("getPrimaryCorrectedMagVec", 40, "", "fff"),
+    def readLedMode(self) -> int:
+        return self.read_settings("led_mode")["led_mode"]
 
-    ThreespaceCommand("getPrimaryGlobalLinearAccel", 41, "", "fff"),
-    ThreespaceCommand("getPrimaryLocalLinearAccel", 42, "", "fff"),
+    def writeLedRgb(self, value: list[float]) -> int:
+        return self.write_settings(led_rgb=value)[0]
 
-    ThreespaceCommand("getTemperatureCelsius", 43, "", "f"),
-    ThreespaceCommand("getTemperatureFahrenheit", 44, "", "f"),
+    def readLedRgb(self) -> list[float]:
+        return self.read_settings("led_rgb")["led_rgb"]
 
-    ThreespaceCommand("getMotionlessConfidenceFactor", 45, "", "f"),
+    def readVersionFirmware(self) -> str:
+        return self.read_settings("version_firmware")["version_firmware"]
 
-    ThreespaceCommand("correctRawGyroData", 48, "fffb", "fff"),
-    ThreespaceCommand("correctRawAccelData", 49, "fffb", "fff"),
-    ThreespaceCommand("correctRawMagData", 50, "fffb", "fff"),
+    def readVersionHardware(self) -> str:
+        return self.read_settings("version_hardware")["version_hardware"]
 
-    ThreespaceCommand("getNormalizedGyroRate", 51, "b", "fff"),
-    ThreespaceCommand("getNormalizedAccelVec", 52, "b", "fff"),
-    ThreespaceCommand("getNormalizedMagVec", 53, "b", "fff"),
+    def readUpdateRateSensor(self) -> int:
+        return self.read_settings("update_rate_sensor")["update_rate_sensor"]
 
-    ThreespaceCommand("getCorrectedGyroRate", 54, "b", "fff"),
-    ThreespaceCommand("getCorrectedAccelVec", 55, "b", "fff"),
-    ThreespaceCommand("getCorrectedMagVec", 56, "b", "fff"),
+    def writeHeader(self, value: int) -> int:
+        return self.write_settings(header=value)[0]
 
-    ThreespaceCommand("enableMSC", 57, "", ""),
-    ThreespaceCommand("disableMSC", 58, "", ""),
+    def readHeader(self) -> int:
+        return self.read_settings("header")["header"]
 
-    ThreespaceCommand("formatSd", 59, "", ""),
-    ThreespaceCommand("startDataLogging", 60, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__startDataLogging),
-    ThreespaceCommand("stopDataLogging", 61, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__stopDataLogging),
+    def writeHeaderStatusEnabled(self, value: int) -> int:
+        return self.write_settings(header_status=value)[0]
 
-    ThreespaceCommand("setDateTime", 62, "Bbbbbb", ""),
-    ThreespaceCommand("getDateTime", 63, "", "Bbbbbb"),
+    def readHeaderStatusEnabled(self) -> int:
+        return self.read_settings("header_status")["header_status"]
 
-    ThreespaceCommand("getRawGyroRate", 65, "b", "fff"),
-    ThreespaceCommand("getRawAccelVec", 66, "b", "fff"),
-    ThreespaceCommand("getRawMagVec", 67, "b", "fff"),
+    def writeHeaderTimestampEnabled(self, value: int) -> int:
+        return self.write_settings(header_timestamp=value)[0]
 
-    ThreespaceCommand("eeptsStart", 68, "", ""),
-    ThreespaceCommand("eeptsStop", 69, "", ""),
-    ThreespaceCommand("eeptsGetOldestStep", 70, "", "uuddffffffbbff"),
-    ThreespaceCommand("eeptsGetNewestStep", 71, "", "uuddffffffbbff"),
-    ThreespaceCommand("eeptsGetNumStepsAvailable", 72, "", "b"),
-    ThreespaceCommand("eeptsInsertGPS", 73, "dd", ""),
-    ThreespaceCommand("eeptsAutoOffset", 74, "", ""),
+    def readHeaderTimestampEnabled(self) -> int:
+        return self.read_settings("header_timestamp")["header_timestamp"]
 
-    ThreespaceCommand("getStreamingLabel", 83, "b", "S"),
-    ThreespaceCommand("getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
-    ThreespaceCommand("startStreaming", THREESPACE_START_STREAMING_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__startStreaming),
-    ThreespaceCommand("stopStreaming", THREESPACE_STOP_STREAMING_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__stopStreaming),
-    ThreespaceCommand("pauseLogStreaming", 87, "b", ""),
-    
-    ThreespaceCommand("getDateTimeString", 93, "", "S"),
-    ThreespaceCommand("getTimestamp", 94, "", "U"),
+    def writeHeaderEchoEnabled(self, value: int) -> int:
+        return self.write_settings(header_echo=value)[0]
 
-    ThreespaceCommand("tareWithCurrentOrientation", 96, "", ""),
-    ThreespaceCommand("setBaseTareWithCurrentOrientation", 97, "", ""),
+    def readHeaderEchoEnabled(self) -> int:
+        return self.read_settings("header_echo")["header_echo"]
 
-    ThreespaceCommand("resetFilter", 120, "", ""),
-    ThreespaceCommand("getNumDebugMessages", 126, "", "B"),
-    ThreespaceCommand("getOldestDebugMessage", 127, "", "S"),
-    ThreespaceCommand("selfTest", 128, "", "u"),
+    def writeHeaderChecksumEnabled(self, value: int) -> int:
+        return self.write_settings(header_checksum=value)[0]
 
-    ThreespaceCommand("beginPassiveAutoCalibration", 165, "b", ""),
-    ThreespaceCommand("getActivePassiveAutoCalibration", 166, "", "b"),
-    ThreespaceCommand("beginActiveAutoCalibration", 167, "", ""),
-    ThreespaceCommand("isActiveAutoCalibrationActive", 168, "", "b"),
+    def readHeaderChecksumEnabled(self) -> int:
+        return self.read_settings("header_checksum")["header_checksum"]
 
-    ThreespaceCommand("getLastLogCursorInfo", 170, "", "US"),
-    ThreespaceCommand("getNextDirectoryItem", 171, "", "bsU"),
-    ThreespaceCommand("changeDirectory", 172, "S", ""),
-    ThreespaceCommand("openFile", 173, "S", ""),
-    ThreespaceCommand("closeFile", 174, "", ""),
-    ThreespaceCommand("fileGetRemainingSize", 175, "", "U"),
-    ThreespaceCommand("fileReadLine", 176, "", "S"),
-    ThreespaceCommand("fileReadBytes", THREESPACE_FILE_READ_BYTES_COMMAND_NUM, "B", "S", custom_func=ThreespaceSensor._ThreespaceSensor__fileReadBytes), #This has to be handled specially as the output is variable length BYTES not STRING
-    ThreespaceCommand("deleteFile", 178, "S", ""),
-    ThreespaceCommand("setCursor", 179, "U", ""),
-    ThreespaceCommand("fileStartStream", 180, "", "U", custom_func=ThreespaceSensor._ThreespaceSensor__fileStartStream),
-    ThreespaceCommand("fileStopStream", 181, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__fileStopStream),
+    def writeHeaderSerialEnabled(self, value: int) -> int:
+        return self.write_settings(header_serial=value)[0]
 
-    ThreespaceCommand("getBatteryCurrent", 200, "", "I"),
-    ThreespaceCommand("getBatteryVoltage", 201, "", "f"),
-    ThreespaceCommand("getBatteryPercent", 202, "", "b"),
-    ThreespaceCommand("getBatteryStatus", 203, "", "b"),
+    def readHeaderSerialEnabled(self) -> int:
+        return self.read_settings("header_serial")["header_serial"]
 
-    ThreespaceCommand("getGpsActiveState", 214, "", "b"),
-    ThreespaceCommand("getGpsCoord", 215, "", "dd"),
-    ThreespaceCommand("getGpsAltitude", 216, "", "f"),
-    ThreespaceCommand("getGpsFixState", 217, "", "b"),
-    ThreespaceCommand("getGpsHdop", 218, "", "f"),
-    ThreespaceCommand("getGpsSatellites", 219, "", "b"),
+    def writeHeaderLengthEnabled(self, value: int) -> int:
+        return self.write_settings(header_length=value)[0]
 
-    ThreespaceCommand("commitSettings", 225, "", ""),
-    ThreespaceCommand("softwareReset", THREESPACE_SOFTWARE_RESET_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__softwareReset),
-    ThreespaceCommand("enterBootloader", THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM, "", "", custom_func=ThreespaceSensor._ThreespaceSensor__enterBootloader),
+    def readHeaderLengthEnabled(self) -> int:
+        return self.read_settings("header_length")["header_length"]
 
-    ThreespaceCommand("getLedColor", 238, "", "fff"),
+    def readValidCommands(self) -> str:
+        return self.read_settings("valid_commands")["valid_commands"]
 
-    ThreespaceCommand("getButtonState", 250, "", "b"),
-]
+    def writeCpuSpeed(self, value: int) -> int:
+        return self.write_settings(cpu_speed=value)[0]
 
-def threespaceCommandGet(cmd_num: int):
-    for command in _threespace_commands:
-        if command.info.num == cmd_num:
-            return command
-    return None
+    def readCpuSpeed(self) -> int:
+        return self.read_settings("cpu_speed")["cpu_speed"]
 
-def threespaceCommandGetByName(name: str):
-    for command in _threespace_commands:
-        if command.info.name == name:
-            return command
-    return None
+    def readCpuSpeedCur(self) -> int:
+        return self.read_settings("cpu_speed_cur")["cpu_speed_cur"]
 
-def threespaceCommandGetInfo(cmd_num: int):
-    command = threespaceCommandGet(cmd_num)
-    if command is None: return None
-    return command.info
+    def writePmMode(self, value: int) -> int:
+        return self.write_settings(pm_mode=value)[0]
 
-def threespaceGetHeaderLabels(header_info: ThreespaceHeaderInfo):
-    order = []
-    if header_info.status_enabled:
-        order.append("status")
-    if header_info.timestamp_enabled:
-        order.append("timestamp")
-    if header_info.echo_enabled:
-        order.append("echo")
-    if header_info.checksum_enabled:
-        order.append("checksum")
-    if header_info.serial_enabled:
-        order.append("serial#")
-    if header_info.length_enabled:
-        order.append("len")
-    return order
+    def writePmIdleEnabled(self, value: int) -> int:
+        return self.write_settings(pm_idle_enabled=value)[0]
 
-def threespaceSetSettingsStringToDict(setting_string: str):
-    d = {}
-    for item in setting_string.split(';'):
-        result = item.split('=')
-        key = result[0]
-        if len(result) == 1:
-            value = None
-        else:
-            value = '='.join(result[1:]) #In case = was part of the value, do a join
-        
-        d[key] = value
-    return d
+    def readPmIdleEnabled(self) -> int:
+        return self.read_settings("pm_idle_enabled")["pm_idle_enabled"]
+
+    def writeStreamSlots(self, value: str) -> int:
+        return self.write_settings(stream_slots=value)[0]
+
+    def readStreamSlots(self) -> str:
+        return self.read_settings("stream_slots")["stream_slots"]
+
+    def writeStreamInterval(self, value: int) -> int:
+        return self.write_settings(stream_interval=value)[0]
+
+    def readStreamInterval(self) -> int:
+        return self.read_settings("stream_interval")["stream_interval"]
+
+    def writeStreamHz(self, value: float) -> int:
+        return self.write_settings(stream_hz=value)[0]
+
+    def readStreamHz(self) -> float:
+        return self.read_settings("stream_hz")["stream_hz"]
+
+    def writeStreamDuration(self, value: float) -> int:
+        return self.write_settings(stream_duration=value)[0]
+
+    def readStreamDuration(self) -> float:
+        return self.read_settings("stream_duration")["stream_duration"]
+
+    def writeStreamDelay(self, value: float) -> int:
+        return self.write_settings(stream_delay=value)[0]
+
+    def readStreamDelay(self) -> float:
+        return self.read_settings("stream_delay")["stream_delay"]
+
+    def writeStreamMode(self, value: int) -> int:
+        return self.write_settings(stream_mode=value)[0]
+
+    def readStreamMode(self) -> int:
+        return self.read_settings("stream_mode")["stream_mode"]
+
+    def writeStreamCount(self, value: int) -> int:
+        return self.write_settings(stream_count=value)[0]
+
+    def readStreamCount(self) -> int:
+        return self.read_settings("stream_count")["stream_count"]
+
+    def readStreamableCommands(self) -> str:
+        return self.read_settings("streamable_commands")["streamable_commands"]
+
+    def writeDebugLevel(self, value: int) -> int:
+        return self.write_settings(debug_level=value)[0]
+
+    def readDebugLevel(self) -> int:
+        return self.read_settings("debug_level")["debug_level"]
+
+    def writeDebugModule(self, value: int) -> int:
+        return self.write_settings(debug_module=value)[0]
+
+    def readDebugModule(self) -> int:
+        return self.read_settings("debug_module")["debug_module"]
+
+    def writeDebugMode(self, value: int) -> int:
+        return self.write_settings(debug_mode=value)[0]
+
+    def readDebugMode(self) -> int:
+        return self.read_settings("debug_mode")["debug_mode"]
+
+    def writeDebugLed(self, value: int) -> int:
+        return self.write_settings(debug_led=value)[0]
+
+    def readDebugLed(self) -> int:
+        return self.read_settings("debug_led")["debug_led"]
+
+    def writeDebugFault(self, value: int) -> int:
+        return self.write_settings(debug_fault=value)[0]
+
+    def readDebugFault(self) -> int:
+        return self.read_settings("debug_fault")["debug_fault"]
+
+    def writeDebugWdt(self, value: int) -> int:
+        return self.write_settings(debug_wdt=value)[0]
+
+    def readDebugWdt(self) -> int:
+        return self.read_settings("debug_wdt")["debug_wdt"]
+
+    def writeAxisOrder(self, value: str) -> int:
+        return self.write_settings(axis_order=value)[0]
+
+    def readAxisOrder(self) -> str:
+        return self.read_settings("axis_order")["axis_order"]
+
+    def writeAxisOrderC(self, value: str) -> int:
+        return self.write_settings(axis_order_c=value)[0]
+
+    def readAxisOrderC(self) -> str:
+        return self.read_settings("axis_order_c")["axis_order_c"]
+
+    def writeAxisOffsetEnabled(self, value: int) -> int:
+        return self.write_settings(axis_offset_enabled=value)[0]
+
+    def readAxisOffsetEnabled(self) -> int:
+        return self.read_settings("axis_offset_enabled")["axis_offset_enabled"]
+
+    def writeEulerOrder(self, value: str) -> int:
+        return self.write_settings(euler_order=value)[0]
+
+    def readEulerOrder(self) -> str:
+        return self.read_settings("euler_order")["euler_order"]
+
+    def readUpdateRateFilter(self) -> int:
+        return self.read_settings("update_rate_filter")["update_rate_filter"]
+
+    def readUpdateRateSms(self) -> int:
+        return self.read_settings("update_rate_sms")["update_rate_sms"]
+
+    def writeOffset(self, value: list[float]) -> int:
+        return self.write_settings(offset=value)[0]
+
+    def readOffset(self) -> list[float]:
+        return self.read_settings("offset")["offset"]
+
+    def writeBaseOffset(self, value: list[float]) -> int:
+        return self.write_settings(base_offset=value)[0]
+
+    def readBaseOffset(self) -> list[float]:
+        return self.read_settings("base_offset")["base_offset"]
+
+    def writeTareQuat(self, value: list[float]) -> int:
+        return self.write_settings(tare_quat=value)[0]
+
+    def readTareQuat(self) -> list[float]:
+        return self.read_settings("tare_quat")["tare_quat"]
+
+    def writeTareAutoBase(self, value: int) -> int:
+        return self.write_settings(tare_auto_base=value)[0]
+
+    def readTareAutoBase(self) -> int:
+        return self.read_settings("tare_auto_base")["tare_auto_base"]
+
+    def writeBaseTare(self, value: list[float]) -> int:
+        return self.write_settings(base_tare=value)[0]
+
+    def readBaseTare(self) -> list[float]:
+        return self.read_settings("base_tare")["base_tare"]
+
+    def writeTareMat(self, value: list[float]) -> int:
+        return self.write_settings(tare_mat=value)[0]
+
+    def readTareMat(self) -> list[float]:
+        return self.read_settings("tare_mat")["tare_mat"]
+
+    def writeRunningAvgOrient(self, value: float) -> int:
+        return self.write_settings(running_avg_orient=value)[0]
+
+    def readRunningAvgOrient(self) -> float:
+        return self.read_settings("running_avg_orient")["running_avg_orient"]
+
+    def writeFilterMode(self, value: int) -> int:
+        return self.write_settings(filter_mode=value)[0]
+
+    def readFilterMode(self) -> int:
+        return self.read_settings("filter_mode")["filter_mode"]
+
+    def writeFilterMrefMode(self, value: int) -> int:
+        return self.write_settings(filter_mref_mode=value)[0]
+
+    def readFilterMrefMode(self) -> int:
+        return self.read_settings("filter_mref_mode")["filter_mref_mode"]
+
+    def writeFilterMref(self, value: list[float]) -> int:
+        return self.write_settings(filter_mref=value)[0]
+
+    def readFilterMref(self) -> list[float]:
+        return self.read_settings("filter_mref")["filter_mref"]
+
+    def writeFilterMrefGps(self, value: list[float]) -> int:
+        return self.write_settings(filter_mref_gps=value)[0]
+
+    def writeFilterMrefDip(self, value: float) -> int:
+        return self.write_settings(filter_mref_dip=value)[0]
+
+    def readFilterMrefDip(self) -> float:
+        return self.read_settings("filter_mref_dip")["filter_mref_dip"]
+
+    def writeFilterConfThresholds(self, min: float, max: float, cap: float) -> int:
+        return self.write_settings(filter_conf_thresholds=[min, max, cap])[0]
+
+    def readFilterConfThresholds(self) -> list[float, float, float]:
+        return self.read_settings("filter_conf_thresholds")["filter_conf_thresholds"]
+
+    def readValidAccels(self) -> str:
+        return self.read_settings("valid_accels")["valid_accels"]
+
+    def readValidGyros(self) -> str:
+        return self.read_settings("valid_gyros")["valid_gyros"]
+
+    def readValidMags(self) -> str:
+        return self.read_settings("valid_mags")["valid_mags"]
+
+    def readValidBaros(self) -> str:
+        return self.read_settings("valid_baros")["valid_baros"]
+
+    def readValidComponents(self) -> str:
+        return self.read_settings("valid_components")["valid_components"]
+
+    def writePrimaryAccel(self, value: str) -> int:
+        return self.write_settings(primary_accel=value)[0]
+
+    def readPrimaryAccel(self) -> str:
+        return self.read_settings("primary_accel")["primary_accel"]
+
+    def writePrimaryGyro(self, value: str) -> int:
+        return self.write_settings(primary_gyro=value)[0]
+
+    def readPrimaryGyro(self) -> str:
+        return self.read_settings("primary_gyro")["primary_gyro"]
+
+    def writePrimaryMag(self, value: str) -> int:
+        return self.write_settings(primary_mag=value)[0]
+
+    def readPrimaryMag(self) -> str:
+        return self.read_settings("primary_mag")["primary_mag"]
+
+    def writePrimarySensorRfade(self, value: float) -> int:
+        return self.write_settings(primary_sensor_rfade=value)[0]
+
+    def readPrimarySensorRfade(self) -> float:
+        return self.read_settings("primary_sensor_rfade")["primary_sensor_rfade"]
+
+    def writeMagBiasMode(self, value: int) -> int:
+        return self.write_settings(mag_bias_mode=value)[0]
+
+    def readMagBiasMode(self) -> int:
+        return self.read_settings("mag_bias_mode")["mag_bias_mode"]
+
+    def writeOdrAll(self, value: int) -> int:
+        return self.write_settings(odr_all=value)[0]
+
+    def writeOdrAccelAll(self, value: int) -> int:
+        return self.write_settings(odr_accel=value)[0]
+
+    def writeOdrGyroAll(self, value: int) -> int:
+        return self.write_settings(odr_gyro=value)[0]
+
+    def writeOdrMagAll(self, value: int) -> int:
+        return self.write_settings(odr_mag=value)[0]
+
+    def writeOdrBaroAll(self, value: int) -> int:
+        return self.write_settings(odr_baro=value)[0]
+
+    def writeAccelEnabled(self, value: int) -> int:
+        return self.write_settings(accel_enabled=value)[0]
+
+    def readAccelEnabled(self) -> int:
+        return self.read_settings("accel_enabled")["accel_enabled"]
+
+    def writeGyroEnabled(self, value: int) -> int:
+        return self.write_settings(gyro_enabled=value)[0]
+
+    def readGyroEnabled(self) -> int:
+        return self.read_settings("gyro_enabled")["gyro_enabled"]
+
+    def writeMagEnabled(self, value: int) -> int:
+        return self.write_settings(mag_enabled=value)[0]
+
+    def readMagEnabled(self) -> int:
+        return self.read_settings("mag_enabled")["mag_enabled"]
+
+    def writeCalibMatAccel(self, id: int, value: list[float]) -> int:
+        param = { "calib_mat_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibMatAccel(self, id: int) -> list[float]:
+        name = "calib_mat_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasAccel(self, id: int, value: list[float]) -> int:
+        param = { "calib_bias_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasAccel(self, id: int) -> list[float]:
+        name = "calib_bias_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRangeAccel(self, id: int, value: int) -> int:
+        param = { "range_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRangeAccel(self, id: int) -> int:
+        name = "range_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def readValidRangesAccel(self, id: int) -> str:
+        name = "valid_ranges_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOversampleAccel(self, id: int, value: int) -> int:
+        param = { "oversample_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOversampleAccel(self, id: int) -> int:
+        name = "oversample_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRunningAvgAccel(self, id: int, value: float) -> int:
+        param = { "running_avg_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRunningAvgAccel(self, id: int) -> float:
+        name = "running_avg_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOdrAccel(self, id: int, value: int) -> int:
+        param = { "odr_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrAccel(self, id: int) -> int:
+        name = "odr_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateAccel(self, id: int) -> float:
+        name = "update_rate_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def readNoiseProfileAccel(self, id: int) -> list[float, float, float, float, int]:
+        name = "noise_profile_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibMatGyro(self, id: int, value: list[float]) -> int:
+        param = { "calib_mat_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibMatGyro(self, id: int) -> list[float]:
+        name = "calib_mat_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasGyro(self, id: int, value: list[float]) -> int:
+        param = { "calib_bias_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasGyro(self, id: int) -> list[float]:
+        name = "calib_bias_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRangeGyro(self, id: int, value: int) -> int:
+        param = { "range_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRangeGyro(self, id: int) -> int:
+        name = "range_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def readValidRangesGyro(self, id: int) -> str:
+        name = "valid_ranges_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOversampleGyro(self, id: int, value: int) -> int:
+        param = { "oversample_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOversampleGyro(self, id: int) -> int:
+        name = "oversample_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRunningAvgGyro(self, id: int, value: float) -> int:
+        param = { "running_avg_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRunningAvgGyro(self, id: int) -> float:
+        name = "running_avg_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOdrGyro(self, id: int, value: int) -> int:
+        param = { "odr_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrGyro(self, id: int) -> int:
+        name = "odr_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateGyro(self, id: int) -> float:
+        name = "update_rate_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def readNoiseProfileGyro(self, id: int) -> list[float, float, float, float, int]:
+        name = "noise_profile_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibMatMag(self, id: int, value: list[float]) -> int:
+        param = { "calib_mat_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibMatMag(self, id: int) -> list[float]:
+        name = "calib_mat_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasMag(self, id: int, value: list[float]) -> int:
+        param = { "calib_bias_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasMag(self, id: int) -> list[float]:
+        name = "calib_bias_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRangeMag(self, id: int, value: int) -> int:
+        param = { "range_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRangeMag(self, id: int) -> int:
+        name = "range_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def readValidRangesMag(self, id: int) -> str:
+        name = "valid_ranges_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOversampleMag(self, id: int, value: int) -> int:
+        param = { "oversample_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOversampleMag(self, id: int) -> int:
+        name = "oversample_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRunningAvgMag(self, id: int, value: float) -> int:
+        param = { "running_avg_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRunningAvgMag(self, id: int) -> float:
+        name = "running_avg_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOdrMag(self, id: int, value: int) -> int:
+        param = { "odr_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrMag(self, id: int) -> int:
+        name = "odr_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateMag(self, id: int) -> float:
+        name = "update_rate_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def readNoiseProfileMag(self, id: int) -> list[float, float, float, float, int]:
+        name = "noise_profile_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasBaro(self, id: int, value: float) -> int:
+        param = { "calib_bias_baro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasBaro(self, id: int) -> float:
+        name = "calib_bias_baro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibAltitudeBaro(self, id: int, value: float) -> int:
+        param = { "calib_altitude_baro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def writeOdrBaro(self, id: int, value: int) -> int:
+        param = { "odr_baro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrBaro(self, id: int) -> int:
+        name = "odr_baro%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateBaro(self, id: int) -> float:
+        name = "update_rate_baro%d" % id
+        return self.read_settings(name)[name]
+
+    def writePtsOffsetQuat(self, value: list[float]) -> int:
+        return self.write_settings(pts_offset_quat=value)[0]
+
+    def readPtsOffsetQuat(self) -> list[float]:
+        return self.read_settings("pts_offset_quat")["pts_offset_quat"]
+
+    def restorePtsDefaultSettings(self) -> int:
+        return self.write_settings(pts_default=None)[0]
+
+    def readPtsSettings(self) -> dict[str,Any]:
+        return self.read_settings("pts_settings")["pts_settings"]
+
+    def writePtsPresetHand(self, value: int) -> int:
+        return self.write_settings(pts_preset_hand=value)[0]
+
+    def writePtsPresetMotion(self, value: int) -> int:
+        return self.write_settings(pts_preset_motion=value)[0]
+
+    def writePtsPresetHeading(self, value: int) -> int:
+        return self.write_settings(pts_preset_heading=value)[0]
+
+    def writePtsDebugLevel(self, value: int) -> int:
+        return self.write_settings(pts_debug_level=value)[0]
+
+    def readPtsDebugLevel(self) -> int:
+        return self.read_settings("pts_debug_level")["pts_debug_level"]
+
+    def writePtsDebugModule(self, value: int) -> int:
+        return self.write_settings(pts_debug_module=value)[0]
+
+    def readPtsDebugModule(self) -> int:
+        return self.read_settings("pts_debug_module")["pts_debug_module"]
+
+    def writePtsHeadingMode(self, value: int) -> int:
+        return self.write_settings(pts_heading_mode=value)[0]
+
+    def readPtsHeadingMode(self) -> int:
+        return self.read_settings("pts_heading_mode")["pts_heading_mode"]
+
+    def writePtsInitialHeadingMode(self, value: int) -> int:
+        return self.write_settings(pts_initial_heading_mode=value)[0]
+
+    def readPtsInitialHeadingMode(self) -> int:
+        return self.read_settings("pts_initial_heading_mode")["pts_initial_heading_mode"]
+
+    def writePtsHandHeadingMode(self, value: int) -> int:
+        return self.write_settings(pts_hand_heading_mode=value)[0]
+
+    def readPtsHandHeadingMode(self) -> int:
+        return self.read_settings("pts_hand_heading_mode")["pts_hand_heading_mode"]
+
+    def writePtsMagDeclination(self, value: float) -> int:
+        return self.write_settings(pts_mag_declination=value)[0]
+
+    def readPtsMagDeclination(self) -> float:
+        return self.read_settings("pts_mag_declination")["pts_mag_declination"]
+
+    def writePtsAutoDeclination(self, value: int) -> int:
+        return self.write_settings(pts_auto_declination=value)[0]
+
+    def readPtsAutoDeclination(self) -> int:
+        return self.read_settings("pts_auto_declination")["pts_auto_declination"]
+
+    def writePtsDiscardSlow(self, value: int) -> int:
+        return self.write_settings(pts_discard_slow=value)[0]
+
+    def readPtsDiscardSlow(self) -> int:
+        return self.read_settings("pts_discard_slow")["pts_discard_slow"]
+
+    def writePtsSegmentAxis(self, value: int) -> int:
+        return self.write_settings(pts_segment_axis=value)[0]
+
+    def readPtsSegmentAxis(self) -> int:
+        return self.read_settings("pts_segment_axis")["pts_segment_axis"]
+
+    def writePtsSegNoise(self, value: float) -> int:
+        return self.write_settings(pts_seg_noise=value)[0]
+
+    def readPtsSegNoise(self) -> float:
+        return self.read_settings("pts_seg_noise")["pts_seg_noise"]
+
+    def writePtsClassifierMode(self, value: int) -> int:
+        return self.write_settings(pts_classifier_mode=value)[0]
+
+    def readPtsClassifierMode(self) -> int:
+        return self.read_settings("pts_classifier_mode")["pts_classifier_mode"]
+
+    def writePtsClassifierMode2(self, value: int) -> int:
+        return self.write_settings(pts_classifier_mode2=value)[0]
+
+    def readPtsClassifierMode2(self) -> int:
+        return self.read_settings("pts_classifier_mode2")["pts_classifier_mode2"]
+
+    def writePtsLocationClassifierMode(self, value: int) -> int:
+        return self.write_settings(pts_location_classifier_mode=value)[0]
+
+    def readPtsLocationClassifierMode(self) -> int:
+        return self.read_settings("pts_location_classifier_mode")["pts_location_classifier_mode"]
+
+    def writePtsHandClassifierThreshold(self, value: float) -> int:
+        return self.write_settings(pts_hand_classifier_threshold=value)[0]
+
+    def readPtsHandClassifierThreshold(self) -> float:
+        return self.read_settings("pts_hand_classifier_threshold")["pts_hand_classifier_threshold"]
+
+    def writePtsDisabledTruthMotions(self, value: int) -> int:
+        return self.write_settings(pts_disabled_truth_motions=value)[0]
+
+    def readPtsDisabledTruthMotions(self) -> int:
+        return self.read_settings("pts_disabled_truth_motions")["pts_disabled_truth_motions"]
+
+    def writePtsDynamicSegmenterEnabled(self, value: int) -> int:
+        return self.write_settings(pts_dynamic_segmenter_enabled=value)[0]
+
+    def readPtsDynamicSegmenterEnabled(self) -> int:
+        return self.read_settings("pts_dynamic_segmenter_enabled")["pts_dynamic_segmenter_enabled"]
+
+    def writePtsEstimatorScalars(self, value: list[float]) -> int:
+        return self.write_settings(pts_estimator_scalars=value)[0]
+
+    def readPtsEstimatorScalars(self) -> list[float]:
+        return self.read_settings("pts_estimator_scalars")["pts_estimator_scalars"]
+
+    def writePtsAutoEstimatorScalarRate(self, value: int) -> int:
+        return self.write_settings(pts_auto_estimator_scalar_rate=value)[0]
+
+    def readPtsAutoEstimatorScalarRate(self) -> int:
+        return self.read_settings("pts_auto_estimator_scalar_rate")["pts_auto_estimator_scalar_rate"]
+
+    def writePtsRunningCorrection(self, value: int) -> int:
+        return self.write_settings(pts_running_correction=value)[0]
+
+    def readPtsRunningCorrection(self) -> int:
+        return self.read_settings("pts_running_correction")["pts_running_correction"]
+
+    def writePtsHandCorrection(self, value: int) -> int:
+        return self.write_settings(pts_hand_correction=value)[0]
+
+    def readPtsHandCorrection(self) -> int:
+        return self.read_settings("pts_hand_correction")["pts_hand_correction"]
+
+    def writePtsHeadingCorrectionMode(self, value: int) -> int:
+        return self.write_settings(pts_heading_correction_mode=value)[0]
+
+    def readPtsHeadingCorrectionMode(self) -> int:
+        return self.read_settings("pts_heading_correction_mode")["pts_heading_correction_mode"]
+
+    def writePtsHeadingMinDif(self, value: float) -> int:
+        return self.write_settings(pts_heading_min_dif=value)[0]
+
+    def readPtsHeadingMinDif(self) -> float:
+        return self.read_settings("pts_heading_min_dif")["pts_heading_min_dif"]
+
+    def writePtsHeadingResetConsistencies(self, value: int) -> int:
+        return self.write_settings(pts_heading_reset_consistencies=value)[0]
+
+    def readPtsHeadingResetConsistencies(self) -> int:
+        return self.read_settings("pts_heading_reset_consistencies")["pts_heading_reset_consistencies"]
+
+    def writePtsHeadingBacktrackEnabled(self, value: int) -> int:
+        return self.write_settings(pts_heading_backtrack_enabled=value)[0]
+
+    def readPtsHeadingBacktrackEnabled(self) -> int:
+        return self.read_settings("pts_heading_backtrack_enabled")["pts_heading_backtrack_enabled"]
+
+    def writePtsMotionCorrectionRadius(self, value: int) -> int:
+        return self.write_settings(pts_motion_correction_radius=value)[0]
+
+    def readPtsMotionCorrectionRadius(self) -> int:
+        return self.read_settings("pts_motion_correction_radius")["pts_motion_correction_radius"]
+
+    def writePtsMotionCorrectionConsistencyReq(self, value: int) -> int:
+        return self.write_settings(pts_motion_correction_consistency_req=value)[0]
+
+    def readPtsMotionCorrectionConsistencyReq(self) -> int:
+        return self.read_settings("pts_motion_correction_consistency_req")["pts_motion_correction_consistency_req"]
+
+    def writePtsOrientRefYThreshold(self, value: float) -> int:
+        return self.write_settings(pts_orient_ref_y_threshold=value)[0]
+
+    def readPtsOrientRefYThreshold(self) -> float:
+        return self.read_settings("pts_orient_ref_y_threshold")["pts_orient_ref_y_threshold"]
+
+    def readPtsVersion(self) -> str:
+        return self.read_settings("pts_version")["pts_version"]
+
+    def writePtsDate(self, day: int, month: int, year: int) -> int:
+        return self.write_settings(pts_date=[day, month, year])[0]
+
+    def readPtsDate(self) -> list[int, int, int]:
+        return self.read_settings("pts_date")["pts_date"]
+
+    def readPtsWmmVersion(self) -> str:
+        return self.read_settings("pts_wmm_version")["pts_wmm_version"]
+
+    def writePtsWmmSet(self, value: str) -> int:
+        return self.write_settings(pts_wmm_set=value)[0]
+
+    def writePtsForceOutGps(self, value: int) -> int:
+        return self.write_settings(pts_force_out_gps=value)[0]
+
+    def readPtsForceOutGps(self) -> int:
+        return self.read_settings("pts_force_out_gps")["pts_force_out_gps"]
+
+    def writePtsInitialHeadingTolerance(self, value: float) -> int:
+        return self.write_settings(pts_initial_heading_tolerance=value)[0]
+
+    def readPtsInitialHeadingTolerance(self) -> float:
+        return self.read_settings("pts_initial_heading_tolerance")["pts_initial_heading_tolerance"]
+
+    def writePtsHeadingConsistencyReq(self, value: int) -> int:
+        return self.write_settings(pts_heading_consistency_req=value)[0]
+
+    def readPtsHeadingConsistencyReq(self) -> int:
+        return self.read_settings("pts_heading_consistency_req")["pts_heading_consistency_req"]
+
+    def writePtsHeadingRootErrMul(self, value: float) -> int:
+        return self.write_settings(pts_heading_root_err_mul=value)[0]
+
+    def readPtsHeadingRootErrMul(self) -> float:
+        return self.read_settings("pts_heading_root_err_mul")["pts_heading_root_err_mul"]
+
+    def writePtsHeadingConsistentBias(self, value: float) -> int:
+        return self.write_settings(pts_heading_consistent_bias=value)[0]
+
+    def readPtsHeadingConsistentBias(self) -> float:
+        return self.read_settings("pts_heading_consistent_bias")["pts_heading_consistent_bias"]
+
+    def writePtsStrictBiasEnabled(self, value: int) -> int:
+        return self.write_settings(pts_strict_bias_enabled=value)[0]
+
+    def readPtsStrictBiasEnabled(self) -> int:
+        return self.read_settings("pts_strict_bias_enabled")["pts_strict_bias_enabled"]
+
+    def writePinMode0(self, value: int) -> int:
+        return self.write_settings(pin_mode0=value)[0]
+
+    def readPinMode0(self) -> int:
+        return self.read_settings("pin_mode0")["pin_mode0"]
+
+    def writePinMode1(self, value: int) -> int:
+        return self.write_settings(pin_mode1=value)[0]
+
+    def readPinMode1(self) -> int:
+        return self.read_settings("pin_mode1")["pin_mode1"]
+
+    def writeUartBaudrate(self, value: int) -> int:
+        return self.write_settings(uart_baudrate=value)[0]
+
+    def readUartBaudrate(self) -> int:
+        return self.read_settings("uart_baudrate")["uart_baudrate"]
+
+    def writeI2cAddr(self, value: int) -> int:
+        return self.write_settings(i2c_addr=value)[0]
+
+    def readI2cAddr(self) -> int:
+        return self.read_settings("i2c_addr")["i2c_addr"]
+
+    def writePowerHoldTime(self, value: float) -> int:
+        return self.write_settings(power_hold_time=value)[0]
+
+    def readPowerHoldTime(self) -> float:
+        return self.read_settings("power_hold_time")["power_hold_time"]
+
+    def writePowerHoldState(self, value: int) -> int:
+        return self.write_settings(power_hold_state=value)[0]
+
+    def readPowerHoldState(self) -> int:
+        return self.read_settings("power_hold_state")["power_hold_state"]
+
+    def writePowerInitialHoldState(self, value: int) -> int:
+        return self.write_settings(power_initial_hold_state=value)[0]
+
+    def readPowerInitialHoldState(self) -> int:
+        return self.read_settings("power_initial_hold_state")["power_initial_hold_state"]
+
+    def fsCfgLoad(self) -> int:
+        return self.write_settings(fs_cfg_load=None)[0]
+
+    def writeFsMscEnabled(self, value: int) -> int:
+        return self.write_settings(fs_msc_enabled=value)[0]
+
+    def readFsMscEnabled(self) -> int:
+        return self.read_settings("fs_msc_enabled")["fs_msc_enabled"]
+
+    def writeFsMscAuto(self, value: int) -> int:
+        return self.write_settings(fs_msc_auto=value)[0]
+
+    def readFsMscAuto(self) -> int:
+        return self.read_settings("fs_msc_auto")["fs_msc_auto"]
+
+    def writeLogSlots(self, value: str) -> int:
+        return self.write_settings(log_slots=value)[0]
+
+    def readLogSlots(self) -> str:
+        return self.read_settings("log_slots")["log_slots"]
+
+    def writeLogInterval(self, value: int) -> int:
+        return self.write_settings(log_interval=value)[0]
+
+    def readLogInterval(self) -> int:
+        return self.read_settings("log_interval")["log_interval"]
+
+    def writeLogHz(self, value: float) -> int:
+        return self.write_settings(log_hz=value)[0]
+
+    def readLogHz(self) -> float:
+        return self.read_settings("log_hz")["log_hz"]
+
+    def writeLogStartEvent(self, value: str) -> int:
+        return self.write_settings(log_start_event=value)[0]
+
+    def readLogStartEvent(self) -> str:
+        return self.read_settings("log_start_event")["log_start_event"]
+
+    def writeLogStartMotionThreshold(self, value: float) -> int:
+        return self.write_settings(log_start_motion_threshold=value)[0]
+
+    def readLogStartMotionThreshold(self) -> float:
+        return self.read_settings("log_start_motion_threshold")["log_start_motion_threshold"]
+
+    def writeLogStopEvent(self, value: str) -> int:
+        return self.write_settings(log_stop_event=value)[0]
+
+    def readLogStopEvent(self) -> str:
+        return self.read_settings("log_stop_event")["log_stop_event"]
+
+    def writeLogStopMotionThreshold(self, value: float) -> int:
+        return self.write_settings(log_stop_motion_threshold=value)[0]
+
+    def readLogStopMotionThreshold(self) -> float:
+        return self.read_settings("log_stop_motion_threshold")["log_stop_motion_threshold"]
+
+    def writeLogStopMotionDelay(self, value: float) -> int:
+        return self.write_settings(log_stop_motion_delay=value)[0]
+
+    def readLogStopMotionDelay(self) -> float:
+        return self.read_settings("log_stop_motion_delay")["log_stop_motion_delay"]
+
+    def writeLogStopCount(self, value: int) -> int:
+        return self.write_settings(log_stop_count=value)[0]
+
+    def readLogStopCount(self) -> int:
+        return self.read_settings("log_stop_count")["log_stop_count"]
+
+    def writeLogStopDuration(self, value: float) -> int:
+        return self.write_settings(log_stop_duration=value)[0]
+
+    def readLogStopDuration(self) -> float:
+        return self.read_settings("log_stop_duration")["log_stop_duration"]
+
+    def writeLogStopPeriodCount(self, value: int) -> int:
+        return self.write_settings(log_stop_period_count=value)[0]
+
+    def readLogStopPeriodCount(self) -> int:
+        return self.read_settings("log_stop_period_count")["log_stop_period_count"]
+
+    def writeLogStyle(self, value: int) -> int:
+        return self.write_settings(log_style=value)[0]
+
+    def readLogStyle(self) -> int:
+        return self.read_settings("log_style")["log_style"]
+
+    def writeLogPeriodicCaptureTime(self, value: float) -> int:
+        return self.write_settings(log_periodic_capture_time=value)[0]
+
+    def readLogPeriodicCaptureTime(self) -> float:
+        return self.read_settings("log_periodic_capture_time")["log_periodic_capture_time"]
+
+    def writeLogPeriodicRestTime(self, value: float) -> int:
+        return self.write_settings(log_periodic_rest_time=value)[0]
+
+    def readLogPeriodicRestTime(self) -> float:
+        return self.read_settings("log_periodic_rest_time")["log_periodic_rest_time"]
+
+    def writeLogBaseFilename(self, value: str) -> int:
+        return self.write_settings(log_base_filename=value)[0]
+
+    def readLogBaseFilename(self) -> str:
+        return self.read_settings("log_base_filename")["log_base_filename"]
+
+    def writeLogFileMode(self, value: int) -> int:
+        return self.write_settings(log_file_mode=value)[0]
+
+    def readLogFileMode(self) -> int:
+        return self.read_settings("log_file_mode")["log_file_mode"]
+
+    def writeLogDataMode(self, value: int) -> int:
+        return self.write_settings(log_data_mode=value)[0]
+
+    def readLogDataMode(self) -> int:
+        return self.read_settings("log_data_mode")["log_data_mode"]
+
+    def writeLogOutputSettings(self, value: int) -> int:
+        return self.write_settings(log_output_settings=value)[0]
+
+    def readLogOutputSettings(self) -> int:
+        return self.read_settings("log_output_settings")["log_output_settings"]
+
+    def writeLogHeaderEnabled(self, value: int) -> int:
+        return self.write_settings(log_header_enabled=value)[0]
+
+    def readLogHeaderEnabled(self) -> int:
+        return self.read_settings("log_header_enabled")["log_header_enabled"]
+
+    def writeLogFolderMode(self, value: int) -> int:
+        return self.write_settings(log_folder_mode=value)[0]
+
+    def readLogFolderMode(self) -> int:
+        return self.read_settings("log_folder_mode")["log_folder_mode"]
+
+    def writeLogImmediateOutput(self, value: int) -> int:
+        return self.write_settings(log_immediate_output=value)[0]
+
+    def readLogImmediateOutput(self) -> int:
+        return self.read_settings("log_immediate_output")["log_immediate_output"]
+
+    def writeLogImmediateOutputHeaderEnabled(self, value: int) -> int:
+        return self.write_settings(log_immediate_output_header_enabled=value)[0]
+
+    def readLogImmediateOutputHeaderEnabled(self) -> int:
+        return self.read_settings("log_immediate_output_header_enabled")["log_immediate_output_header_enabled"]
+
+    def writeLogImmediateOutputHeaderMode(self, value: int) -> int:
+        return self.write_settings(log_immediate_output_header_mode=value)[0]
+
+    def readLogImmediateOutputHeaderMode(self) -> int:
+        return self.read_settings("log_immediate_output_header_mode")["log_immediate_output_header_mode"]
+
+    def writeRtcYear(self, value: int) -> int:
+        return self.write_settings(rtc_year=value)[0]
+
+    def readRtcYear(self) -> int:
+        return self.read_settings("rtc_year")["rtc_year"]
+
+    def writeRtcMonth(self, value: int) -> int:
+        return self.write_settings(rtc_month=value)[0]
+
+    def readRtcMonth(self) -> int:
+        return self.read_settings("rtc_month")["rtc_month"]
+
+    def writeRtcDay(self, value: int) -> int:
+        return self.write_settings(rtc_day=value)[0]
+
+    def readRtcDay(self) -> int:
+        return self.read_settings("rtc_day")["rtc_day"]
+
+    def writeRtcHour(self, value: int) -> int:
+        return self.write_settings(rtc_hour=value)[0]
+
+    def readRtcHour(self) -> int:
+        return self.read_settings("rtc_hour")["rtc_hour"]
+
+    def writeRtcMinute(self, value: int) -> int:
+        return self.write_settings(rtc_minute=value)[0]
+
+    def readRtcMinute(self) -> int:
+        return self.read_settings("rtc_minute")["rtc_minute"]
+
+    def writeRtcSecond(self, value: int) -> int:
+        return self.write_settings(rtc_second=value)[0]
+
+    def readRtcSecond(self) -> int:
+        return self.read_settings("rtc_second")["rtc_second"]
+
+    def writeRtcDatetime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> int:
+        return self.write_settings(rtc_datetime=[year, month, day, hour, minute, second])[0]
+
+    def readRtcDatetime(self) -> list[int, int, int, int, int, int]:
+        return self.read_settings("rtc_datetime")["rtc_datetime"]
+
+    def writeBatChgRate(self, value: int) -> int:
+        return self.write_settings(bat_chg_rate=value)[0]
+
+    def readBatChgRate(self) -> int:
+        return self.read_settings("bat_chg_rate")["bat_chg_rate"]
+
+    def writeBatColdThreshold(self, temperature_c: float, chg_rate: float) -> int:
+        return self.write_settings(bat_cold_threshold=[temperature_c, chg_rate])[0]
+
+    def readBatColdThreshold(self) -> list[float, float]:
+        return self.read_settings("bat_cold_threshold")["bat_cold_threshold"]
+
+    def writeBatWarmThreshold(self, temperature_c: float, chg_rate: float) -> int:
+        return self.write_settings(bat_warm_threshold=[temperature_c, chg_rate])[0]
+
+    def readBatWarmThreshold(self) -> list[float, float]:
+        return self.read_settings("bat_warm_threshold")["bat_warm_threshold"]
+
+    def writeBatHotThreshold(self, temperature_c: float, chg_rate: float) -> int:
+        return self.write_settings(bat_hot_threshold=[temperature_c, chg_rate])[0]
+
+    def readBatHotThreshold(self) -> list[float, float]:
+        return self.read_settings("bat_hot_threshold")["bat_hot_threshold"]
+
+    def writeBatOffsetThreshold(self, value: float) -> int:
+        return self.write_settings(bat_offset_threshold=value)[0]
+
+    def readBatOffsetThreshold(self) -> float:
+        return self.read_settings("bat_offset_threshold")["bat_offset_threshold"]
+
+    def readBatMah(self) -> int:
+        return self.read_settings("bat_mah")["bat_mah"]
+
+    def writeBleName(self, value: str) -> int:
+        return self.write_settings(ble_name=value)[0]
+
+    def readBleName(self) -> str:
+        return self.read_settings("ble_name")["ble_name"]
+
+    def readBleConnected(self) -> int:
+        return self.read_settings("ble_connected")["ble_connected"]
+
+    def bleDisconnect(self) -> int:
+        return self.write_settings(ble_disconnect=None)[0]
+
+    def writeGpsStandby(self, value: int) -> int:
+        return self.write_settings(gps_standby=value)[0]
+
+    def readGpsStandby(self) -> int:
+        return self.read_settings("gps_standby")["gps_standby"]
+
+    def writeGpsLed(self, value: int) -> int:
+        return self.write_settings(gps_led=value)[0]
+
+    def readGpsLed(self) -> int:
+        return self.read_settings("gps_led")["gps_led"]
+

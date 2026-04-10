@@ -1,4 +1,4 @@
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.communication.ble import ThreespaceBLEComClass
 
 auto_detect = False
@@ -14,7 +14,7 @@ else:
     com_class = ThreespaceBLEComClass(ble_name)
     sensor = ThreespaceSensor(com_class)
 
-ble_name = sensor.get_settings("ble_name")
+ble_name = sensor.readBleName()
 print("Connected to:", ble_name)
 
 result = sensor.getPrimaryCorrectedAccelVec()

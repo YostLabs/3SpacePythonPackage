@@ -1,4 +1,4 @@
-from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
+from yostlabs.tss3 import ThreespaceSensor, StreamableCommands
 from yostlabs.communication.serial import ThreespaceSerialComClass
 from yostlabs.tss3.utils.parser import ThreespaceBinaryParser
 import time
@@ -7,8 +7,8 @@ import time
 sensor = ThreespaceSensor(ThreespaceSerialComClass)
 
 #First, gather some data and store it in a file for this example
-sensor.set_settings(stream_slots=f"{StreamableCommands.GetTimestamp.value},{StreamableCommands.GetAllPrimaryCorrectedData.value}")
-sensor.set_settings(stream_hz=500)
+sensor.writeStreamSlots(f"{StreamableCommands.GetTimestamp.value},{StreamableCommands.GetAllPrimaryCorrectedData.value}")
+sensor.writeStreamHz(500)
 
 print("Gathering data for 5 seconds...")
 sensor.startStreaming()

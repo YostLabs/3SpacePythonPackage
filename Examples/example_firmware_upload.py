@@ -1,4 +1,4 @@
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.communication.serial import ThreespaceSerialComClass
 from yostlabs.tss3.utils.version import ThreespaceFirmwareUploader
 

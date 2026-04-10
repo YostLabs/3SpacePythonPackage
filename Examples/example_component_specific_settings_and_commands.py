@@ -1,5 +1,5 @@
 
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.communication.serial import ThreespaceSerialComClass
 
 """
@@ -13,7 +13,7 @@ sensor = ThreespaceSensor(ThreespaceSerialComClass)
 #To discover a list of valid components, send the following.
 #The number after the component type is the ID of that component. The name also has the max range of each component.
 print("Valid Components:")
-print(sensor.get_settings("valid_components"))
+print(sensor.readValidComponents())
 print()
 
 #The API caches these, so it is not necessary to actually send the above, their IDS can be accessed like so
@@ -25,14 +25,14 @@ print("Valid Baros:", sensor.valid_baros)
 #Then to read a value of a component you use the base setting key and append on the ID number'
 def print_component_settings(base_key: str, ids: list[int]):
     for id in ids:
-        key = f"{base_key}{sensor.valid_accels[0]}"
-        print(f"{key}={sensor.get_settings(key)}")
+        key = f"{base_key}{id}"
+        print(f"{key}={sensor.read_settings(key)[key]}")
 
 print_component_settings("range_accel", sensor.valid_accels)
 
 #An easier way to do the above if just trying to read all ranges of all accels is to use query strings
-print(sensor.get_settings("{range_}"))
-print(sensor.get_settings("{valid_range}"))
+print(sensor.read_settings("{range_}"))
+print(sensor.read_settings("{valid_range}"))
 
 #Some commands also let you access individual components, those take the ID as well
 if len(sensor.valid_accels) > 0:
