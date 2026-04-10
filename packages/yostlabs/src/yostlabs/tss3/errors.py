@@ -18,7 +18,20 @@ ThreespaceError
 
 
 class ThreespaceError(Exception):
-    """Base class for all Threespace API errors."""
+    """
+    Base class for all Threespace API errors.
+
+    Attributes
+    ----------
+    result : any
+        An optional partial or fallback result that was available at the time
+        the error was raised. For example, a ``read_settings`` parse error may
+        still carry the keys that were successfully decoded before the failure.
+        Defaults to ``None`` when not set by the raising code.
+    """
+    def __init__(self, *args, result=None):
+        super().__init__(*args)
+        self.result = result
 
 
 class DiscoveryError(ThreespaceError):

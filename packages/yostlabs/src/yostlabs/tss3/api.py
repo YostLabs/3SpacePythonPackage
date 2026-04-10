@@ -399,16 +399,16 @@ class ThreespaceSensor:
         while not end_reached:
             key = self.com.read_until(b'\0')
             if key[-1] != 0:
-                raise ResponseError("Failed to read setting key")
+                raise ResponseError("Failed to read setting key", result=settings)
             key = key[:-1].decode()
             setting = threespace_setting_get(key)
 
             if setting is None:
                 if key == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
-                    raise InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}")
-                raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}")
+                    raise InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}", result=settings)
+                raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}", result=settings)
             if setting.out_format is None:
-                raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}")
+                raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}", result=settings)
             
             checksum += sum(ord(v) for v in key)
 
@@ -423,12 +423,12 @@ class ThreespaceSensor:
             if buffer[0] == 0:
                 end_reached = True
             elif buffer[0] != ord(';'):
-                raise ResponseError(f"Failed to read setting, expected ';' or null terminator but got: {buffer}")
+                raise ResponseError(f"Failed to read setting, expected ';' or null terminator but got: {buffer}", result=settings)
         
         #Reading key values has finished, not check the checksum
         reported_checksum = self.com.read(1)
         if reported_checksum[0] != checksum % 256:
-            raise ChecksumMismatchError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}")
+            raise ChecksumMismatchError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}", result=settings)
 
         return settings
             
@@ -1537,7 +1537,7 @@ class ThreespaceSensor:
     def writeLedRgb(self, value: list[float]) -> int:
         return self.write_settings(led_rgb=value)[0]
 
-    def readLedRgb(self) -> tuple[float]:
+    def readLedRgb(self) -> list[float]:
         return self.read_settings("led_rgb")["led_rgb"]
 
     def readVersionFirmware(self) -> str:
@@ -1726,19 +1726,19 @@ class ThreespaceSensor:
     def writeOffset(self, value: list[float]) -> int:
         return self.write_settings(offset=value)[0]
 
-    def readOffset(self) -> tuple[float]:
+    def readOffset(self) -> list[float]:
         return self.read_settings("offset")["offset"]
 
     def writeBaseOffset(self, value: list[float]) -> int:
         return self.write_settings(base_offset=value)[0]
 
-    def readBaseOffset(self) -> tuple[float]:
+    def readBaseOffset(self) -> list[float]:
         return self.read_settings("base_offset")["base_offset"]
 
     def writeTareQuat(self, value: list[float]) -> int:
         return self.write_settings(tare_quat=value)[0]
 
-    def readTareQuat(self) -> tuple[float]:
+    def readTareQuat(self) -> list[float]:
         return self.read_settings("tare_quat")["tare_quat"]
 
     def writeTareAutoBase(self, value: int) -> int:
@@ -1750,13 +1750,13 @@ class ThreespaceSensor:
     def writeBaseTare(self, value: list[float]) -> int:
         return self.write_settings(base_tare=value)[0]
 
-    def readBaseTare(self) -> tuple[float]:
+    def readBaseTare(self) -> list[float]:
         return self.read_settings("base_tare")["base_tare"]
 
     def writeTareMat(self, value: list[float]) -> int:
         return self.write_settings(tare_mat=value)[0]
 
-    def readTareMat(self) -> tuple[float]:
+    def readTareMat(self) -> list[float]:
         return self.read_settings("tare_mat")["tare_mat"]
 
     def writeRunningAvgOrient(self, value: float) -> int:
@@ -1780,7 +1780,7 @@ class ThreespaceSensor:
     def writeFilterMref(self, value: list[float]) -> int:
         return self.write_settings(filter_mref=value)[0]
 
-    def readFilterMref(self) -> tuple[float]:
+    def readFilterMref(self) -> list[float]:
         return self.read_settings("filter_mref")["filter_mref"]
 
     def writeFilterMrefGps(self, value: list[float]) -> int:
@@ -1795,7 +1795,7 @@ class ThreespaceSensor:
     def writeFilterConfThresholds(self, min: float, max: float, cap: float) -> int:
         return self.write_settings(filter_conf_thresholds=[min, max, cap])[0]
 
-    def readFilterConfThresholds(self) -> tuple[float, float, float]:
+    def readFilterConfThresholds(self) -> list[float, float, float]:
         return self.read_settings("filter_conf_thresholds")["filter_conf_thresholds"]
 
     def readValidAccels(self) -> str:
@@ -1880,7 +1880,7 @@ class ThreespaceSensor:
         param = { "calib_mat_accel%d" % id : value }
         return self.write_settings(**param)[0]
 
-    def readCalibMatAccel(self, id: int) -> tuple[float]:
+    def readCalibMatAccel(self, id: int) -> list[float]:
         name = "calib_mat_accel%d" % id
         return self.read_settings(name)[name]
 
@@ -1888,7 +1888,7 @@ class ThreespaceSensor:
         param = { "calib_bias_accel%d" % id : value }
         return self.write_settings(**param)[0]
 
-    def readCalibBiasAccel(self, id: int) -> tuple[float]:
+    def readCalibBiasAccel(self, id: int) -> list[float]:
         name = "calib_bias_accel%d" % id
         return self.read_settings(name)[name]
 
@@ -1932,7 +1932,7 @@ class ThreespaceSensor:
         name = "update_rate_accel%d" % id
         return self.read_settings(name)[name]
 
-    def readNoiseProfileAccel(self, id: int) -> tuple[float, float, float, float, int]:
+    def readNoiseProfileAccel(self, id: int) -> list[float, float, float, float, int]:
         name = "noise_profile_accel%d" % id
         return self.read_settings(name)[name]
 
@@ -1940,7 +1940,7 @@ class ThreespaceSensor:
         param = { "calib_mat_gyro%d" % id : value }
         return self.write_settings(**param)[0]
 
-    def readCalibMatGyro(self, id: int) -> tuple[float]:
+    def readCalibMatGyro(self, id: int) -> list[float]:
         name = "calib_mat_gyro%d" % id
         return self.read_settings(name)[name]
 
@@ -1948,7 +1948,7 @@ class ThreespaceSensor:
         param = { "calib_bias_gyro%d" % id : value }
         return self.write_settings(**param)[0]
 
-    def readCalibBiasGyro(self, id: int) -> tuple[float]:
+    def readCalibBiasGyro(self, id: int) -> list[float]:
         name = "calib_bias_gyro%d" % id
         return self.read_settings(name)[name]
 
@@ -1992,7 +1992,7 @@ class ThreespaceSensor:
         name = "update_rate_gyro%d" % id
         return self.read_settings(name)[name]
 
-    def readNoiseProfileGyro(self, id: int) -> tuple[float, float, float, float, int]:
+    def readNoiseProfileGyro(self, id: int) -> list[float, float, float, float, int]:
         name = "noise_profile_gyro%d" % id
         return self.read_settings(name)[name]
 
@@ -2000,7 +2000,7 @@ class ThreespaceSensor:
         param = { "calib_mat_mag%d" % id : value }
         return self.write_settings(**param)[0]
 
-    def readCalibMatMag(self, id: int) -> tuple[float]:
+    def readCalibMatMag(self, id: int) -> list[float]:
         name = "calib_mat_mag%d" % id
         return self.read_settings(name)[name]
 
@@ -2008,7 +2008,7 @@ class ThreespaceSensor:
         param = { "calib_bias_mag%d" % id : value }
         return self.write_settings(**param)[0]
 
-    def readCalibBiasMag(self, id: int) -> tuple[float]:
+    def readCalibBiasMag(self, id: int) -> list[float]:
         name = "calib_bias_mag%d" % id
         return self.read_settings(name)[name]
 
@@ -2052,7 +2052,7 @@ class ThreespaceSensor:
         name = "update_rate_mag%d" % id
         return self.read_settings(name)[name]
 
-    def readNoiseProfileMag(self, id: int) -> tuple[float, float, float, float, int]:
+    def readNoiseProfileMag(self, id: int) -> list[float, float, float, float, int]:
         name = "noise_profile_mag%d" % id
         return self.read_settings(name)[name]
 
@@ -2083,7 +2083,7 @@ class ThreespaceSensor:
     def writePtsOffsetQuat(self, value: list[float]) -> int:
         return self.write_settings(pts_offset_quat=value)[0]
 
-    def readPtsOffsetQuat(self) -> tuple[float]:
+    def readPtsOffsetQuat(self) -> list[float]:
         return self.read_settings("pts_offset_quat")["pts_offset_quat"]
 
     def restorePtsDefaultSettings(self) -> int:
@@ -2200,7 +2200,7 @@ class ThreespaceSensor:
     def writePtsEstimatorScalars(self, value: list[float]) -> int:
         return self.write_settings(pts_estimator_scalars=value)[0]
 
-    def readPtsEstimatorScalars(self) -> tuple[float]:
+    def readPtsEstimatorScalars(self) -> list[float]:
         return self.read_settings("pts_estimator_scalars")["pts_estimator_scalars"]
 
     def writePtsAutoEstimatorScalarRate(self, value: int) -> int:
@@ -2269,7 +2269,7 @@ class ThreespaceSensor:
     def writePtsDate(self, day: int, month: int, year: int) -> int:
         return self.write_settings(pts_date=[day, month, year])[0]
 
-    def readPtsDate(self) -> tuple[int, int, int]:
+    def readPtsDate(self) -> list[int, int, int]:
         return self.read_settings("pts_date")["pts_date"]
 
     def readPtsWmmVersion(self) -> str:
@@ -2548,7 +2548,7 @@ class ThreespaceSensor:
     def writeRtcDatetime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> int:
         return self.write_settings(rtc_datetime=[year, month, day, hour, minute, second])[0]
 
-    def readRtcDatetime(self) -> tuple[int, int, int, int, int, int]:
+    def readRtcDatetime(self) -> list[int, int, int, int, int, int]:
         return self.read_settings("rtc_datetime")["rtc_datetime"]
 
     def writeBatChgRate(self, value: int) -> int:
@@ -2560,19 +2560,19 @@ class ThreespaceSensor:
     def writeBatColdThreshold(self, temperature_c: float, chg_rate: float) -> int:
         return self.write_settings(bat_cold_threshold=[temperature_c, chg_rate])[0]
 
-    def readBatColdThreshold(self) -> tuple[float, float]:
+    def readBatColdThreshold(self) -> list[float, float]:
         return self.read_settings("bat_cold_threshold")["bat_cold_threshold"]
 
     def writeBatWarmThreshold(self, temperature_c: float, chg_rate: float) -> int:
         return self.write_settings(bat_warm_threshold=[temperature_c, chg_rate])[0]
 
-    def readBatWarmThreshold(self) -> tuple[float, float]:
+    def readBatWarmThreshold(self) -> list[float, float]:
         return self.read_settings("bat_warm_threshold")["bat_warm_threshold"]
 
     def writeBatHotThreshold(self, temperature_c: float, chg_rate: float) -> int:
         return self.write_settings(bat_hot_threshold=[temperature_c, chg_rate])[0]
 
-    def readBatHotThreshold(self) -> tuple[float, float]:
+    def readBatHotThreshold(self) -> list[float, float]:
         return self.read_settings("bat_hot_threshold")["bat_hot_threshold"]
 
     def writeBatOffsetThreshold(self, value: float) -> int:
