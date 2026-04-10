@@ -1,5 +1,6 @@
 # Main sensor class
 from yostlabs.tss3.api import ThreespaceSensor
+import yostlabs.tss3.consts as tss_consts
 
 # Return types
 from yostlabs.tss3.types import (
