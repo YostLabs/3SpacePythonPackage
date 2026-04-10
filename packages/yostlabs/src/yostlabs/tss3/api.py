@@ -6,6 +6,19 @@ from yostlabs.tss3.commands import *
 from yostlabs.tss3.settings import *
 from yostlabs.tss3.types import ThreespaceCmdResult, ThreespaceBootloaderInfo, \
     ThreespaceHardwareVersion, ThreespaceHeader, ThreespaceHeaderInfo
+from yostlabs.tss3.errors import (
+    ThreespaceError,
+    DiscoveryError,
+    SensorConnectionError,
+    ResponseError,
+    ResponseTimeoutError,
+    ChecksumMismatchError,
+    SettingError,
+    UnregisteredKeyError,
+    InvalidKeyError,
+    SettingAccessError,
+    UnsupportedCommandError,
+)
 
 from enum import Enum
 from collections.abc import Callable
@@ -46,7 +59,7 @@ class ThreespaceSensor:
                 new_com = serial_com
                 break #Exit after getting 1
             if new_com is None:
-                raise RuntimeError("Failed to auto discover com port")   
+                raise DiscoveryError("Failed to auto discover com port")   
             self.com = new_com
             manually_opened_com = True
             self.com.open()
@@ -145,17 +158,17 @@ class ThreespaceSensor:
         self.dirty_cache = False #No longer dirty cause initializing
         
         #Only reinitialize settings if detected firmware version changed (Or on startup)
-        version = self.read_settings("version_firmware")["version_firmware"]
+        version = self.readVersionFirmware()
         if version != self.firmware_version:
             self.firmware_version = version
             self.__initialize_commands()
     
         self.__reinit_firmware()
         
-        self.valid_mags = self.__get_valid_components("valid_mags")
-        self.valid_accels = self.__get_valid_components("valid_accels")
-        self.valid_gyros = self.__get_valid_components("valid_gyros")
-        self.valid_baros = self.__get_valid_components("valid_baros")
+        self.valid_mags = self.__str_list_to_int_list(self.readValidMags())
+        self.valid_accels = self.__str_list_to_int_list(self.readValidAccels())
+        self.valid_gyros = self.__str_list_to_int_list(self.readValidGyros())
+        self.valid_baros = self.__str_list_to_int_list(self.readValidBaros())
 
     def __reinit_firmware(self):
         """
@@ -174,9 +187,9 @@ class ThreespaceSensor:
         self.streaming_packet_size = 0
         self._force_stop_streaming()
 
-        self.__cache_serial_number(self.read_settings("serial_number")["serial_number"])
+        self.__cache_serial_number(self.readSerialNumber())
         self.__empty_debug_cache()
-        self.immediate_debug = self.read_settings("debug_mode")["debug_mode"] == 1 #Needed for some startup processes when restarting
+        self.immediate_debug = self.readDebugMode() #Needed for some startup processes when restarting
 
         #Now reinitialize the cached settings
         self.__cache_header_settings()
@@ -187,7 +200,7 @@ class ThreespaceSensor:
         self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
         self.funcs = {}
 
-        valid_commands = self.read_settings("valid_commands")["valid_commands"]
+        valid_commands = self.readValidCommands()
         if valid_commands == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
             #Treat all commands as valid because firmware is too old to have this setting
             valid_commands = list(range(256))
@@ -211,10 +224,8 @@ class ThreespaceSensor:
 
 #------------------------------INITIALIZATION HELPERS--------------------------------------------
 
-    def __get_valid_components(self, key: str):
-        valid = self.read_settings(key)[key]
-        if len(valid) == 0: return []
-        return [int(v) for v in valid.split(',')]
+    def __str_list_to_int_list(self, str_list: str):
+        return [int(v) for v in str_list.split(',') if v != '']
 
     def __add_command(self, command: ThreespaceCommand):
         if self.commands[command.info.num] != None:
@@ -265,7 +276,7 @@ class ThreespaceSensor:
         """
         Should be called any time changes are made to the header. Will normally be called via the check_dirty/reinit
         """
-        header = self.read_settings("header")["header"]
+        header = self.readHeader()
         #API requires these bits to be enabled, so don't let them be disabled
         required_header = header | THREESPACE_REQUIRED_HEADER
         if header == self.header_info.bitfield and header == required_header: return #Nothing to update
@@ -276,12 +287,12 @@ class ThreespaceSensor:
         #positions, causing a situation where parsing a command and streaming at the same time breaks since it thinks both are valid cmd echoes.
         if self.is_streaming:
             self.log("Preventing header change due to currently streaming")
-            self.write_settings(header=self.header_info.bitfield)
+            self.writeHeader(self.header_info.bitfield)
             return
         
         if required_header != header:
             self.log(f"Forcing header checksum, echo, and length enabled")
-            self.write_settings(header=required_header)
+            self.writeHeader(required_header)
             return
         
         #Current/New header is valid, so can cache it
@@ -301,7 +312,7 @@ class ThreespaceSensor:
             self.log(f"Unknown Sensor Family detected, {self.hardware_version.family_id}")
 
     def __cache_debug_mode(self):
-        self.immediate_debug = self.read_settings("debug_mode")["debug_mode"] == 1  
+        self.immediate_debug = self.readDebugMode()
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
     def set_cached_settings_dirty(self):
@@ -316,7 +327,7 @@ class ThreespaceSensor:
         if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
             success = self.__attempt_rediscover_self()
             if not success:
-                raise RuntimeError("Sensor connection lost")
+                raise SensorConnectionError("Sensor connection lost")
         
         self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
         was_in_bootloader = self.__cached_in_bootloader
@@ -373,7 +384,7 @@ class ThreespaceSensor:
         min_response_len += (1 + THREESPACE_BINARY_SETTINGS_ID_SIZE) #Null terminator and header size
 
         if self.__await_read_settings_response(min_response_len) != THREESPACE_AWAIT_COMMAND_FOUND:
-            raise RuntimeError("Failed to get read_settings response")
+            raise ResponseTimeoutError("Failed to get read_settings response")
         
         #Read the setting header id
         self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the Header ID
@@ -388,16 +399,16 @@ class ThreespaceSensor:
         while not end_reached:
             key = self.com.read_until(b'\0')
             if key[-1] != 0:
-                raise RuntimeError("Failed to read setting key")
+                raise ResponseError("Failed to read setting key")
             key = key[:-1].decode()
             setting = threespace_setting_get(key)
 
             if setting is None:
                 if key == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
-                    raise RuntimeError(f"Failed to read setting, got error response from firmware for keystring: {keystring}")
-                raise RuntimeError(f"Failed to read setting, unregistered key: {key}")
+                    raise InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}")
+                raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}")
             if setting.out_format is None:
-                raise RuntimeError(f"Failed to read setting, setting does not have an out format: {key}")
+                raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}")
             
             checksum += sum(ord(v) for v in key)
 
@@ -412,12 +423,12 @@ class ThreespaceSensor:
             if buffer[0] == 0:
                 end_reached = True
             elif buffer[0] != ord(';'):
-                raise RuntimeError("Failed to read setting, expected ';' or null terminator but got:", buffer)
+                raise ResponseError(f"Failed to read setting, expected ';' or null terminator but got: {buffer}")
         
         #Reading key values has finished, not check the checksum
         reported_checksum = self.com.read(1)
         if reported_checksum[0] != checksum % 256:
-            raise RuntimeError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}")
+            raise ChecksumMismatchError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}")
 
         return settings
             
@@ -458,7 +469,7 @@ class ThreespaceSensor:
             setting = threespace_setting_get(key)
             if setting is None and key != THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
                 if key.isprintable():
-                    raise RuntimeError(f"Failed to read setting, unregistered key: {key}")
+                    raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}")
                 self.__internal_update(self.__try_peek_header())
                 continue
             
@@ -483,9 +494,9 @@ class ThreespaceSensor:
         for key, value in kwargs.items():
             setting = threespace_setting_get(key)
             if setting is None:
-                raise RuntimeError(f"Failed to write setting, unregistered key: {key}")
+                raise UnregisteredKeyError(f"Failed to write setting, unregistered key: {key}")
             if setting.in_format is None:
-                raise RuntimeError(f"Failed to write setting, key is not writable: {key}")
+                raise SettingAccessError(f"Failed to write setting, key is not writable: {key}")
             
             #Add the key
             key_bytes = key.encode() + b'\0'
@@ -514,7 +525,7 @@ class ThreespaceSensor:
 
         #Await Response
         if self.__await_write_settings_response(len(kwargs)) != THREESPACE_AWAIT_COMMAND_FOUND:
-            raise RuntimeError("Failed to get write_settings response")
+            raise ResponseTimeoutError("Failed to get write_settings response")
 
         #Read in Response
         self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the header ID
@@ -670,7 +681,7 @@ class ThreespaceSensor:
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT:
             self.log("Requested:", cmd)
             self.log("Potential response:", self.com.peekline())
-            raise RuntimeError("Failed to receive get_settings response")      
+            raise ResponseTimeoutError("Failed to receive get_settings response")      
 
         response = self.com.readline()
         response = response.decode().strip().split(';')
@@ -963,12 +974,12 @@ class ThreespaceSensor:
             retries += 1
         
         if retries == MAX_RETRIES:
-            raise RuntimeError(f"Failed to get response to command {cmd.info.name}")
+            raise ResponseTimeoutError(f"Failed to get response to command {cmd.info.name}")
 
         return self.read_and_parse_command(cmd)
     
     def __invalid_command(self, *args):
-        raise NotImplementedError("This method is not available.")
+        raise UnsupportedCommandError("This command is not available on the connected sensor.")
 
     def read_and_parse_command(self, cmd: ThreespaceCommand):
         if self.header_enabled:
@@ -986,7 +997,7 @@ class ThreespaceSensor:
 
     def __cache_streaming_settings(self):
         cached_slots: list[ThreespaceCommand] = []
-        slots: str = self.read_settings("stream_slots")["stream_slots"]
+        slots: str = self.readStreamSlots()
         slots = slots.split(',')
         for slot in slots:
             slot = int(slot.split(':')[0]) #Ignore parameters if any
@@ -1168,7 +1179,7 @@ class ThreespaceSensor:
         self.__cache_streaming_settings()
 
         #Must check whether streaming is being done alongside logging or not. Also configure required settings if it is
-        streaming = bool(self.read_settings("log_immediate_output")["log_immediate_output"])
+        streaming = self.readLogImmediateOutput()
         if streaming:
             self.write_settings(log_immediate_output_header_enabled=1,
                                 log_immediate_output_header_mode=THREESPACE_OUTPUT_MODE_BINARY) #Must have header enabled in the log messages for this to work and must use binary for the header
@@ -1215,10 +1226,10 @@ class ThreespaceSensor:
             self.com.close()
             success = self.__attempt_rediscover_self()
             if not success:
-                raise RuntimeError("Failed to reconnect to sensor in bootloader")
+                raise SensorConnectionError("Failed to reconnect to sensor in bootloader")
         in_bootloader = self.__check_bootloader_status()
         if not in_bootloader:
-            raise RuntimeError("Failed to enter bootloader")
+            raise SensorConnectionError("Failed to enter bootloader")
         self.__cached_in_bootloader = True
         self.com.read_all() #Just in case any garbage floating around
 
@@ -1251,7 +1262,7 @@ class ThreespaceSensor:
         if response == THREESPACE_AWAIT_COMMAND_TIMEOUT: 
             self.log("Requested Bootloader, Got:")
             self.log(self.com.peek(self.com.length))
-            raise RuntimeError("Failed to discover bootloader or firmware.")
+            raise DiscoveryError("Failed to discover bootloader or firmware.")
         if response == THREESPACE_AWAIT_BOOTLOADER:
             bootloader = True
             time.sleep(0.1) #Give time for all the OK responses to come in
@@ -1260,14 +1271,14 @@ class ThreespaceSensor:
             bootloader = False
             self.com.readline() #Clear the setting, no need to parse
         else:
-            raise Exception("Failed to detect if in bootloader or firmware")
+            raise DiscoveryError("Failed to detect if in bootloader or firmware")
         return bootloader
     
     def bootloader_get_sn(self):
         self.com.write("Q".encode())
         result = self.com.read(9) #9 Because it includes a line feed for reasons
         if len(result) != 9:
-            raise Exception()
+            raise ResponseError(f"Failed to read serial number from bootloader: expected 9 bytes, got {len(result)}")
         #Note bootloader uses big endian instead of little for reasons
         return struct.unpack(f">{yost_format_to_struct_format('U')}", result[:8])[0]
 
@@ -1279,10 +1290,10 @@ class ThreespaceSensor:
             self.com.close()
             success = self.__attempt_rediscover_self()
             if not success:
-                raise RuntimeError("Failed to reconnect to sensor in firmware")
+                raise SensorConnectionError("Failed to reconnect to sensor in firmware")
         in_bootloader = self.__check_bootloader_status()
         if in_bootloader:
-            raise RuntimeError("Failed to exit bootloader")
+            raise SensorConnectionError("Failed to exit bootloader")
         self.__cached_in_bootloader = False
         self.__firmware_init() 
     
