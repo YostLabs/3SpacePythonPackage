@@ -264,3 +264,16 @@ def threespace_setting_get(name: str) -> ThreespaceSetting:
             if pattern.match(name):
                 return setting
     return result
+
+def threespace_settings_string_to_dict(setting_string: str):
+    d = {}
+    for item in setting_string.split(';'):
+        result = item.split('=')
+        key = result[0]
+        if len(result) == 1:
+            value = None
+        else:
+            value = '='.join(result[1:]) #In case = was part of the value, do a join
+        
+        d[key] = value
+    return d

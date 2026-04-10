@@ -1493,20 +1493,1107 @@ class ThreespaceSensor:
 
     def commitSettings(self) -> ThreespaceCmdResult[None]: ...
     def softwareReset(self): ...
-    def enterBootloader(self): ...      
+    def enterBootloader(self): ...
 
     def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...
     def getButtonState(self) -> ThreespaceCmdResult[int]: ...
-                                               
-def threespace_settings_string_to_dict(setting_string: str):
-    d = {}
-    for item in setting_string.split(';'):
-        result = item.split('=')
-        key = result[0]
-        if len(result) == 1:
-            value = None
-        else:
-            value = '='.join(result[1:]) #In case = was part of the value, do a join
-        
-        d[key] = value
-    return d
+
+#---------------------------------------SETTING PROTOTYPES----------------------------------------------
+    def restoreDefaultSettings(self) -> int:
+        return self.write_settings(default=None)[0]
+
+    def readAllSettings(self) -> dict[str,Any]:
+        return self.read_settings("all")["all"]
+
+    def readAllWritableSettings(self) -> dict[str,Any]:
+        return self.read_settings("settings")["settings"]
+
+    def readSerialNumber(self) -> int:
+        return self.read_settings("serial_number")["serial_number"]
+
+    def writeTimestamp(self, microseconds: int) -> int:
+        return self.write_settings(timestamp=microseconds)[0]
+
+    def readTimestamp(self) -> int:
+        return self.read_settings("timestamp")["timestamp"]
+
+    def writeLedMode(self, value: int) -> int:
+        return self.write_settings(led_mode=value)[0]
+
+    def readLedMode(self) -> int:
+        return self.read_settings("led_mode")["led_mode"]
+
+    def writeLedRgb(self, value: list[float]) -> int:
+        return self.write_settings(led_rgb=value)[0]
+
+    def readLedRgb(self) -> tuple[float]:
+        return self.read_settings("led_rgb")["led_rgb"]
+
+    def readVersionFirmware(self) -> str:
+        return self.read_settings("version_firmware")["version_firmware"]
+
+    def readVersionHardware(self) -> str:
+        return self.read_settings("version_hardware")["version_hardware"]
+
+    def readUpdateRateSensor(self) -> int:
+        return self.read_settings("update_rate_sensor")["update_rate_sensor"]
+
+    def writeHeader(self, value: int) -> int:
+        return self.write_settings(header=value)[0]
+
+    def readHeader(self) -> int:
+        return self.read_settings("header")["header"]
+
+    def writeHeaderStatusEnabled(self, value: int) -> int:
+        return self.write_settings(header_status=value)[0]
+
+    def readHeaderStatusEnabled(self) -> int:
+        return self.read_settings("header_status")["header_status"]
+
+    def writeHeaderTimestampEnabled(self, value: int) -> int:
+        return self.write_settings(header_timestamp=value)[0]
+
+    def readHeaderTimestampEnabled(self) -> int:
+        return self.read_settings("header_timestamp")["header_timestamp"]
+
+    def writeHeaderEchoEnabled(self, value: int) -> int:
+        return self.write_settings(header_echo=value)[0]
+
+    def readHeaderEchoEnabled(self) -> int:
+        return self.read_settings("header_echo")["header_echo"]
+
+    def writeHeaderChecksumEnabled(self, value: int) -> int:
+        return self.write_settings(header_checksum=value)[0]
+
+    def readHeaderChecksumEnabled(self) -> int:
+        return self.read_settings("header_checksum")["header_checksum"]
+
+    def writeHeaderSerialEnabled(self, value: int) -> int:
+        return self.write_settings(header_serial=value)[0]
+
+    def readHeaderSerialEnabled(self) -> int:
+        return self.read_settings("header_serial")["header_serial"]
+
+    def writeHeaderLengthEnabled(self, value: int) -> int:
+        return self.write_settings(header_length=value)[0]
+
+    def readHeaderLengthEnabled(self) -> int:
+        return self.read_settings("header_length")["header_length"]
+
+    def readValidCommands(self) -> str:
+        return self.read_settings("valid_commands")["valid_commands"]
+
+    def writeCpuSpeed(self, value: int) -> int:
+        return self.write_settings(cpu_speed=value)[0]
+
+    def readCpuSpeed(self) -> int:
+        return self.read_settings("cpu_speed")["cpu_speed"]
+
+    def readCpuSpeedCur(self) -> int:
+        return self.read_settings("cpu_speed_cur")["cpu_speed_cur"]
+
+    def writePmMode(self, value: int) -> int:
+        return self.write_settings(pm_mode=value)[0]
+
+    def writePmIdleEnabled(self, value: int) -> int:
+        return self.write_settings(pm_idle_enabled=value)[0]
+
+    def readPmIdleEnabled(self) -> int:
+        return self.read_settings("pm_idle_enabled")["pm_idle_enabled"]
+
+    def writeStreamSlots(self, value: str) -> int:
+        return self.write_settings(stream_slots=value)[0]
+
+    def readStreamSlots(self) -> str:
+        return self.read_settings("stream_slots")["stream_slots"]
+
+    def writeStreamInterval(self, value: int) -> int:
+        return self.write_settings(stream_interval=value)[0]
+
+    def readStreamInterval(self) -> int:
+        return self.read_settings("stream_interval")["stream_interval"]
+
+    def writeStreamHz(self, value: float) -> int:
+        return self.write_settings(stream_hz=value)[0]
+
+    def readStreamHz(self) -> float:
+        return self.read_settings("stream_hz")["stream_hz"]
+
+    def writeStreamDuration(self, value: float) -> int:
+        return self.write_settings(stream_duration=value)[0]
+
+    def readStreamDuration(self) -> float:
+        return self.read_settings("stream_duration")["stream_duration"]
+
+    def writeStreamDelay(self, value: float) -> int:
+        return self.write_settings(stream_delay=value)[0]
+
+    def readStreamDelay(self) -> float:
+        return self.read_settings("stream_delay")["stream_delay"]
+
+    def writeStreamMode(self, value: int) -> int:
+        return self.write_settings(stream_mode=value)[0]
+
+    def readStreamMode(self) -> int:
+        return self.read_settings("stream_mode")["stream_mode"]
+
+    def writeStreamCount(self, value: int) -> int:
+        return self.write_settings(stream_count=value)[0]
+
+    def readStreamCount(self) -> int:
+        return self.read_settings("stream_count")["stream_count"]
+
+    def readStreamableCommands(self) -> str:
+        return self.read_settings("streamable_commands")["streamable_commands"]
+
+    def writeDebugLevel(self, value: int) -> int:
+        return self.write_settings(debug_level=value)[0]
+
+    def readDebugLevel(self) -> int:
+        return self.read_settings("debug_level")["debug_level"]
+
+    def writeDebugModule(self, value: int) -> int:
+        return self.write_settings(debug_module=value)[0]
+
+    def readDebugModule(self) -> int:
+        return self.read_settings("debug_module")["debug_module"]
+
+    def writeDebugMode(self, value: int) -> int:
+        return self.write_settings(debug_mode=value)[0]
+
+    def readDebugMode(self) -> int:
+        return self.read_settings("debug_mode")["debug_mode"]
+
+    def writeDebugLed(self, value: int) -> int:
+        return self.write_settings(debug_led=value)[0]
+
+    def readDebugLed(self) -> int:
+        return self.read_settings("debug_led")["debug_led"]
+
+    def writeDebugFault(self, value: int) -> int:
+        return self.write_settings(debug_fault=value)[0]
+
+    def readDebugFault(self) -> int:
+        return self.read_settings("debug_fault")["debug_fault"]
+
+    def writeDebugWdt(self, value: int) -> int:
+        return self.write_settings(debug_wdt=value)[0]
+
+    def readDebugWdt(self) -> int:
+        return self.read_settings("debug_wdt")["debug_wdt"]
+
+    def writeAxisOrder(self, value: str) -> int:
+        return self.write_settings(axis_order=value)[0]
+
+    def readAxisOrder(self) -> str:
+        return self.read_settings("axis_order")["axis_order"]
+
+    def writeAxisOrderC(self, value: str) -> int:
+        return self.write_settings(axis_order_c=value)[0]
+
+    def readAxisOrderC(self) -> str:
+        return self.read_settings("axis_order_c")["axis_order_c"]
+
+    def writeAxisOffsetEnabled(self, value: int) -> int:
+        return self.write_settings(axis_offset_enabled=value)[0]
+
+    def readAxisOffsetEnabled(self) -> int:
+        return self.read_settings("axis_offset_enabled")["axis_offset_enabled"]
+
+    def writeEulerOrder(self, value: str) -> int:
+        return self.write_settings(euler_order=value)[0]
+
+    def readEulerOrder(self) -> str:
+        return self.read_settings("euler_order")["euler_order"]
+
+    def readUpdateRateFilter(self) -> int:
+        return self.read_settings("update_rate_filter")["update_rate_filter"]
+
+    def readUpdateRateSms(self) -> int:
+        return self.read_settings("update_rate_sms")["update_rate_sms"]
+
+    def writeOffset(self, value: list[float]) -> int:
+        return self.write_settings(offset=value)[0]
+
+    def readOffset(self) -> tuple[float]:
+        return self.read_settings("offset")["offset"]
+
+    def writeBaseOffset(self, value: list[float]) -> int:
+        return self.write_settings(base_offset=value)[0]
+
+    def readBaseOffset(self) -> tuple[float]:
+        return self.read_settings("base_offset")["base_offset"]
+
+    def writeTareQuat(self, value: list[float]) -> int:
+        return self.write_settings(tare_quat=value)[0]
+
+    def readTareQuat(self) -> tuple[float]:
+        return self.read_settings("tare_quat")["tare_quat"]
+
+    def writeTareAutoBase(self, value: int) -> int:
+        return self.write_settings(tare_auto_base=value)[0]
+
+    def readTareAutoBase(self) -> int:
+        return self.read_settings("tare_auto_base")["tare_auto_base"]
+
+    def writeBaseTare(self, value: list[float]) -> int:
+        return self.write_settings(base_tare=value)[0]
+
+    def readBaseTare(self) -> tuple[float]:
+        return self.read_settings("base_tare")["base_tare"]
+
+    def writeTareMat(self, value: list[float]) -> int:
+        return self.write_settings(tare_mat=value)[0]
+
+    def readTareMat(self) -> tuple[float]:
+        return self.read_settings("tare_mat")["tare_mat"]
+
+    def writeRunningAvgOrient(self, value: float) -> int:
+        return self.write_settings(running_avg_orient=value)[0]
+
+    def readRunningAvgOrient(self) -> float:
+        return self.read_settings("running_avg_orient")["running_avg_orient"]
+
+    def writeFilterMode(self, value: int) -> int:
+        return self.write_settings(filter_mode=value)[0]
+
+    def readFilterMode(self) -> int:
+        return self.read_settings("filter_mode")["filter_mode"]
+
+    def writeFilterMrefMode(self, value: int) -> int:
+        return self.write_settings(filter_mref_mode=value)[0]
+
+    def readFilterMrefMode(self) -> int:
+        return self.read_settings("filter_mref_mode")["filter_mref_mode"]
+
+    def writeFilterMref(self, value: list[float]) -> int:
+        return self.write_settings(filter_mref=value)[0]
+
+    def readFilterMref(self) -> tuple[float]:
+        return self.read_settings("filter_mref")["filter_mref"]
+
+    def writeFilterMrefGps(self, value: list[float]) -> int:
+        return self.write_settings(filter_mref_gps=value)[0]
+
+    def writeFilterMrefDip(self, value: float) -> int:
+        return self.write_settings(filter_mref_dip=value)[0]
+
+    def readFilterMrefDip(self) -> float:
+        return self.read_settings("filter_mref_dip")["filter_mref_dip"]
+
+    def writeFilterConfThresholds(self, min: float, max: float, cap: float) -> int:
+        return self.write_settings(filter_conf_thresholds=[min, max, cap])[0]
+
+    def readFilterConfThresholds(self) -> tuple[float, float, float]:
+        return self.read_settings("filter_conf_thresholds")["filter_conf_thresholds"]
+
+    def readValidAccels(self) -> str:
+        return self.read_settings("valid_accels")["valid_accels"]
+
+    def readValidGyros(self) -> str:
+        return self.read_settings("valid_gyros")["valid_gyros"]
+
+    def readValidMags(self) -> str:
+        return self.read_settings("valid_mags")["valid_mags"]
+
+    def readValidBaros(self) -> str:
+        return self.read_settings("valid_baros")["valid_baros"]
+
+    def readValidComponents(self) -> str:
+        return self.read_settings("valid_components")["valid_components"]
+
+    def writePrimaryAccel(self, value: str) -> int:
+        return self.write_settings(primary_accel=value)[0]
+
+    def readPrimaryAccel(self) -> str:
+        return self.read_settings("primary_accel")["primary_accel"]
+
+    def writePrimaryGyro(self, value: str) -> int:
+        return self.write_settings(primary_gyro=value)[0]
+
+    def readPrimaryGyro(self) -> str:
+        return self.read_settings("primary_gyro")["primary_gyro"]
+
+    def writePrimaryMag(self, value: str) -> int:
+        return self.write_settings(primary_mag=value)[0]
+
+    def readPrimaryMag(self) -> str:
+        return self.read_settings("primary_mag")["primary_mag"]
+
+    def writePrimarySensorRfade(self, value: float) -> int:
+        return self.write_settings(primary_sensor_rfade=value)[0]
+
+    def readPrimarySensorRfade(self) -> float:
+        return self.read_settings("primary_sensor_rfade")["primary_sensor_rfade"]
+
+    def writeMagBiasMode(self, value: int) -> int:
+        return self.write_settings(mag_bias_mode=value)[0]
+
+    def readMagBiasMode(self) -> int:
+        return self.read_settings("mag_bias_mode")["mag_bias_mode"]
+
+    def writeOdrAll(self, value: int) -> int:
+        return self.write_settings(odr_all=value)[0]
+
+    def writeOdrAccelAll(self, value: int) -> int:
+        return self.write_settings(odr_accel=value)[0]
+
+    def writeOdrGyroAll(self, value: int) -> int:
+        return self.write_settings(odr_gyro=value)[0]
+
+    def writeOdrMagAll(self, value: int) -> int:
+        return self.write_settings(odr_mag=value)[0]
+
+    def writeOdrBaroAll(self, value: int) -> int:
+        return self.write_settings(odr_baro=value)[0]
+
+    def writeAccelEnabled(self, value: int) -> int:
+        return self.write_settings(accel_enabled=value)[0]
+
+    def readAccelEnabled(self) -> int:
+        return self.read_settings("accel_enabled")["accel_enabled"]
+
+    def writeGyroEnabled(self, value: int) -> int:
+        return self.write_settings(gyro_enabled=value)[0]
+
+    def readGyroEnabled(self) -> int:
+        return self.read_settings("gyro_enabled")["gyro_enabled"]
+
+    def writeMagEnabled(self, value: int) -> int:
+        return self.write_settings(mag_enabled=value)[0]
+
+    def readMagEnabled(self) -> int:
+        return self.read_settings("mag_enabled")["mag_enabled"]
+
+    def writeCalibMatAccel(self, id: int, value: list[float]) -> int:
+        param = { "calib_mat_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibMatAccel(self, id: int) -> tuple[float]:
+        name = "calib_mat_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasAccel(self, id: int, value: list[float]) -> int:
+        param = { "calib_bias_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasAccel(self, id: int) -> tuple[float]:
+        name = "calib_bias_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRangeAccel(self, id: int, value: int) -> int:
+        param = { "range_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRangeAccel(self, id: int) -> int:
+        name = "range_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def readValidRangesAccel(self, id: int) -> str:
+        name = "valid_ranges_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOversampleAccel(self, id: int, value: int) -> int:
+        param = { "oversample_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOversampleAccel(self, id: int) -> int:
+        name = "oversample_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRunningAvgAccel(self, id: int, value: float) -> int:
+        param = { "running_avg_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRunningAvgAccel(self, id: int) -> float:
+        name = "running_avg_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOdrAccel(self, id: int, value: int) -> int:
+        param = { "odr_accel%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrAccel(self, id: int) -> int:
+        name = "odr_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateAccel(self, id: int) -> float:
+        name = "update_rate_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def readNoiseProfileAccel(self, id: int) -> tuple[float, float, float, float, int]:
+        name = "noise_profile_accel%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibMatGyro(self, id: int, value: list[float]) -> int:
+        param = { "calib_mat_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibMatGyro(self, id: int) -> tuple[float]:
+        name = "calib_mat_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasGyro(self, id: int, value: list[float]) -> int:
+        param = { "calib_bias_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasGyro(self, id: int) -> tuple[float]:
+        name = "calib_bias_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRangeGyro(self, id: int, value: int) -> int:
+        param = { "range_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRangeGyro(self, id: int) -> int:
+        name = "range_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def readValidRangesGyro(self, id: int) -> str:
+        name = "valid_ranges_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOversampleGyro(self, id: int, value: int) -> int:
+        param = { "oversample_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOversampleGyro(self, id: int) -> int:
+        name = "oversample_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRunningAvgGyro(self, id: int, value: float) -> int:
+        param = { "running_avg_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRunningAvgGyro(self, id: int) -> float:
+        name = "running_avg_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOdrGyro(self, id: int, value: int) -> int:
+        param = { "odr_gyro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrGyro(self, id: int) -> int:
+        name = "odr_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateGyro(self, id: int) -> float:
+        name = "update_rate_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def readNoiseProfileGyro(self, id: int) -> tuple[float, float, float, float, int]:
+        name = "noise_profile_gyro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibMatMag(self, id: int, value: list[float]) -> int:
+        param = { "calib_mat_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibMatMag(self, id: int) -> tuple[float]:
+        name = "calib_mat_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasMag(self, id: int, value: list[float]) -> int:
+        param = { "calib_bias_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasMag(self, id: int) -> tuple[float]:
+        name = "calib_bias_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRangeMag(self, id: int, value: int) -> int:
+        param = { "range_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRangeMag(self, id: int) -> int:
+        name = "range_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def readValidRangesMag(self, id: int) -> str:
+        name = "valid_ranges_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOversampleMag(self, id: int, value: int) -> int:
+        param = { "oversample_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOversampleMag(self, id: int) -> int:
+        name = "oversample_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeRunningAvgMag(self, id: int, value: float) -> int:
+        param = { "running_avg_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readRunningAvgMag(self, id: int) -> float:
+        name = "running_avg_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeOdrMag(self, id: int, value: int) -> int:
+        param = { "odr_mag%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrMag(self, id: int) -> int:
+        name = "odr_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateMag(self, id: int) -> float:
+        name = "update_rate_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def readNoiseProfileMag(self, id: int) -> tuple[float, float, float, float, int]:
+        name = "noise_profile_mag%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibBiasBaro(self, id: int, value: float) -> int:
+        param = { "calib_bias_baro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readCalibBiasBaro(self, id: int) -> float:
+        name = "calib_bias_baro%d" % id
+        return self.read_settings(name)[name]
+
+    def writeCalibAltitudeBaro(self, id: int, value: float) -> int:
+        param = { "calib_altitude_baro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def writeOdrBaro(self, id: int, value: int) -> int:
+        param = { "odr_baro%d" % id : value }
+        return self.write_settings(**param)[0]
+
+    def readOdrBaro(self, id: int) -> int:
+        name = "odr_baro%d" % id
+        return self.read_settings(name)[name]
+
+    def readUpdateRateBaro(self, id: int) -> float:
+        name = "update_rate_baro%d" % id
+        return self.read_settings(name)[name]
+
+    def writePtsOffsetQuat(self, value: list[float]) -> int:
+        return self.write_settings(pts_offset_quat=value)[0]
+
+    def readPtsOffsetQuat(self) -> tuple[float]:
+        return self.read_settings("pts_offset_quat")["pts_offset_quat"]
+
+    def restorePtsDefaultSettings(self) -> int:
+        return self.write_settings(pts_default=None)[0]
+
+    def readPtsSettings(self) -> dict[str,Any]:
+        return self.read_settings("pts_settings")["pts_settings"]
+
+    def writePtsPresetHand(self, value: int) -> int:
+        return self.write_settings(pts_preset_hand=value)[0]
+
+    def writePtsPresetMotion(self, value: int) -> int:
+        return self.write_settings(pts_preset_motion=value)[0]
+
+    def writePtsPresetHeading(self, value: int) -> int:
+        return self.write_settings(pts_preset_heading=value)[0]
+
+    def writePtsDebugLevel(self, value: int) -> int:
+        return self.write_settings(pts_debug_level=value)[0]
+
+    def readPtsDebugLevel(self) -> int:
+        return self.read_settings("pts_debug_level")["pts_debug_level"]
+
+    def writePtsDebugModule(self, value: int) -> int:
+        return self.write_settings(pts_debug_module=value)[0]
+
+    def readPtsDebugModule(self) -> int:
+        return self.read_settings("pts_debug_module")["pts_debug_module"]
+
+    def writePtsHeadingMode(self, value: int) -> int:
+        return self.write_settings(pts_heading_mode=value)[0]
+
+    def readPtsHeadingMode(self) -> int:
+        return self.read_settings("pts_heading_mode")["pts_heading_mode"]
+
+    def writePtsInitialHeadingMode(self, value: int) -> int:
+        return self.write_settings(pts_initial_heading_mode=value)[0]
+
+    def readPtsInitialHeadingMode(self) -> int:
+        return self.read_settings("pts_initial_heading_mode")["pts_initial_heading_mode"]
+
+    def writePtsHandHeadingMode(self, value: int) -> int:
+        return self.write_settings(pts_hand_heading_mode=value)[0]
+
+    def readPtsHandHeadingMode(self) -> int:
+        return self.read_settings("pts_hand_heading_mode")["pts_hand_heading_mode"]
+
+    def writePtsMagDeclination(self, value: float) -> int:
+        return self.write_settings(pts_mag_declination=value)[0]
+
+    def readPtsMagDeclination(self) -> float:
+        return self.read_settings("pts_mag_declination")["pts_mag_declination"]
+
+    def writePtsAutoDeclination(self, value: int) -> int:
+        return self.write_settings(pts_auto_declination=value)[0]
+
+    def readPtsAutoDeclination(self) -> int:
+        return self.read_settings("pts_auto_declination")["pts_auto_declination"]
+
+    def writePtsDiscardSlow(self, value: int) -> int:
+        return self.write_settings(pts_discard_slow=value)[0]
+
+    def readPtsDiscardSlow(self) -> int:
+        return self.read_settings("pts_discard_slow")["pts_discard_slow"]
+
+    def writePtsSegmentAxis(self, value: int) -> int:
+        return self.write_settings(pts_segment_axis=value)[0]
+
+    def readPtsSegmentAxis(self) -> int:
+        return self.read_settings("pts_segment_axis")["pts_segment_axis"]
+
+    def writePtsSegNoise(self, value: float) -> int:
+        return self.write_settings(pts_seg_noise=value)[0]
+
+    def readPtsSegNoise(self) -> float:
+        return self.read_settings("pts_seg_noise")["pts_seg_noise"]
+
+    def writePtsClassifierMode(self, value: int) -> int:
+        return self.write_settings(pts_classifier_mode=value)[0]
+
+    def readPtsClassifierMode(self) -> int:
+        return self.read_settings("pts_classifier_mode")["pts_classifier_mode"]
+
+    def writePtsClassifierMode2(self, value: int) -> int:
+        return self.write_settings(pts_classifier_mode2=value)[0]
+
+    def readPtsClassifierMode2(self) -> int:
+        return self.read_settings("pts_classifier_mode2")["pts_classifier_mode2"]
+
+    def writePtsLocationClassifierMode(self, value: int) -> int:
+        return self.write_settings(pts_location_classifier_mode=value)[0]
+
+    def readPtsLocationClassifierMode(self) -> int:
+        return self.read_settings("pts_location_classifier_mode")["pts_location_classifier_mode"]
+
+    def writePtsHandClassifierThreshold(self, value: float) -> int:
+        return self.write_settings(pts_hand_classifier_threshold=value)[0]
+
+    def readPtsHandClassifierThreshold(self) -> float:
+        return self.read_settings("pts_hand_classifier_threshold")["pts_hand_classifier_threshold"]
+
+    def writePtsDisabledTruthMotions(self, value: int) -> int:
+        return self.write_settings(pts_disabled_truth_motions=value)[0]
+
+    def readPtsDisabledTruthMotions(self) -> int:
+        return self.read_settings("pts_disabled_truth_motions")["pts_disabled_truth_motions"]
+
+    def writePtsDynamicSegmenterEnabled(self, value: int) -> int:
+        return self.write_settings(pts_dynamic_segmenter_enabled=value)[0]
+
+    def readPtsDynamicSegmenterEnabled(self) -> int:
+        return self.read_settings("pts_dynamic_segmenter_enabled")["pts_dynamic_segmenter_enabled"]
+
+    def writePtsEstimatorScalars(self, value: list[float]) -> int:
+        return self.write_settings(pts_estimator_scalars=value)[0]
+
+    def readPtsEstimatorScalars(self) -> tuple[float]:
+        return self.read_settings("pts_estimator_scalars")["pts_estimator_scalars"]
+
+    def writePtsAutoEstimatorScalarRate(self, value: int) -> int:
+        return self.write_settings(pts_auto_estimator_scalar_rate=value)[0]
+
+    def readPtsAutoEstimatorScalarRate(self) -> int:
+        return self.read_settings("pts_auto_estimator_scalar_rate")["pts_auto_estimator_scalar_rate"]
+
+    def writePtsRunningCorrection(self, value: int) -> int:
+        return self.write_settings(pts_running_correction=value)[0]
+
+    def readPtsRunningCorrection(self) -> int:
+        return self.read_settings("pts_running_correction")["pts_running_correction"]
+
+    def writePtsHandCorrection(self, value: int) -> int:
+        return self.write_settings(pts_hand_correction=value)[0]
+
+    def readPtsHandCorrection(self) -> int:
+        return self.read_settings("pts_hand_correction")["pts_hand_correction"]
+
+    def writePtsHeadingCorrectionMode(self, value: int) -> int:
+        return self.write_settings(pts_heading_correction_mode=value)[0]
+
+    def readPtsHeadingCorrectionMode(self) -> int:
+        return self.read_settings("pts_heading_correction_mode")["pts_heading_correction_mode"]
+
+    def writePtsHeadingMinDif(self, value: float) -> int:
+        return self.write_settings(pts_heading_min_dif=value)[0]
+
+    def readPtsHeadingMinDif(self) -> float:
+        return self.read_settings("pts_heading_min_dif")["pts_heading_min_dif"]
+
+    def writePtsHeadingResetConsistencies(self, value: int) -> int:
+        return self.write_settings(pts_heading_reset_consistencies=value)[0]
+
+    def readPtsHeadingResetConsistencies(self) -> int:
+        return self.read_settings("pts_heading_reset_consistencies")["pts_heading_reset_consistencies"]
+
+    def writePtsHeadingBacktrackEnabled(self, value: int) -> int:
+        return self.write_settings(pts_heading_backtrack_enabled=value)[0]
+
+    def readPtsHeadingBacktrackEnabled(self) -> int:
+        return self.read_settings("pts_heading_backtrack_enabled")["pts_heading_backtrack_enabled"]
+
+    def writePtsMotionCorrectionRadius(self, value: int) -> int:
+        return self.write_settings(pts_motion_correction_radius=value)[0]
+
+    def readPtsMotionCorrectionRadius(self) -> int:
+        return self.read_settings("pts_motion_correction_radius")["pts_motion_correction_radius"]
+
+    def writePtsMotionCorrectionConsistencyReq(self, value: int) -> int:
+        return self.write_settings(pts_motion_correction_consistency_req=value)[0]
+
+    def readPtsMotionCorrectionConsistencyReq(self) -> int:
+        return self.read_settings("pts_motion_correction_consistency_req")["pts_motion_correction_consistency_req"]
+
+    def writePtsOrientRefYThreshold(self, value: float) -> int:
+        return self.write_settings(pts_orient_ref_y_threshold=value)[0]
+
+    def readPtsOrientRefYThreshold(self) -> float:
+        return self.read_settings("pts_orient_ref_y_threshold")["pts_orient_ref_y_threshold"]
+
+    def readPtsVersion(self) -> str:
+        return self.read_settings("pts_version")["pts_version"]
+
+    def writePtsDate(self, day: int, month: int, year: int) -> int:
+        return self.write_settings(pts_date=[day, month, year])[0]
+
+    def readPtsDate(self) -> tuple[int, int, int]:
+        return self.read_settings("pts_date")["pts_date"]
+
+    def readPtsWmmVersion(self) -> str:
+        return self.read_settings("pts_wmm_version")["pts_wmm_version"]
+
+    def writePtsWmmSet(self, value: str) -> int:
+        return self.write_settings(pts_wmm_set=value)[0]
+
+    def writePtsForceOutGps(self, value: int) -> int:
+        return self.write_settings(pts_force_out_gps=value)[0]
+
+    def readPtsForceOutGps(self) -> int:
+        return self.read_settings("pts_force_out_gps")["pts_force_out_gps"]
+
+    def writePtsInitialHeadingTolerance(self, value: float) -> int:
+        return self.write_settings(pts_initial_heading_tolerance=value)[0]
+
+    def readPtsInitialHeadingTolerance(self) -> float:
+        return self.read_settings("pts_initial_heading_tolerance")["pts_initial_heading_tolerance"]
+
+    def writePtsHeadingConsistencyReq(self, value: int) -> int:
+        return self.write_settings(pts_heading_consistency_req=value)[0]
+
+    def readPtsHeadingConsistencyReq(self) -> int:
+        return self.read_settings("pts_heading_consistency_req")["pts_heading_consistency_req"]
+
+    def writePtsHeadingRootErrMul(self, value: float) -> int:
+        return self.write_settings(pts_heading_root_err_mul=value)[0]
+
+    def readPtsHeadingRootErrMul(self) -> float:
+        return self.read_settings("pts_heading_root_err_mul")["pts_heading_root_err_mul"]
+
+    def writePtsHeadingConsistentBias(self, value: float) -> int:
+        return self.write_settings(pts_heading_consistent_bias=value)[0]
+
+    def readPtsHeadingConsistentBias(self) -> float:
+        return self.read_settings("pts_heading_consistent_bias")["pts_heading_consistent_bias"]
+
+    def writePtsStrictBiasEnabled(self, value: int) -> int:
+        return self.write_settings(pts_strict_bias_enabled=value)[0]
+
+    def readPtsStrictBiasEnabled(self) -> int:
+        return self.read_settings("pts_strict_bias_enabled")["pts_strict_bias_enabled"]
+
+    def writePinMode0(self, value: int) -> int:
+        return self.write_settings(pin_mode0=value)[0]
+
+    def readPinMode0(self) -> int:
+        return self.read_settings("pin_mode0")["pin_mode0"]
+
+    def writePinMode1(self, value: int) -> int:
+        return self.write_settings(pin_mode1=value)[0]
+
+    def readPinMode1(self) -> int:
+        return self.read_settings("pin_mode1")["pin_mode1"]
+
+    def writeUartBaudrate(self, value: int) -> int:
+        return self.write_settings(uart_baudrate=value)[0]
+
+    def readUartBaudrate(self) -> int:
+        return self.read_settings("uart_baudrate")["uart_baudrate"]
+
+    def writeI2cAddr(self, value: int) -> int:
+        return self.write_settings(i2c_addr=value)[0]
+
+    def readI2cAddr(self) -> int:
+        return self.read_settings("i2c_addr")["i2c_addr"]
+
+    def writePowerHoldTime(self, value: float) -> int:
+        return self.write_settings(power_hold_time=value)[0]
+
+    def readPowerHoldTime(self) -> float:
+        return self.read_settings("power_hold_time")["power_hold_time"]
+
+    def writePowerHoldState(self, value: int) -> int:
+        return self.write_settings(power_hold_state=value)[0]
+
+    def readPowerHoldState(self) -> int:
+        return self.read_settings("power_hold_state")["power_hold_state"]
+
+    def writePowerInitialHoldState(self, value: int) -> int:
+        return self.write_settings(power_initial_hold_state=value)[0]
+
+    def readPowerInitialHoldState(self) -> int:
+        return self.read_settings("power_initial_hold_state")["power_initial_hold_state"]
+
+    def fsCfgLoad(self) -> int:
+        return self.write_settings(fs_cfg_load=None)[0]
+
+    def writeFsMscEnabled(self, value: int) -> int:
+        return self.write_settings(fs_msc_enabled=value)[0]
+
+    def readFsMscEnabled(self) -> int:
+        return self.read_settings("fs_msc_enabled")["fs_msc_enabled"]
+
+    def writeFsMscAuto(self, value: int) -> int:
+        return self.write_settings(fs_msc_auto=value)[0]
+
+    def readFsMscAuto(self) -> int:
+        return self.read_settings("fs_msc_auto")["fs_msc_auto"]
+
+    def writeLogSlots(self, value: str) -> int:
+        return self.write_settings(log_slots=value)[0]
+
+    def readLogSlots(self) -> str:
+        return self.read_settings("log_slots")["log_slots"]
+
+    def writeLogInterval(self, value: int) -> int:
+        return self.write_settings(log_interval=value)[0]
+
+    def readLogInterval(self) -> int:
+        return self.read_settings("log_interval")["log_interval"]
+
+    def writeLogHz(self, value: float) -> int:
+        return self.write_settings(log_hz=value)[0]
+
+    def readLogHz(self) -> float:
+        return self.read_settings("log_hz")["log_hz"]
+
+    def writeLogStartEvent(self, value: str) -> int:
+        return self.write_settings(log_start_event=value)[0]
+
+    def readLogStartEvent(self) -> str:
+        return self.read_settings("log_start_event")["log_start_event"]
+
+    def writeLogStartMotionThreshold(self, value: float) -> int:
+        return self.write_settings(log_start_motion_threshold=value)[0]
+
+    def readLogStartMotionThreshold(self) -> float:
+        return self.read_settings("log_start_motion_threshold")["log_start_motion_threshold"]
+
+    def writeLogStopEvent(self, value: str) -> int:
+        return self.write_settings(log_stop_event=value)[0]
+
+    def readLogStopEvent(self) -> str:
+        return self.read_settings("log_stop_event")["log_stop_event"]
+
+    def writeLogStopMotionThreshold(self, value: float) -> int:
+        return self.write_settings(log_stop_motion_threshold=value)[0]
+
+    def readLogStopMotionThreshold(self) -> float:
+        return self.read_settings("log_stop_motion_threshold")["log_stop_motion_threshold"]
+
+    def writeLogStopMotionDelay(self, value: float) -> int:
+        return self.write_settings(log_stop_motion_delay=value)[0]
+
+    def readLogStopMotionDelay(self) -> float:
+        return self.read_settings("log_stop_motion_delay")["log_stop_motion_delay"]
+
+    def writeLogStopCount(self, value: int) -> int:
+        return self.write_settings(log_stop_count=value)[0]
+
+    def readLogStopCount(self) -> int:
+        return self.read_settings("log_stop_count")["log_stop_count"]
+
+    def writeLogStopDuration(self, value: float) -> int:
+        return self.write_settings(log_stop_duration=value)[0]
+
+    def readLogStopDuration(self) -> float:
+        return self.read_settings("log_stop_duration")["log_stop_duration"]
+
+    def writeLogStopPeriodCount(self, value: int) -> int:
+        return self.write_settings(log_stop_period_count=value)[0]
+
+    def readLogStopPeriodCount(self) -> int:
+        return self.read_settings("log_stop_period_count")["log_stop_period_count"]
+
+    def writeLogStyle(self, value: int) -> int:
+        return self.write_settings(log_style=value)[0]
+
+    def readLogStyle(self) -> int:
+        return self.read_settings("log_style")["log_style"]
+
+    def writeLogPeriodicCaptureTime(self, value: float) -> int:
+        return self.write_settings(log_periodic_capture_time=value)[0]
+
+    def readLogPeriodicCaptureTime(self) -> float:
+        return self.read_settings("log_periodic_capture_time")["log_periodic_capture_time"]
+
+    def writeLogPeriodicRestTime(self, value: float) -> int:
+        return self.write_settings(log_periodic_rest_time=value)[0]
+
+    def readLogPeriodicRestTime(self) -> float:
+        return self.read_settings("log_periodic_rest_time")["log_periodic_rest_time"]
+
+    def writeLogBaseFilename(self, value: str) -> int:
+        return self.write_settings(log_base_filename=value)[0]
+
+    def readLogBaseFilename(self) -> str:
+        return self.read_settings("log_base_filename")["log_base_filename"]
+
+    def writeLogFileMode(self, value: int) -> int:
+        return self.write_settings(log_file_mode=value)[0]
+
+    def readLogFileMode(self) -> int:
+        return self.read_settings("log_file_mode")["log_file_mode"]
+
+    def writeLogDataMode(self, value: int) -> int:
+        return self.write_settings(log_data_mode=value)[0]
+
+    def readLogDataMode(self) -> int:
+        return self.read_settings("log_data_mode")["log_data_mode"]
+
+    def writeLogOutputSettings(self, value: int) -> int:
+        return self.write_settings(log_output_settings=value)[0]
+
+    def readLogOutputSettings(self) -> int:
+        return self.read_settings("log_output_settings")["log_output_settings"]
+
+    def writeLogHeaderEnabled(self, value: int) -> int:
+        return self.write_settings(log_header_enabled=value)[0]
+
+    def readLogHeaderEnabled(self) -> int:
+        return self.read_settings("log_header_enabled")["log_header_enabled"]
+
+    def writeLogFolderMode(self, value: int) -> int:
+        return self.write_settings(log_folder_mode=value)[0]
+
+    def readLogFolderMode(self) -> int:
+        return self.read_settings("log_folder_mode")["log_folder_mode"]
+
+    def writeLogImmediateOutput(self, value: int) -> int:
+        return self.write_settings(log_immediate_output=value)[0]
+
+    def readLogImmediateOutput(self) -> int:
+        return self.read_settings("log_immediate_output")["log_immediate_output"]
+
+    def writeLogImmediateOutputHeaderEnabled(self, value: int) -> int:
+        return self.write_settings(log_immediate_output_header_enabled=value)[0]
+
+    def readLogImmediateOutputHeaderEnabled(self) -> int:
+        return self.read_settings("log_immediate_output_header_enabled")["log_immediate_output_header_enabled"]
+
+    def writeLogImmediateOutputHeaderMode(self, value: int) -> int:
+        return self.write_settings(log_immediate_output_header_mode=value)[0]
+
+    def readLogImmediateOutputHeaderMode(self) -> int:
+        return self.read_settings("log_immediate_output_header_mode")["log_immediate_output_header_mode"]
+
+    def writeRtcYear(self, value: int) -> int:
+        return self.write_settings(rtc_year=value)[0]
+
+    def readRtcYear(self) -> int:
+        return self.read_settings("rtc_year")["rtc_year"]
+
+    def writeRtcMonth(self, value: int) -> int:
+        return self.write_settings(rtc_month=value)[0]
+
+    def readRtcMonth(self) -> int:
+        return self.read_settings("rtc_month")["rtc_month"]
+
+    def writeRtcDay(self, value: int) -> int:
+        return self.write_settings(rtc_day=value)[0]
+
+    def readRtcDay(self) -> int:
+        return self.read_settings("rtc_day")["rtc_day"]
+
+    def writeRtcHour(self, value: int) -> int:
+        return self.write_settings(rtc_hour=value)[0]
+
+    def readRtcHour(self) -> int:
+        return self.read_settings("rtc_hour")["rtc_hour"]
+
+    def writeRtcMinute(self, value: int) -> int:
+        return self.write_settings(rtc_minute=value)[0]
+
+    def readRtcMinute(self) -> int:
+        return self.read_settings("rtc_minute")["rtc_minute"]
+
+    def writeRtcSecond(self, value: int) -> int:
+        return self.write_settings(rtc_second=value)[0]
+
+    def readRtcSecond(self) -> int:
+        return self.read_settings("rtc_second")["rtc_second"]
+
+    def writeRtcDatetime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> int:
+        return self.write_settings(rtc_datetime=[year, month, day, hour, minute, second])[0]
+
+    def readRtcDatetime(self) -> tuple[int, int, int, int, int, int]:
+        return self.read_settings("rtc_datetime")["rtc_datetime"]
+
+    def writeBatChgRate(self, value: int) -> int:
+        return self.write_settings(bat_chg_rate=value)[0]
+
+    def readBatChgRate(self) -> int:
+        return self.read_settings("bat_chg_rate")["bat_chg_rate"]
+
+    def writeBatColdThreshold(self, temperature_c: float, chg_rate: float) -> int:
+        return self.write_settings(bat_cold_threshold=[temperature_c, chg_rate])[0]
+
+    def readBatColdThreshold(self) -> tuple[float, float]:
+        return self.read_settings("bat_cold_threshold")["bat_cold_threshold"]
+
+    def writeBatWarmThreshold(self, temperature_c: float, chg_rate: float) -> int:
+        return self.write_settings(bat_warm_threshold=[temperature_c, chg_rate])[0]
+
+    def readBatWarmThreshold(self) -> tuple[float, float]:
+        return self.read_settings("bat_warm_threshold")["bat_warm_threshold"]
+
+    def writeBatHotThreshold(self, temperature_c: float, chg_rate: float) -> int:
+        return self.write_settings(bat_hot_threshold=[temperature_c, chg_rate])[0]
+
+    def readBatHotThreshold(self) -> tuple[float, float]:
+        return self.read_settings("bat_hot_threshold")["bat_hot_threshold"]
+
+    def writeBatOffsetThreshold(self, value: float) -> int:
+        return self.write_settings(bat_offset_threshold=value)[0]
+
+    def readBatOffsetThreshold(self) -> float:
+        return self.read_settings("bat_offset_threshold")["bat_offset_threshold"]
+
+    def readBatMah(self) -> int:
+        return self.read_settings("bat_mah")["bat_mah"]
+
+    def writeBleName(self, value: str) -> int:
+        return self.write_settings(ble_name=value)[0]
+
+    def readBleName(self) -> str:
+        return self.read_settings("ble_name")["ble_name"]
+
+    def readBleConnected(self) -> int:
+        return self.read_settings("ble_connected")["ble_connected"]
+
+    def bleDisconnect(self) -> int:
+        return self.write_settings(ble_disconnect=None)[0]
+
+    def writeGpsStandby(self, value: int) -> int:
+        return self.write_settings(gps_standby=value)[0]
+
+    def readGpsStandby(self) -> int:
+        return self.read_settings("gps_standby")["gps_standby"]
+
+    def writeGpsLed(self, value: int) -> int:
+        return self.write_settings(gps_led=value)[0]
+
+    def readGpsLed(self) -> int:
+        return self.read_settings("gps_led")["gps_led"]
+
