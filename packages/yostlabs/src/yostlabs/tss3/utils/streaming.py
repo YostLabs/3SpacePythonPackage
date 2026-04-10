@@ -86,7 +86,7 @@ class ThreespaceStreamingManager:
         self.is_streaming = False #Store this separately to attempt to allow using both the regular streaming and streaming manager via pausing and such
 
         #Set the initial streaming speed
-        self.interval = int(self.sensor.get_settings("stream_interval"))   
+        self.interval = self.sensor.readStreamInterval()
         self.desired_interval = self.interval 
 
         #Registrations and update rate dirt are handled separately for some situations.
@@ -373,7 +373,7 @@ class ThreespaceStreamingManager:
 
         if self.num_commands_registered > 0:
             slots_string = self.__build_stream_slots_string()
-            err, num_successes = self.sensor.set_settings(stream_slots=slots_string, stream_interval=self.desired_interval)
+            err, num_successes = self.sensor.write_settings(stream_slots=slots_string, stream_interval=self.desired_interval)
             if err:
                 self.validated = False
                 return False
@@ -469,7 +469,7 @@ class ThreespaceStreamingManager:
         """
         get a list containing the streaming information from the current sensor
         """
-        slot_setting: str = self.sensor.get_settings("stream_slots")
+        slot_setting: str = self.sensor.readStreamSlots()
         slots = slot_setting.split(',')
         slot_info = []
         for slot in slots:

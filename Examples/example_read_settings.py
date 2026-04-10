@@ -1,5 +1,6 @@
 from yostlabs.tss3.api import ThreespaceSensor
 from yostlabs.communication.serial import ThreespaceSerialComClass
+from yostlabs.tss3.errors import InvalidKeyError
 
 #Create a sensor by auto detecting a ThreespaceSerialComClass
 sensor = ThreespaceSensor(ThreespaceSerialComClass)
@@ -8,30 +9,33 @@ sensor = ThreespaceSensor(ThreespaceSerialComClass)
 
 print()
 print("Reading settings:")
-#If only one value is passed, the result is a singular object. Results are returned as strings
-checksum_enabled = sensor.get_settings("header_checksum")
+#Reading a singular setting and accessing its result directly
+checksum_enabled = sensor.read_settings("header_checksum")["header_checksum"]
 print("Checksum enabled:", bool(checksum_enabled))
 
-#If multiple values are passed, the result is a dictionary with the key as the setting key, and the value as the result
-result = sensor.get_settings("debug_mode", "debug_level", "debug_module")
+#Multiple keys can be specified to all be read at once, each with an entry in the returned dict
+result = sensor.read_settings("debug_mode", "debug_level", "debug_module")
 print("Multi-Response:", result)
 
-#With multiple values it is the same but the response is stored still using the key that was requested. This way, you can easily see what key failed.
-result = sensor.get_settings("IDontExist")
-print("Error Response:", result)
+#Attempting to read a key that does not exist will cause an exception to be thrown
+try:
+    result = sensor.read_settings("IDontExist")
+except InvalidKeyError as e:
+    print(e)
 
-#If a key is invalid in the multiple response format
-result = sensor.get_settings("debug_mode", "I Dont Exist", "debug_module", "And neither do I")
-print("Multi-Error:", result)
+#If a key is invalid in the multiple response format, the valid keys BEFORE the invalid key will
+#still return their values in the result field of the exception. This can be used to determine which
+#key failed based on which key is the last to return a value.
+try:
+    result = sensor.read_settings("debug_mode", "I Dont Exist", "debug_module", "And neither do I")
+except InvalidKeyError as e:
+    print("Multi-Error:", e.result)
 
 
 #You can also get bulk keys such as ?settings, ?all... Or querys
-#NOTE: If streaming, these bulk setting types will not work via the API unless a normal singular setting is sent first in the list.
-#This is because the API requires a known identifier key for the start of the message to parse it out from the streaming data,
-#but these have no known static key.
 print("?Settings:")
-print(sensor.get_settings("settings"))
+print(sensor.read_settings("settings"))
 print("Query ODR")
-print(sensor.get_settings("{odr}"))
+print(sensor.read_settings("{odr}"))
 
 sensor.cleanup()

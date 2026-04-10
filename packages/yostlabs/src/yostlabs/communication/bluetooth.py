@@ -266,8 +266,8 @@ if __name__ == "__main__":
 
     sensor = ThreespaceSensor(com, verbose=True)
 
-    sensor.set_settings(stream_slots=0)
-    print(sensor.get_settings("stream_slots", "stream_hz"))
+    sensor.writeStreamSlots("0")
+    print(sensor.read_settings("stream_slots", "stream_hz"))
     print(sensor.getTaredOrientation())
 
     sensor.startStreaming()

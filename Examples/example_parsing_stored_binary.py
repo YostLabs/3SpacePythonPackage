@@ -7,8 +7,8 @@ import time
 sensor = ThreespaceSensor(ThreespaceSerialComClass)
 
 #First, gather some data and store it in a file for this example
-sensor.set_settings(stream_slots=f"{StreamableCommands.GetTimestamp.value},{StreamableCommands.GetAllPrimaryCorrectedData.value}")
-sensor.set_settings(stream_hz=500)
+sensor.writeStreamSlots(f"{StreamableCommands.GetTimestamp.value},{StreamableCommands.GetAllPrimaryCorrectedData.value}")
+sensor.writeStreamHz(500)
 
 print("Gathering data for 5 seconds...")
 sensor.startStreaming()
