@@ -503,6 +503,17 @@ class ThreespaceSensor:
             cmd.extend(key_bytes)
             checksum += sum(key_bytes)
 
+            #Check for special value types that are handled differently. For instance, a list
+            #of StreamableCommand objects is allowed to be used to set stream slots, but the
+            #format needs converted to what the sensor would expect.
+            if isinstance(value, bool):
+                value = int(value)
+            elif hasattr(value, '__iter__') and not isinstance(value, (str, bytes, bytearray)):
+                if all(isinstance(v, Enum) for v in value):
+                    value = ','.join(str(v.value) for v in value)
+                elif setting.in_format.num_params == 1 and setting.in_format.internal_format.lower()[0] == 's':
+                    value = ','.join(str(v) for v in value)
+
             #Add the value
             if hasattr(value, '__iter__') and not isinstance(value, (str, bytes, bytearray)):
                 #Must unpack if list/tuple since format expects individual values
@@ -1612,7 +1623,11 @@ class ThreespaceSensor:
     def readPmIdleEnabled(self) -> int:
         return self.read_settings("pm_idle_enabled")["pm_idle_enabled"]
 
-    def writeStreamSlots(self, value: str) -> int:
+    def writeStreamSlots(self, value: str|list[StreamableCommands]|list[int]) -> int:
+        if isinstance(value, list) and all(isinstance(v, StreamableCommands) for v in value):
+            value = ','.join(str(v.value) for v in value)
+        elif isinstance(value, list) and all(isinstance(v, int) for v in value):
+            value = ','.join(str(v) for v in value)
         return self.write_settings(stream_slots=value)[0]
 
     def readStreamSlots(self) -> str:
@@ -2371,7 +2386,11 @@ class ThreespaceSensor:
     def readFsMscAuto(self) -> int:
         return self.read_settings("fs_msc_auto")["fs_msc_auto"]
 
-    def writeLogSlots(self, value: str) -> int:
+    def writeLogSlots(self, value: str|list[StreamableCommands]|list[int]) -> int:
+        if isinstance(value, list) and all(isinstance(v, StreamableCommands) for v in value):
+            value = ','.join(str(v.value) for v in value)
+        elif isinstance(value, list) and all(isinstance(v, int) for v in value):
+            value = ','.join(str(v) for v in value)
         return self.write_settings(log_slots=value)[0]
 
     def readLogSlots(self) -> str:
