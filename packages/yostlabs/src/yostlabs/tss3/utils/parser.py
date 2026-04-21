@@ -217,7 +217,11 @@ class ThreespaceBinaryParser:
 
     def __parse_command(self):
         #Not enough data to parse yet
-        if self.data_stream.length < self.header_info.size + self.__parsing_msg_length:
+        minimum_message_size = self.header_info.size + self.__parsing_msg_length
+        if math.isnan(minimum_message_size):
+            minimum_message_size = self.header_info.size + struct.calcsize(f"<{self.__parsing_command.out_format.struct_format}")
+        
+        if self.data_stream.length < minimum_message_size:
             return None
         
         if self.header_info.checksum_enabled and not math.isnan(self.__parsing_msg_length): #Can validate checksum before parsing
