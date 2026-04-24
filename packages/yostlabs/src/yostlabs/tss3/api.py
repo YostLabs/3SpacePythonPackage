@@ -1525,10 +1525,10 @@ class ThreespaceSensor:
         return self.write_settings(default=None)[0]
 
     def readAllSettings(self) -> dict[str,Any]:
-        return self.read_settings("all")["all"]
+        return self.read_settings("all")
 
     def readAllWritableSettings(self) -> dict[str,Any]:
-        return self.read_settings("settings")["settings"]
+        return self.read_settings("settings")
 
     def readSerialNumber(self) -> int:
         return self.read_settings("serial_number")["serial_number"]
@@ -2105,7 +2105,7 @@ class ThreespaceSensor:
         return self.write_settings(pts_default=None)[0]
 
     def readPtsSettings(self) -> dict[str,Any]:
-        return self.read_settings("pts_settings")["pts_settings"]
+        return self.read_settings("pts_settings")
 
     def writePtsPresetHand(self, value: int) -> int:
         return self.write_settings(pts_preset_hand=value)[0]
