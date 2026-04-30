@@ -2,6 +2,7 @@ from yostlabs.communication.base import ThreespaceComClass
 from yostlabs.communication.serial import ThreespaceSerialComClass
 
 from yostlabs.tss3.consts import *
+import yostlabs.tss3.specs as specs
 from yostlabs.tss3.commands import *
 from yostlabs.tss3.settings import *
 from yostlabs.tss3.types import ThreespaceCmdResult, ThreespaceBootloaderInfo, \
@@ -88,6 +89,8 @@ class ThreespaceSensor:
         self.header_info = ThreespaceHeaderInfo()
         self.header_enabled = True 
 
+        self.__setting_descriptions: dict[str, ThreespaceSettingDescriptor] = None
+
         #All the different streaming options
         self.is_data_streaming = False
         self.is_log_streaming = False
@@ -164,6 +167,9 @@ class ThreespaceSensor:
             self.__initialize_commands()
     
         self.__reinit_firmware()
+
+        #Reset the setting descriptions so they will be reloaded with the new firmware's settings when requested
+        self.__setting_descriptions = None
         
         self.valid_mags = self.__str_list_to_int_list(self.readValidMags())
         self.valid_accels = self.__str_list_to_int_list(self.readValidAccels())
@@ -250,7 +256,7 @@ class ThreespaceSensor:
     def has_command(self, command: ThreespaceCommand):
         return self.commands[command.info.num] is not None 
 
-    def __get_command(self, command_name: str):
+    def __get_command_by_name(self, command_name: str):
         for command in self.commands:
             if command is None: continue
             if command.info.name == command_name:
@@ -1138,14 +1144,14 @@ class ThreespaceSensor:
 #-------------------------------------FILE STREAMING----------------------------------------------
 
     def __fileStartStream(self) -> ThreespaceCmdResult[int]:
-        result = self.execute_command(self.__get_command("fileStartStream"))
+        result = self.execute_command(self.__get_command_by_name("fileStartStream"))
         self.file_stream_length = result.data
         if self.file_stream_length > 0:
             self.is_file_streaming = True
         return result
 
     def __fileStopStream(self) -> ThreespaceCmdResult[None]:
-        result = self.execute_command(self.__get_command("fileStopStream"))
+        result = self.execute_command(self.__get_command_by_name("fileStopStream"))
         self.is_file_streaming = False
         return result
 
@@ -1195,12 +1201,12 @@ class ThreespaceSensor:
             self.write_settings(log_immediate_output_header_enabled=1,
                                 log_immediate_output_header_mode=THREESPACE_OUTPUT_MODE_BINARY) #Must have header enabled in the log messages for this to work and must use binary for the header
         
-        result = self.execute_command(self.__get_command("startDataLogging"))
+        result = self.execute_command(self.__get_command_by_name("startDataLogging"))
         self.is_log_streaming = streaming 
         return result
 
     def __stopDataLogging(self) -> ThreespaceCmdResult[None]:
-        result = self.execute_command(self.__get_command("stopDataLogging"))
+        result = self.execute_command(self.__get_command_by_name("stopDataLogging"))
         self.is_log_streaming = False
         return result
 
@@ -2627,3 +2633,125 @@ class ThreespaceSensor:
     def readGpsLed(self) -> int:
         return self.read_settings("gps_led")["gps_led"]
 
+    #----------------------------GATHERING SETTING METADATA FROM SENSOR TYPE----------------------------
+
+    def __load_setting_descriptions(self):
+        if self.__setting_descriptions is not None: return
+        self.__setting_descriptions = {}
+
+        #Add all default keys to the dictionary that exist
+        available_settings = self.readAllSettings()
+        for key in available_settings.keys():
+            if key in THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS:
+                self.__setting_descriptions[key] = THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS[key]
+        
+        #Add custom descriptors
+
+        streamable_commands = available_settings["streamable_commands"]
+        def validate_streamable(value: str):
+            kvps = value.split(',')
+            for command in kvps:
+                value = None
+                if ':' in command:
+                    command, value = command.split(':')
+                
+                #Parse command number and ensure it is valid
+                try:
+                    command = int(command)
+                except ValueError:
+                    return False
+                
+                if command not in streamable_commands:
+                    return False
+
+                #Check value is acceptable
+                if value is not None:
+                    command = self.commands[command]
+                    if len(command.in_format.internal_format) != 1:
+                        return False
+                    try:
+                        value = int(value)
+                    except ValueError:
+                        return False
+            return True
+        
+        for key in ("stream_slots", "log_slots"):
+            self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                key,
+                ThreespaceSettingParamDescriptor(
+                    validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
+                    custom_validator=validate_streamable,
+                ),
+            )
+
+        #Range Descriptors
+        type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags}
+        type_unit_mapping = {"accel": { "unit": "g-force", "suffix": "g"}, "gyro": { "unit": "degrees per second", "suffix": "dps"}, "mag": { "unit": "gauss", "suffix": "G"}}
+        for component_type in type_id_mapping:
+            valid_id = type_id_mapping[component_type]
+            for id in valid_id:
+                valid_ranges = available_settings[f"valid_ranges_{component_type}{id}"].split(',')
+                valid_ranges = [int(r) for r in valid_ranges]
+                key = f"range_{component_type}{id}"
+                self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                    key,
+                    ThreespaceSettingParamDescriptor(
+                        validation_mode=ThreespaceSettingParamValidationMode.ENUM,
+                        valid_values=valid_ranges,
+                        **type_unit_mapping[component_type]
+                    ),
+                )
+        
+        #ODR Descriptors
+        type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags, "baro": self.valid_baros}
+        for component_type, ids in type_id_mapping.items():
+            for id in ids:
+                valid_odrs = specs.COMPONENT_ODRS[component_type][id]
+                key = f"odr_{component_type}{id}"
+                self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                    key,
+                    ThreespaceSettingParamDescriptor(
+                        unit="hertz",
+                        suffix="Hz",
+                        validation_mode=ThreespaceSettingParamValidationMode.RANGE,
+                        min_value=min(valid_odrs),
+                        max_value=max(valid_odrs),
+                    ),
+                )
+
+        #Primary components
+        def validate_primary_components(value: str, valid: list[int]):
+            #Ensure value is a comma separated list of unique IDs in the valid list
+            used = set()
+            components = value.split(',')
+            try:
+                for i in range(len(components)):
+                    components[i] = int(components[i])
+                    if components[i] not in valid or components[i] in used:
+                        return False
+                    used.add(components[i])
+            except ValueError:
+                return False
+            return True
+
+        type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags}
+        for component_type, ids in type_id_mapping.items():
+            key = f"primary_{component_type}"
+            self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                key,
+                ThreespaceSettingParamDescriptor(
+                    validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
+                    valid_values=ids,
+                    custom_validator=lambda value: validate_primary_components(value, ids)
+                ),
+            )
+
+        #Add default descriptors for any keys that still do not have a description
+        for key in available_settings.keys():
+            if key not in self.__setting_descriptions:
+                self.__setting_descriptions[key] = ThreespaceSettingDescriptor(key)
+
+    def get_all_setting_descriptions(self) -> dict[str, ThreespaceSettingDescriptor]:
+        if self.__setting_descriptions is None:
+            self.__load_setting_descriptions()
+        return self.__setting_descriptions

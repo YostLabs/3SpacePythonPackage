@@ -1,6 +1,9 @@
+from enum import Enum
 import re
+from typing import Any, Callable
+from dataclasses import dataclass, field
 from yostlabs.communication.base import ThreespaceInputStream, ThreespaceOutputStream
-from yostlabs.tss3.commands import ThreespaceFormat
+from yostlabs.tss3.commands import ThreespaceFormat, yost_format_conversion_dict
 
 class ThreespaceSetting:
     
@@ -244,7 +247,6 @@ THREESPACE_SETTINGS_LIST: list[ThreespaceSetting] = [
     ThreespaceReadWriteSetting("cat", "S"),
     ThreespaceReadWriteSetting("running_avg", "f"),
 ]
-
 THREESPACE_SETTINGS: dict[str, ThreespaceSetting] = { setting.name : setting for setting in THREESPACE_SETTINGS_LIST }
 
 # Pre-compiled patterns for settings whose names contain %d, allowing numeric lookups.
@@ -277,3 +279,322 @@ def threespace_settings_string_to_dict(setting_string: str):
         
         d[key] = value
     return d
+
+#------------------------Additional setting information for display and validation purposes, not used for parsing or communication------------------------
+
+class ThreespaceSettingParamValidationMode(Enum):
+    NONE = "none"
+    ENUM = "enum"
+    RANGE = "range"
+    BOOL = "bool" #Special version of enum that is more descriptive of the intent
+    CUSTOM = "custom"
+
+@dataclass
+class ThreespaceSettingParamDescriptor:
+    format_specifier: str = None
+    
+    #EG: Hex, Decimal, Binary, ... This is just a hint for display purposes and doesn't affect parsing or validation.
+    preferred_display_mode: str = None
+    unit: str = ""
+    suffix: str = "" #EG: "m/s^2", "degrees", "RPM", ... This is just for display purposes and doesn't affect parsing or validation.
+
+    #EG: "range", "enum", "custom", "None"
+    validation_mode: ThreespaceSettingParamValidationMode = ThreespaceSettingParamValidationMode.NONE
+
+    #Used for enum, mapping of value name to sensor value
+    #Useful for mode fields, and for actual fields where the value is the key, easy enough to map
+    valid_values: dict[str, Any] = None
+
+    #Used for range
+    min_value: float = None #Inclusive
+    max_value: float = None #Inclusive
+
+    custom_validator: Callable = None
+
+    def __post_init__(self):
+        if self.validation_mode == ThreespaceSettingParamValidationMode.ENUM:
+            if self.valid_values is None:
+                raise ValueError("Enum validation mode requires valid_values to be set.")
+            elif isinstance(self.valid_values, (list, tuple)):
+                self.valid_values = {str(i): i for i in self.valid_values}
+        elif self.validation_mode == ThreespaceSettingParamValidationMode.RANGE and (self.min_value is None or self.max_value is None):
+            raise ValueError("Range validation mode requires min_value and max_value to be set.")
+        elif self.validation_mode == ThreespaceSettingParamValidationMode.CUSTOM and self.custom_validator is None:
+            raise ValueError("Custom validation mode requires custom_validator to be set.")
+
+    def valid_value_keys(self, suffix=True) -> list[str]:
+        if self.validation_mode != ThreespaceSettingParamValidationMode.ENUM:
+            raise ValueError("valid_value_keys is only applicable for ENUM validation mode.")
+        return [self.value_to_string(value, suffix) for value in self.valid_values.values()]
+
+    def string_to_value(self, s: str) -> Any:
+        if self.validation_mode == ThreespaceSettingParamValidationMode.ENUM:
+            if self.suffix:
+                s = s.removesuffix(self.suffix)
+            if s not in self.valid_values:
+                raise ValueError(f"Invalid value string '{s}' for ENUM setting. Valid options are: {', '.join(self.valid_value_keys())}")
+            return self.valid_values[s]
+        else:
+            #No special parsing for other modes, just return the string (or convert to number if preferred display mode is hex)
+            if self.format_specifier in ['b', 'B', 'u', 'U', 'i', 'I', 'l', 'L']:
+                 #For numeric types, attempt to parse the string as a number, supporting hex if preferred display mode is hex
+                try:
+                    if self.preferred_display_mode == "hex" and s.startswith("0x"):
+                        return int(s, 16)
+                    return int(s)
+                except ValueError:
+                    raise ValueError(f"Invalid value string '{s}' for numeric setting. Expected an integer.")
+            elif self.format_specifier in ['f', 'd']:
+                try:
+                    return float(s)
+                except ValueError:
+                    raise ValueError(f"Invalid value string '{s}' for numeric setting. Expected a float.")
+            elif self.format_specifier in ['s', 'S']:
+                return s
+            else:
+                raise ValueError(f"Unsupported format specifier '{self.format_specifier}' for string_to_value parsing.")
+
+
+    def value_to_string(self, value: Any, suffix=True) -> str:
+        if self.validation_mode == ThreespaceSettingParamValidationMode.ENUM:
+            reverse_map = {v: k for k, v in self.valid_values.items()}
+            return reverse_map.get(value, str(value)) + (self.suffix if suffix else "")
+        elif self.validation_mode == ThreespaceSettingParamValidationMode.BOOL:
+            return ("True" if value else "False") + (self.suffix if suffix else "")
+        else:
+            if self.preferred_display_mode == "hex":
+                return f"0x{value:X}{self.suffix if suffix else ''}"
+            if self.format_specifier in ['f', 'd']:
+                return f"{value:.6g}{self.suffix if suffix else ''}"
+            return f"{value}{self.suffix if suffix else ''}"
+    
+    def validate(self, value: Any) -> bool:
+        if self.validation_mode == ThreespaceSettingParamValidationMode.ENUM:
+            return value in self.valid_values
+        elif self.validation_mode == ThreespaceSettingParamValidationMode.RANGE:
+            return self.min_value <= value <= self.max_value
+        elif self.validation_mode == ThreespaceSettingParamValidationMode.CUSTOM:
+            if self.custom_validator is not None:
+                return self.custom_validator(value)
+            return False #If custom validation mode is selected but no validator is provided, consider all values invalid.
+        elif self.validation_mode == ThreespaceSettingParamValidationMode.BOOL:
+            #Bools on the sensor are treated as U8 0 or 1, so only those values are valid.
+            return value in [0, 1]
+        else:
+            #No validation criteria, consider valid by default
+            return True
+    
+    @staticmethod
+    def create_default_from_type(t: str):
+        if t not in yost_format_conversion_dict:
+            raise ValueError(f"Unsupported type character for default validation: {t}")
+        
+        type_to_range = {
+            'b' : (0, 0xFF),
+            'B' : (0, 0xFFFF),
+            'u' : (0, 0xFFFFFFFF),
+            'U' : (0, 0xFFFFFFFFFFFFFFFF),
+            'i' : (-0x80, 0x7F),
+            'I' : (-0x8000, 0x7FFF),
+            'l' : (-0x80000000, 0x7FFFFFFF),
+            'L' : (-0x8000000000000000, 0x7FFFFFFFFFFFFFFF),
+        }
+        if t in type_to_range:
+            return ThreespaceSettingParamDescriptor(
+                format_specifier=t,
+                validation_mode=ThreespaceSettingParamValidationMode.RANGE, 
+                min_value=type_to_range[t][0], 
+                max_value=type_to_range[t][1])
+        return ThreespaceSettingParamDescriptor()
+
+@dataclass
+class ThreespaceSettingDescriptor:
+    key: str
+
+    setting: ThreespaceSetting = None
+    param_descriptors: list[ThreespaceSettingParamDescriptor] = field(default_factory=list)
+
+    def __init__(self, key: str, descriptor: ThreespaceSettingParamDescriptor = None, descriptors: list[ThreespaceSettingParamDescriptor] = None):
+        self.key = key
+        self.setting = threespace_setting_get(key)
+
+        self.format_source = None
+        if self.setting.out_format is not None:
+            self.format_source = self.setting.out_format
+        elif self.setting.in_format is not None:
+            self.format_source = self.setting.in_format
+
+        if descriptors is not None:
+            self.param_descriptors = descriptors
+        elif descriptor is not None:
+            if self.format_source is None:
+                raise ValueError("Cannot use single descriptor for a setting with no format string.")
+            self.param_descriptors = [descriptor] * len(self.format_string)
+        else:
+            #Default, validation will be based on setting types and no preferred display mode or suffix
+            self.param_descriptors = []
+            for t in self.format_string:
+                self.param_descriptors.append(ThreespaceSettingParamDescriptor.create_default_from_type(t))
+        
+        for i, t in enumerate(self.format_string):
+            self.param_descriptors[i].format_specifier = t
+    
+    @property
+    def format_string(self):
+        return self.setting.out_format.internal_format
+
+    
+
+def _validate_axis_order(value: str) -> bool:
+    """Validate an axis order string.
+    
+    The string must contain each of 'x', 'y', and 'z' exactly once, in any order,
+    with an optional single '-' prefix on one or more axes.
+    Valid examples: "xyz", "zyx", "-xyz", "x-yz", "-x-y-z"
+    Invalid examples: "--xyz", "xy", "xxz", "x-yz-"
+    """
+    value = value.lower() #Case doesn't matter
+    letters = value.replace('-', '')
+    if sorted(letters) != ['x', 'y', 'z']:
+        return False
+    if '--' in value or value.endswith('-'):
+        return False
+    return True
+
+def _validate_axis_order_c(value: str) -> bool:
+    value = value.lower() #Case doesn't matter
+    if len(value) != 3:
+        return False
+    return ('e' in value or 'w' in value) and ('n' in value or 's' in value) and ('u' in value or 'd' in value)
+
+def _validate_comma_separated_allowed(value: str, allowed_values: set[str]) -> bool:
+    items = [item.strip() for item in value.split(',')]
+    return all(item in allowed_values for item in items)
+
+#Just to make this list less verbose, since these names are very long
+TSD = ThreespaceSettingDescriptor
+TSPD = ThreespaceSettingParamDescriptor
+TSPDV = ThreespaceSettingParamValidationMode
+#Anything NOT in this list either is default or specific to the sensor (and so is populated by the sensor object)
+THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
+    TSD("serial_number", TSPD(preferred_display_mode="hex")),
+    TSD("led_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Dynamic": 0, "Static": 1})),
+    TSD("led_rgb", TSPD(validation_mode=TSPDV.RANGE, min_value=0.0, max_value=1.0)),
+    TSD("header_status", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("header_timestamp", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("header_echo", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("header_checksum", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("header_serial", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("header_length", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("cpu_speed", TSPD(unit="megahertz", suffix="MHz", validation_mode=TSPDV.ENUM, valid_values=[48, 96, 144, 192])),
+    TSD("pm_idle_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("stream_interval", TSPD(unit="microseconds", suffix="us", validation_mode=TSPDV.RANGE, min_value=500, max_value=0xFFFFFFFFFFFFFFFF)),
+    TSD("stream_hz", TSPD(unit="hertz", suffix="Hz", validation_mode=TSPDV.RANGE, min_value=0, max_value=2000.0)),
+    TSD("stream_duration", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
+    TSD("stream_delay", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
+    TSD("stream_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Duration": 0, "Count": 1})),
+    TSD("stream_count", TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=0xFFFFFFFFFFFFFFFF)),
+    TSD("debug_level", TSPD(preferred_display_mode="hex")),
+    TSD("debug_module", TSPD(preferred_display_mode="hex")),
+    TSD("debug_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Buffered": 0, "Immediate": 1})),
+    TSD("debug_led", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("debug_fault", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("debug_wdt", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("axis_order", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=_validate_axis_order)),
+    TSD("axis_order_c", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=_validate_axis_order_c)),
+    TSD("axis_offset_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("euler_order", TSPD(validation_mode=TSPDV.ENUM, 
+        valid_values=[
+            "XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX", "XYX", "XZX", "YXY", "YZY", "ZXZ", "ZYZ",
+            "XYZi", "XZYi", "YXZi", "YZXi", "ZXYi", "ZYXi", "XYXi", "XZXi", "YXYi", "YZYi", "ZXZi", "ZYZi",
+            "XYZe", "XZYe", "YXZe", "YZXe", "ZXYe", "ZYXe", "XYXe", "XZXe", "YXYe", "YZYe", "ZXZe", "ZYZe"])),
+    TSD("tare_auto_base", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("running_avg_orient", TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=1)),
+    TSD("filter_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"IMU": 0, "QGRAD3": 1, "EKF": 2})),
+    TSD("filter_mref_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Manual": 0, "Semi-Auto": 1, "Auto": 2})), #"GPS": 3 (not implemented yet)
+    TSD("filter_mref_dip", TSPD(unit="degrees", suffix="degrees", validation_mode=TSPDV.RANGE, min_value=-90, max_value=90)),
+    TSD("filter_conf_thresholds", TSPD(validation_mode=TSPDV.RANGE, min_value=0.0, max_value=1000.0)),
+    TSD("primary_sensor_rfade", TSPD(validation_mode=TSPDV.RANGE, min_value=0.0, max_value=1.0)),
+    TSD("mag_bias_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Manual": 0, "Auto Single": 1, "Auto Continuous": 2})),
+    TSD("accel_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("gyro_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("mag_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    #PTS Settings Here
+    #PTS Settings End
+    TSD("pin_mode0", TSPD(validation_mode=TSPDV.ENUM, valid_values={"UART": 1, "Orient Level": 4, "Orient Pulse": 5, "Button": 7, "TransactionIRQ": 8})),
+    TSD("pin_mode1", TSPD(validation_mode=TSPDV.ENUM, valid_values={"SPI": 2, "I2C": 3, "Orient Level": 4, "Orient Pulse": 5, "Button": 7})),
+    TSD("uart_baudrate", TSPD(validation_mode=TSPDV.ENUM, valid_values=[4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 2000000, 4000000])),
+    TSD("i2c_addr", TSPD(preferred_display_mode="hex")),
+    TSD("power_hold_time", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=-1, max_value=60)), #Technically -1 is the only value less than 0 that is valid, but don't have a great way to express that right now
+    TSD("power_hold_state", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("power_initial_hold_state", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("fs_msc_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("fs_msc_auto", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("log_interval", TSPD(unit="microseconds", suffix="us", validation_mode=TSPDV.RANGE, min_value=500, max_value=0xFFFFFFFFFFFFFFFF)),
+    TSD("log_hz", TSPD(unit="hertz", suffix="Hz", validation_mode=TSPDV.RANGE, min_value=0.000001, max_value=2000.0)),
+    TSD("log_start_event", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=lambda s: _validate_comma_separated_allowed(s, {"0", "1", "2", "3", "4"}))),
+    TSD("log_start_motion_threshold", TSPD(unit="g-force", suffix="g", validation_mode=TSPDV.RANGE, min_value=0, max_value=1000.0)),
+    TSD("log_stop_event", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=lambda s: _validate_comma_separated_allowed(s, {"0", "1", "2", "3", "4", "5"}))),
+    TSD("log_stop_motion_threshold", TSPD(unit="g-force", suffix="g", validation_mode=TSPDV.RANGE, min_value=0, max_value=1000.0)),
+    TSD("log_stop_motion_delay", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
+    TSD("log_stop_count", TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=0xFFFFFFFFFFFFFFFF)),
+    TSD("log_stop_duration", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
+    TSD("log_stop_period_count", TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=0xFFFFFFFF)),
+    TSD("log_style", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Continuous": 0, "Periodic": 1})),
+    TSD("log_periodic_capture_time", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
+    TSD("log_periodic_rest_time", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
+    TSD("log_file_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Append": 0, "New": 1})),
+    TSD("log_data_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Ascii": 1, "Binary": 2})),
+    TSD("log_output_settings", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("log_header_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("log_folder_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Session": 0, "Date Time": 1})),
+    TSD("log_immediate_output", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("log_immediate_output_header_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("log_immediate_output_header_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Match": 0, "Ascii": 1, "Binary": 2})),
+    TSD("rtc_year", TSPD(validation_mode=TSPDV.RANGE, min_value=2000, max_value=3000)),
+    TSD("rtc_month", TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=12)),
+    TSD("rtc_day", TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=31)),
+    TSD("rtc_hour", TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=23)),
+    TSD("rtc_minute", TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59)),
+    TSD("rtc_second", TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59)),
+    TSD("rtc_datetime", descriptors=[
+        TSPD(validation_mode=TSPDV.RANGE, min_value=2000, max_value=3000), #Year
+        TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=12), #Month
+        TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=31), #Day
+        TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=23), #Hour
+        TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59), #Minute
+        TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59), #Second
+    ]),
+    TSD("bat_cold_threshold", descriptors=[
+        TSPD(unit="celsius", suffix="C", validation_mode=TSPDV.RANGE, min_value=-273.15, max_value=100), 
+        TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=1)]),
+    TSD("bat_warm_threshold", descriptors=[
+        TSPD(unit="celsius", suffix="C", validation_mode=TSPDV.RANGE, min_value=-273.15, max_value=100),
+        TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=1)]),
+    TSD("bat_hot_threshold", descriptors=[
+        TSPD(unit="celsius", suffix="C", validation_mode=TSPDV.RANGE, min_value=-273.15, max_value=100),
+        TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=1)]),
+    TSD("bat_offset_threshold", TSPD(unit="celsius", suffix="C", validation_mode=TSPDV.RANGE, min_value=0, max_value=100)),
+    TSD("gps_standby", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("gps_led", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("sd_msc_enabled", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("sd_msc_auto", TSPD(validation_mode=TSPDV.BOOL))
+]
+
+THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS: dict[str, ThreespaceSettingDescriptor] = { descriptor.key : descriptor for descriptor in THREESPACE_SETTINGS_DEFAULT_DESC_LIST }
+
+#NOTE: FOR NOW, NOT INCLUDING PTS SETTINGS IN DESCRIPTORS (low priority)
+#Notes:
+#Make sure to ensure log_start_event works
+#Calib Mat and Calib Bias are default
+
+#Require custom implementations from the sensor only:
+#stream_slots
+#log_slots
+#Primary accel/gyro/mag will be specific since the components are sensor specific
+#range is sensor specific
+#odr is sensor specific (Remember baro for ODR)
+
+#I2C addr needs validated when set since they may be unique per sensor (And are not pollable)
+
+
