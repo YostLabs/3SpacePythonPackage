@@ -370,7 +370,7 @@ class ThreespaceSettingParamDescriptor:
     
     def validate(self, value: Any) -> bool:
         if self.validation_mode == ThreespaceSettingParamValidationMode.ENUM:
-            return value in self.valid_values
+            return value in self.valid_values.values()
         elif self.validation_mode == ThreespaceSettingParamValidationMode.RANGE:
             return self.min_value <= value <= self.max_value
         elif self.validation_mode == ThreespaceSettingParamValidationMode.CUSTOM:
