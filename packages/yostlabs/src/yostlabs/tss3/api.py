@@ -2647,7 +2647,8 @@ class ThreespaceSensor:
         
         #Add custom descriptors
 
-        streamable_commands = available_settings["streamable_commands"]
+        streamable_commands = available_settings["streamable_commands"].split(',')
+        streamable_commands = [int(c) for c in streamable_commands]
         def validate_streamable(value: str):
             kvps = value.split(',')
             for command in kvps:
@@ -2661,7 +2662,7 @@ class ThreespaceSensor:
                 except ValueError:
                     return False
                 
-                if command not in streamable_commands:
+                if command not in streamable_commands and command != 255: #255 is a special value for "no command"
                     return False
 
                 #Check value is acceptable
@@ -2742,7 +2743,7 @@ class ThreespaceSensor:
                 ThreespaceSettingParamDescriptor(
                     validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
                     valid_values=ids,
-                    custom_validator=lambda value: validate_primary_components(value, ids)
+                    custom_validator=lambda value, ids=ids: validate_primary_components(value, ids)
                 ),
             )
 
