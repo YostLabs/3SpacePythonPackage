@@ -375,8 +375,8 @@ class ThreespaceSensor:
         keystr = ';'.join(keys)
         if len(keystr) > THREESPACE_MAX_CMD_LEN-2: #-2 for room for null terminator and checksum if using binary format
             raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystr)))
-        
         checksum = sum(ord(v) for v in keystr) % 256
+        
         #StartByte, Message+Null Terminator, Checksum
         message = struct.pack(f"<B{len(keystr)}sBB", THREESPACE_BINARY_READ_SETTINGS_START_BYTE_HEADER, keystr.encode(), 0, checksum)
         self.com.write(message)
@@ -1082,12 +1082,12 @@ class ThreespaceSensor:
         #due to streaming faster then the program runs
         num_checks = 0
         data_processed = False
-        while num_checks < max_checks:
+        start_time = time.perf_counter()
+        while num_checks < max_checks and time.perf_counter() - start_time < timeout:
             if self.com.length < self.header_info.size:
                 return data_processed
             
             #Get header
-
             header = self.com.peek(self.header_info.size)
 
             #Get the header and send it to the internal update
