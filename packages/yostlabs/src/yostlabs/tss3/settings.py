@@ -289,6 +289,24 @@ class ThreespaceSettingParamValidationMode(Enum):
     BOOL = "bool" #Special version of enum that is more descriptive of the intent
     CUSTOM = "custom"
 
+_FORMAT_TO_TYPE = {
+    'f': float,
+    'd' : float,
+
+    'b' : int,
+    'B' : int,
+    "u" : int,
+    "U" : int,
+
+    "i" : int,
+    "I" : int,
+    "l" : int,
+    "L" : int,
+
+    "s" : str,
+    "S" : str
+}
+
 @dataclass
 class ThreespaceSettingParamDescriptor:
     format_specifier: str = None
@@ -336,7 +354,7 @@ class ThreespaceSettingParamDescriptor:
             return self.valid_values[s]
         else:
             #No special parsing for other modes, just return the string (or convert to number if preferred display mode is hex)
-            if self.format_specifier in ['b', 'B', 'u', 'U', 'i', 'I', 'l', 'L']:
+            if self.type is int:
                  #For numeric types, attempt to parse the string as a number, supporting hex if preferred display mode is hex
                 try:
                     if self.preferred_display_mode == "hex" and s.startswith("0x"):
@@ -344,12 +362,12 @@ class ThreespaceSettingParamDescriptor:
                     return int(s)
                 except ValueError:
                     raise ValueError(f"Invalid value string '{s}' for numeric setting. Expected an integer.")
-            elif self.format_specifier in ['f', 'd']:
+            elif self.type is float:
                 try:
                     return float(s)
                 except ValueError:
                     raise ValueError(f"Invalid value string '{s}' for numeric setting. Expected a float.")
-            elif self.format_specifier in ['s', 'S']:
+            elif self.type is str:
                 return s
             else:
                 raise ValueError(f"Unsupported format specifier '{self.format_specifier}' for string_to_value parsing.")
@@ -364,7 +382,7 @@ class ThreespaceSettingParamDescriptor:
         else:
             if self.preferred_display_mode == "hex":
                 return f"0x{value:X}{self.suffix if suffix else ''}"
-            if self.format_specifier in ['f', 'd']:
+            if self.type is float:
                 return f"{value:.6g}{self.suffix if suffix else ''}"
             return f"{value}{self.suffix if suffix else ''}"
     
@@ -384,6 +402,10 @@ class ThreespaceSettingParamDescriptor:
             #No validation criteria, consider valid by default
             return True
     
+    @property
+    def type(self):
+        return _FORMAT_TO_TYPE.get(self.format_specifier, None)
+
     @staticmethod
     def create_default_from_type(t: str):
         if t not in yost_format_conversion_dict:
