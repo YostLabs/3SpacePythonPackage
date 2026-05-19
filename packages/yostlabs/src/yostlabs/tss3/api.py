@@ -2738,11 +2738,12 @@ class ThreespaceSensor:
         type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags}
         for component_type, ids in type_id_mapping.items():
             key = f"primary_{component_type}"
+            id_map = { f"{component_type}{id}": id for id in ids }
             self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
                 key,
                 ThreespaceSettingParamDescriptor(
                     validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
-                    valid_values=ids,
+                    valid_values=id_map,
                     custom_validator=lambda value, ids=ids: validate_primary_components(value, ids)
                 ),
             )

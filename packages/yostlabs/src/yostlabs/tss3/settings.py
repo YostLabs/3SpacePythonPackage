@@ -333,12 +333,13 @@ class ThreespaceSettingParamDescriptor:
         if self.validation_mode == ThreespaceSettingParamValidationMode.ENUM:
             if self.valid_values is None:
                 raise ValueError("Enum validation mode requires valid_values to be set.")
-            elif isinstance(self.valid_values, (list, tuple)):
-                self.valid_values = {str(i): i for i in self.valid_values}
         elif self.validation_mode == ThreespaceSettingParamValidationMode.RANGE and (self.min_value is None or self.max_value is None):
             raise ValueError("Range validation mode requires min_value and max_value to be set.")
         elif self.validation_mode == ThreespaceSettingParamValidationMode.CUSTOM and self.custom_validator is None:
             raise ValueError("Custom validation mode requires custom_validator to be set.")
+        
+        if self.valid_values is not None and isinstance(self.valid_values, (list, tuple)):
+            self.valid_values = {str(i): i for i in self.valid_values}
 
     def valid_value_keys(self, suffix=True) -> list[str]:
         if self.validation_mode != ThreespaceSettingParamValidationMode.ENUM:
@@ -483,6 +484,26 @@ def _validate_axis_order(value: str) -> bool:
         return False
     return True
 
+def _validate_euler_order(value: str) -> bool:
+    """Validate an Euler order string.
+    
+    Must be exactly 3 characters from {X, Y, Z} (case insensitive), with an optional
+    trailing 'i' (intrinsic) or 'e' (extrinsic) suffix. The middle character must differ
+    from both adjacent characters. First and last may be the same (e.g. XYX) or different
+    (e.g. XYZ), but sequences where the middle equals a neighbor (e.g. XXY, XYY) are invalid.
+    Valid examples: "XYZ", "ZYX", "XYX", "zyz", "XYZi", "ZYXe"
+    Invalid examples: "XXY", "XYY", "XY", "XYZI", "XYZii"
+    """
+    v = value.lower()
+    if v.endswith('i') or v.endswith('e'):
+        v = v[:-1]
+    if len(v) != 3:
+        return False
+    if not all(c in 'xyz' for c in v):
+        return False
+    # Middle axis must differ from both neighbors
+    return v[1] != v[0] and v[1] != v[2]
+
 def _validate_axis_order_c(value: str) -> bool:
     value = value.lower() #Case doesn't matter
     if len(value) != 3:
@@ -525,11 +546,7 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
     TSD("axis_order", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=_validate_axis_order)),
     TSD("axis_order_c", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=_validate_axis_order_c)),
     TSD("axis_offset_enabled", TSPD(validation_mode=TSPDV.BOOL)),
-    TSD("euler_order", TSPD(validation_mode=TSPDV.ENUM, 
-        valid_values=[
-            "XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX", "XYX", "XZX", "YXY", "YZY", "ZXZ", "ZYZ",
-            "XYZi", "XZYi", "YXZi", "YZXi", "ZXYi", "ZYXi", "XYXi", "XZXi", "YXYi", "YZYi", "ZXZi", "ZYZi",
-            "XYZe", "XZYe", "YXZe", "YZXe", "ZXYe", "ZYXe", "XYXe", "XZXe", "YXYe", "YZYe", "ZXZe", "ZYZe"])),
+    TSD("euler_order", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=_validate_euler_order)),
     TSD("tare_auto_base", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("running_avg_orient", TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=1)),
     TSD("filter_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"IMU": 0, "QGRAD3": 1, "EKF": 2})),
@@ -554,9 +571,9 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
     TSD("fs_msc_auto", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("log_interval", TSPD(unit="microseconds", suffix="us", validation_mode=TSPDV.RANGE, min_value=500, max_value=0xFFFFFFFFFFFFFFFF)),
     TSD("log_hz", TSPD(unit="hertz", suffix="Hz", validation_mode=TSPDV.RANGE, min_value=0.000001, max_value=2000.0)),
-    TSD("log_start_event", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=lambda s: _validate_comma_separated_allowed(s, {"0", "1", "2", "3", "4"}))),
+    TSD("log_start_event", TSPD(validation_mode=TSPDV.CUSTOM, valid_values={ "Button": 0, "Accel Threshold": 1, "Command": 2, "On GPS Fix": 3, "On Power": 4 }, custom_validator=lambda s: _validate_comma_separated_allowed(s, {"0", "1", "2", "3", "4"}))),
     TSD("log_start_motion_threshold", TSPD(unit="g-force", suffix="g", validation_mode=TSPDV.RANGE, min_value=0, max_value=1000.0)),
-    TSD("log_stop_event", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=lambda s: _validate_comma_separated_allowed(s, {"0", "1", "2", "3", "4", "5"}))),
+    TSD("log_stop_event", TSPD(validation_mode=TSPDV.CUSTOM, valid_values={ "Button": 0, "Accel Threshold": 1, "Command": 2, "Duration": 3, "Capture Count": 4, "Period Count": 5 }, custom_validator=lambda s: _validate_comma_separated_allowed(s, {"0", "1", "2", "3", "4", "5"}))),
     TSD("log_stop_motion_threshold", TSPD(unit="g-force", suffix="g", validation_mode=TSPDV.RANGE, min_value=0, max_value=1000.0)),
     TSD("log_stop_motion_delay", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
     TSD("log_stop_count", TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=0xFFFFFFFFFFFFFFFF)),
