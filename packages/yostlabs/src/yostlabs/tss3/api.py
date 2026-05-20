@@ -2650,6 +2650,8 @@ class ThreespaceSensor:
         streamable_commands = available_settings["streamable_commands"].split(',')
         streamable_commands = [int(c) for c in streamable_commands]
         def validate_streamable(value: str):
+            if not isinstance(value, str):
+                return False
             kvps = value.split(',')
             for command in kvps:
                 value = None
