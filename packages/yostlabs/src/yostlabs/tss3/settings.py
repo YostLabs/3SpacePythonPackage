@@ -604,6 +604,7 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
         TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59), #Minute
         TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59), #Second
     ]),
+    TSD("bat_chg_rate", TSPD(unit="milliamps", suffix="mA", validation_mode=TSPDV.RANGE, min_value=0, max_value=2000)),
     TSD("bat_cold_threshold", descriptors=[
         TSPD(unit="celsius", suffix="C", validation_mode=TSPDV.RANGE, min_value=-273.15, max_value=100), 
         TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=1)]),
