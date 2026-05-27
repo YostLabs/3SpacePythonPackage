@@ -1083,7 +1083,8 @@ class ThreespaceSensor:
         num_checks = 0
         data_processed = False
         start_time = time.perf_counter()
-        while num_checks < max_checks and time.perf_counter() - start_time < timeout:
+        elapsed_time = 0
+        while num_checks < max_checks and elapsed_time < timeout:
             if self.com.length < self.header_info.size:
                 return data_processed
             
@@ -1099,6 +1100,7 @@ class ThreespaceSensor:
                 return data_processed
             
             num_checks += 1
+            elapsed_time = time.perf_counter() - start_time
         
         return data_processed
 
