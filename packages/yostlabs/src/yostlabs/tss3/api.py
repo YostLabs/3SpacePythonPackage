@@ -345,6 +345,8 @@ class ThreespaceSensor:
         Basically the sensor needs reinitialized
         """
         self.dirty_flags |= flags
+        if flags & (DIRTY_FLAGS_UNKNOWN_STATE | DIRTY_FLAGS_UNKNOWN_SETTINGS):
+            self.dirty_flags |= DIRTY_FLAGS_REQUIRED_HEADER_BITS
 
     def check_dirty(self, ignore_mask: int = 0):
         """
@@ -382,7 +384,8 @@ class ThreespaceSensor:
             self.dirty_flags = 0
             if not self.__cached_in_bootloader:
                 self.__reinit_firmware() #Settings changed but still in firmware, so just reinit firmware
-        elif dirty_flags & DIRTY_FLAGS_REQUIRED_HEADER_BITS:
+        
+        if dirty_flags & DIRTY_FLAGS_REQUIRED_HEADER_BITS:
             self.__ensure_required_header_settings()
 
 #-----------------------------------DEBUG COMMANDS---------------------------------------------------
