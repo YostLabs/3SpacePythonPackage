@@ -2,6 +2,7 @@ from yostlabs.communication.base import ThreespaceComClass
 from yostlabs.communication.serial import ThreespaceSerialComClass
 
 from yostlabs.tss3.consts import *
+import yostlabs.tss3.specs as specs
 from yostlabs.tss3.commands import *
 from yostlabs.tss3.settings import *
 from yostlabs.tss3.types import ThreespaceCmdResult, ThreespaceBootloaderInfo, \
@@ -40,6 +41,10 @@ THREESPACE_AWAIT_BOOTLOADER = 2
 THREESPACE_UPDATE_COMMAND_PARSED = 0
 THREESPACE_UPDATE_COMMAND_NOT_ENOUGH_DATA = 1
 THREESPACE_UPDATE_COMMAND_MISALIGNED = 2
+
+DIRTY_FLAGS_REQUIRED_HEADER_BITS = 1 #The header bits required for command operation may not be enabled.
+DIRTY_FLAGS_UNKNOWN_SETTINGS = 2 #Possible settings required for operation have been changed without being cached.
+DIRTY_FLAGS_UNKNOWN_STATE = 4 #The sensor's mode (bootloader/firmware/on/off) is unknown. 
 
 #Required for the API to work. The API will keep these enabled at all times.
 THREESPACE_REQUIRED_HEADER = THREESPACE_HEADER_ECHO_BIT | THREESPACE_HEADER_CHECKSUM_BIT | THREESPACE_HEADER_LENGTH_BIT
@@ -84,9 +89,11 @@ class ThreespaceSensor:
         
         self.debug_callback: Callable[[str, ThreespaceSensor],None] = self.__default_debug_callback
         self.misaligned = False
-        self.dirty_cache = False
+        self.dirty_flags = 0
         self.header_info = ThreespaceHeaderInfo()
         self.header_enabled = True 
+
+        self.__setting_descriptions: dict[str, ThreespaceSettingDescriptor] = None
 
         #All the different streaming options
         self.is_data_streaming = False
@@ -155,7 +162,7 @@ class ThreespaceSensor:
         Should only be called when not streaming and known in firmware.
         Called for powerup events when booting into firmware
         """
-        self.dirty_cache = False #No longer dirty cause initializing
+        self.dirty_flags = 0 #No longer dirty cause initializing
         
         #Only reinitialize settings if detected firmware version changed (Or on startup)
         version = self.readVersionFirmware()
@@ -164,6 +171,9 @@ class ThreespaceSensor:
             self.__initialize_commands()
     
         self.__reinit_firmware()
+
+        #Reset the setting descriptions so they will be reloaded with the new firmware's settings when requested
+        self.__setting_descriptions = None
         
         self.valid_mags = self.__str_list_to_int_list(self.readValidMags())
         self.valid_accels = self.__str_list_to_int_list(self.readValidAccels())
@@ -174,7 +184,7 @@ class ThreespaceSensor:
         """
         Called when settings may have changed but a full reboot did not occur
         """
-        self.dirty_cache = False #No longer dirty cause initializing
+        self.dirty_flags = 0 #No longer dirty cause initializing
         
         self.header_info = ThreespaceHeaderInfo()
         self.cmd_echo_byte_index = None
@@ -250,7 +260,7 @@ class ThreespaceSensor:
     def has_command(self, command: ThreespaceCommand):
         return self.commands[command.info.num] is not None 
 
-    def __get_command(self, command_name: str):
+    def __get_command_by_name(self, command_name: str):
         for command in self.commands:
             if command is None: continue
             if command.info.name == command_name:
@@ -290,14 +300,24 @@ class ThreespaceSensor:
             self.writeHeader(self.header_info.bitfield)
             return
         
-        if required_header != header:
-            self.log(f"Forcing header checksum, echo, and length enabled")
-            self.writeHeader(required_header)
-            return
+        if required_header != header and not (self.dirty_flags & DIRTY_FLAGS_REQUIRED_HEADER_BITS):
+            self.log("Header missing required bits for API command operation. "
+                     "The next command call will force enable header checksum, echo, and length")
+            self.set_cached_settings_dirty(DIRTY_FLAGS_REQUIRED_HEADER_BITS)
         
         #Current/New header is valid, so can cache it
         self.header_info.bitfield = header
-        self.cmd_echo_byte_index = self.header_info.get_start_byte(THREESPACE_HEADER_ECHO_BIT) #Needed for cmd validation while streaming
+
+    def __ensure_required_header_settings(self):
+        #No longer dirty since we are about to fix the issue
+        self.dirty_flags &= ~DIRTY_FLAGS_REQUIRED_HEADER_BITS
+        header = self.header_info.bitfield
+        required = header | THREESPACE_REQUIRED_HEADER
+        if header == required:
+            return
+        self.log("Enabling required header bits for API command operation.")
+        self.writeHeader(required)
+        self.header_info.bitfield = required
 
     def __cache_serial_number(self, serial_number: int):
         """
@@ -315,29 +335,58 @@ class ThreespaceSensor:
         self.immediate_debug = self.readDebugMode()
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
-    def set_cached_settings_dirty(self):
+    def set_cached_settings_dirty(self, 
+                                  flags: int = 
+                                  DIRTY_FLAGS_REQUIRED_HEADER_BITS | 
+                                  DIRTY_FLAGS_UNKNOWN_SETTINGS | 
+                                  DIRTY_FLAGS_UNKNOWN_STATE):
         """
         Could be streaming settings, header settings...
         Basically the sensor needs reinitialized
         """
-        self.dirty_cache = True
+        self.dirty_flags |= flags
+        if flags & (DIRTY_FLAGS_UNKNOWN_STATE | DIRTY_FLAGS_UNKNOWN_SETTINGS):
+            self.dirty_flags |= DIRTY_FLAGS_REQUIRED_HEADER_BITS
 
-    def check_dirty(self):
-        if not self.dirty_cache: return
-        if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
-            success = self.__attempt_rediscover_self()
-            if not success:
-                raise SensorConnectionError("Sensor connection lost")
+    def check_dirty(self, ignore_mask: int = 0):
+        """
+        Checks if any settings need cached/updated. If so, performs the operation.
+
+        Params
+        ------
+        ignore_mask: a bitfield that can be used to remove bits from the flags to avoid
+        updating. For example, settings may mask off DIRTY_FLAGS_REQUIRED_HEADER_BITS since
+        those aren't required for setting operations, and this would allow avoiding additional
+        setting modification. Similar situation with DIRTY_FLAGS_UNKNOWN_SETTINGS
+        """
+        dirty_flags = self.dirty_flags & ~ignore_mask
+        if not dirty_flags: return
+        #NOTE: Dirty states do not need to be mutually exclusive. This elif structure
+        #actually exists because they aren't mutually exclusive. Each state also includes the states
+        #below it, and so the elif is used to avoid additional processing and to allow the user to only
+        #set the most severe state and get correct operations.
+        if dirty_flags & DIRTY_FLAGS_UNKNOWN_STATE:
+            if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
+                success = self.__attempt_rediscover_self()
+                if not success:
+                    raise SensorConnectionError("Sensor connection lost")
+            
+            self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
+            was_in_bootloader = self.__cached_in_bootloader
+            self.__cached_in_bootloader = self.__check_bootloader_status()
+            
+            self.dirty_flags = 0
+            if was_in_bootloader and not self.__cached_in_bootloader: #Just Exited bootloader, need to fully reinit
+                self.__firmware_init()
+            elif not self.__cached_in_bootloader:   #Was already in firmware, so only need to partially reinit
+                self.__reinit_firmware()    #Partially init when just naturally dirty
+        elif dirty_flags & DIRTY_FLAGS_UNKNOWN_SETTINGS:
+            self.dirty_flags = 0
+            if not self.__cached_in_bootloader:
+                self.__reinit_firmware() #Settings changed but still in firmware, so just reinit firmware
         
-        self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
-        was_in_bootloader = self.__cached_in_bootloader
-        self.__cached_in_bootloader = self.__check_bootloader_status()
-        
-        if was_in_bootloader and not self.__cached_in_bootloader: #Just Exited bootloader, need to fully reinit
-            self.__firmware_init()
-        elif not self.__cached_in_bootloader:   #Was already in firmware, so only need to partially reinit
-            self.__reinit_firmware()    #Partially init when just naturally dirty
-        self.dirty_cache = False
+        if dirty_flags & DIRTY_FLAGS_REQUIRED_HEADER_BITS:
+            self.__ensure_required_header_settings()
 
 #-----------------------------------DEBUG COMMANDS---------------------------------------------------
     def __default_debug_callback(self, msg: str, sensor: "ThreespaceSensor"):
@@ -364,13 +413,13 @@ class ThreespaceSensor:
         The values will be returned in a dictionary with the setting keys as the keys and the parsed values as the values.
         The values will be parsed according to their data type, not just as strings.
         """
-        self.check_dirty()
+        self.check_dirty(ignore_mask=DIRTY_FLAGS_UNKNOWN_SETTINGS | DIRTY_FLAGS_REQUIRED_HEADER_BITS)
 
         keystr = ';'.join(keys)
         if len(keystr) > THREESPACE_MAX_CMD_LEN-2: #-2 for room for null terminator and checksum if using binary format
             raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystr)))
-        
         checksum = sum(ord(v) for v in keystr) % 256
+        
         #StartByte, Message+Null Terminator, Checksum
         message = struct.pack(f"<B{len(keystr)}sBB", THREESPACE_BINARY_READ_SETTINGS_START_BYTE_HEADER, keystr.encode(), 0, checksum)
         self.com.write(message)
@@ -481,7 +530,7 @@ class ThreespaceSensor:
     #Can't just do if "header" in string because log_header_enabled exists and doesn't actually require caching the header
     HEADER_KEYS = ["header", "header_status", "header_timestamp", "header_echo", "header_checksum", "header_serial", "header_length"]
     def write_settings(self, **kwargs):
-        self.check_dirty()
+        self.check_dirty(ignore_mask=DIRTY_FLAGS_UNKNOWN_SETTINGS | DIRTY_FLAGS_REQUIRED_HEADER_BITS)
 
         #Check to see if debug mode is being updated. This must be done before sending the command so that the API can properly
         #handle the response if debug mode is being turned on
@@ -543,10 +592,13 @@ class ThreespaceSensor:
         err, num_successes, checksum = self.com.read(3)
         if err:
             self.log(f"Err setting {cmd}: {err=} {num_successes=}")
-
-        if any(v in kwargs.keys() for v in ("default", "reboot")):
-            self.log("Settings that require reboot changed, marking cache as dirty")
-            self.set_cached_settings_dirty()
+        
+        if "default" in kwargs:
+            self.log("Marking all settings as dirty due to defaults being applied.")
+            self.set_cached_settings_dirty(DIRTY_FLAGS_UNKNOWN_SETTINGS)
+        if "reboot" in kwargs:
+            self.log("Sensor restarted, marking state as dirty.")
+            self.set_cached_settings_dirty(DIRTY_FLAGS_UNKNOWN_STATE)
 
         #Handle caching any settings that need to be cached when changed.
         if b"header" in cmd:
@@ -602,7 +654,7 @@ class ThreespaceSensor:
             return str(value)        
 
     def write_settings_ascii(self, param_string: str = None, **kwargs):
-        self.check_dirty()
+        self.check_dirty(ignore_mask=DIRTY_FLAGS_UNKNOWN_SETTINGS | DIRTY_FLAGS_REQUIRED_HEADER_BITS)
         #Build cmd string
         params = []
         if param_string is not None:
@@ -674,7 +726,7 @@ class ThreespaceSensor:
         *args : Any number of string keys
         format : "Mixed" (Dictionary if multiple settings requested, else just the response string) or "Dict" (Always a dictionary even if only one key)
         """
-        self.check_dirty()
+        self.check_dirty(ignore_mask=DIRTY_FLAGS_UNKNOWN_SETTINGS | DIRTY_FLAGS_REQUIRED_HEADER_BITS)
         #Build and send the cmd
         params = list(args)
         cmd = f"?{';'.join(params)}\n"
@@ -1076,12 +1128,13 @@ class ThreespaceSensor:
         #due to streaming faster then the program runs
         num_checks = 0
         data_processed = False
-        while num_checks < max_checks:
+        start_time = time.perf_counter()
+        elapsed_time = 0
+        while num_checks < max_checks and elapsed_time < timeout:
             if self.com.length < self.header_info.size:
                 return data_processed
             
             #Get header
-
             header = self.com.peek(self.header_info.size)
 
             #Get the header and send it to the internal update
@@ -1093,6 +1146,7 @@ class ThreespaceSensor:
                 return data_processed
             
             num_checks += 1
+            elapsed_time = time.perf_counter() - start_time
         
         return data_processed
 
@@ -1109,10 +1163,10 @@ class ThreespaceSensor:
         and leave the communication line in a clean state.
         """
         cached_header_enabled = self.header_enabled
-        cached_dirty = self.dirty_cache
+        cached_dirty = self.dirty_flags
 
         #Must set these to guarantee it doesn't try and parse a response from anything since don't know the state of header
-        self.dirty_cache = False
+        self.dirty_flags = 0
         self.header_enabled = False #Keep off for the attempt at stop streaming since if in an invalid state, won't be able to get response
 
         #NOTE that commands are accessed directly from the global table instead of commands registered to this sensor object
@@ -1133,19 +1187,19 @@ class ThreespaceSensor:
         
         #Restore
         self.header_enabled = cached_header_enabled
-        self.dirty_cache = cached_dirty
+        self.dirty_flags = cached_dirty
 
 #-------------------------------------FILE STREAMING----------------------------------------------
 
     def __fileStartStream(self) -> ThreespaceCmdResult[int]:
-        result = self.execute_command(self.__get_command("fileStartStream"))
+        result = self.execute_command(self.__get_command_by_name("fileStartStream"))
         self.file_stream_length = result.data
         if self.file_stream_length > 0:
             self.is_file_streaming = True
         return result
 
     def __fileStopStream(self) -> ThreespaceCmdResult[None]:
-        result = self.execute_command(self.__get_command("fileStopStream"))
+        result = self.execute_command(self.__get_command_by_name("fileStopStream"))
         self.is_file_streaming = False
         return result
 
@@ -1195,12 +1249,12 @@ class ThreespaceSensor:
             self.write_settings(log_immediate_output_header_enabled=1,
                                 log_immediate_output_header_mode=THREESPACE_OUTPUT_MODE_BINARY) #Must have header enabled in the log messages for this to work and must use binary for the header
         
-        result = self.execute_command(self.__get_command("startDataLogging"))
+        result = self.execute_command(self.__get_command_by_name("startDataLogging"))
         self.is_log_streaming = streaming 
         return result
 
     def __stopDataLogging(self) -> ThreespaceCmdResult[None]:
-        result = self.execute_command(self.__get_command("stopDataLogging"))
+        result = self.execute_command(self.__get_command_by_name("stopDataLogging"))
         self.is_log_streaming = False
         return result
 
@@ -1513,7 +1567,22 @@ class ThreespaceSensor:
     def getGpsHdop(self) -> ThreespaceCmdResult[float]: ...
     def getGpsSatellites(self) -> ThreespaceCmdResult[int]: ...
 
-    def commitSettings(self) -> ThreespaceCmdResult[None]: ...
+    def commitSettings(self) -> ThreespaceCmdResult[None]:
+        """
+        Deprecated: Use commitSettingsSafe instead.
+
+        This function is unsafe because it calls the command to commit settings, which
+        causes the API to force enable required header settings to get the response before
+        the commit is called. This means that headers that do NOT include checksum, length, or echo
+        can not be commited via this setting. The new commitSettingsSafe uses the settings protocol commit 
+        rather than the command protocol commit which does not have this problem. 
+        
+        This does mean the return types are different, as this command returns a ThreespaceCmdResult, while the 
+        new commitSettingsSafe returns an int error code. This allows you to always validate whether committing 
+        succeeded using the new method, unlike this command which can only do that via enabling the status header field.
+        """
+        warnings.warn("commitSettings is deprecated, use commitSettingsSafe instead.", DeprecationWarning, stacklevel=2)
+
     def softwareReset(self): ...
     def enterBootloader(self): ...
 
@@ -1521,6 +1590,9 @@ class ThreespaceSensor:
     def getButtonState(self) -> ThreespaceCmdResult[int]: ...
 
 #---------------------------------------SETTING PROTOTYPES----------------------------------------------
+    def commitSettingsSafe(self) -> int:
+        return self.write_settings(commit=None)[0]
+    
     def restoreDefaultSettings(self) -> int:
         return self.write_settings(default=None)[0]
 
@@ -2627,3 +2699,129 @@ class ThreespaceSensor:
     def readGpsLed(self) -> int:
         return self.read_settings("gps_led")["gps_led"]
 
+    #----------------------------GATHERING SETTING METADATA FROM SENSOR TYPE----------------------------
+
+    def __load_setting_descriptions(self):
+        if self.__setting_descriptions is not None: return
+        self.__setting_descriptions = {}
+
+        #Add all default keys to the dictionary that exist
+        available_settings = self.readAllSettings()
+        for key in available_settings.keys():
+            if key in THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS:
+                self.__setting_descriptions[key] = THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS[key]
+        
+        #Add custom descriptors
+
+        streamable_commands = available_settings["streamable_commands"].split(',')
+        streamable_commands = [int(c) for c in streamable_commands]
+        def validate_streamable(value: str):
+            if not isinstance(value, str):
+                return False
+            kvps = value.split(',')
+            for command in kvps:
+                value = None
+                if ':' in command:
+                    command, value = command.split(':')
+                
+                #Parse command number and ensure it is valid
+                try:
+                    command = int(command)
+                except ValueError:
+                    return False
+                
+                if command not in streamable_commands and command != 255: #255 is a special value for "no command"
+                    return False
+
+                #Check value is acceptable
+                if value is not None:
+                    command = self.commands[command]
+                    if len(command.in_format.internal_format) != 1:
+                        return False
+                    try:
+                        value = int(value)
+                    except ValueError:
+                        return False
+            return True
+        
+        for key in ("stream_slots", "log_slots"):
+            self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                key,
+                ThreespaceSettingParamDescriptor(
+                    validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
+                    custom_validator=validate_streamable,
+                ),
+            )
+
+        #Range Descriptors
+        type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags}
+        type_unit_mapping = {"accel": { "unit": "g-force", "suffix": "g"}, "gyro": { "unit": "degrees per second", "suffix": "dps"}, "mag": { "unit": "gauss", "suffix": "G"}}
+        for component_type in type_id_mapping:
+            valid_id = type_id_mapping[component_type]
+            for id in valid_id:
+                valid_ranges = available_settings[f"valid_ranges_{component_type}{id}"].split(',')
+                valid_ranges = [int(r) for r in valid_ranges]
+                key = f"range_{component_type}{id}"
+                self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                    key,
+                    ThreespaceSettingParamDescriptor(
+                        validation_mode=ThreespaceSettingParamValidationMode.ENUM,
+                        valid_values=valid_ranges,
+                        **type_unit_mapping[component_type]
+                    ),
+                )
+        
+        #ODR Descriptors
+        type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags, "baro": self.valid_baros}
+        for component_type, ids in type_id_mapping.items():
+            for id in ids:
+                valid_odrs = specs.COMPONENT_ODRS[component_type][id]
+                key = f"odr_{component_type}{id}"
+                self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                    key,
+                    ThreespaceSettingParamDescriptor(
+                        unit="hertz",
+                        suffix="Hz",
+                        validation_mode=ThreespaceSettingParamValidationMode.RANGE,
+                        min_value=min(valid_odrs),
+                        max_value=max(valid_odrs),
+                    ),
+                )
+
+        #Primary components
+        def validate_primary_components(value: str, valid: list[int]):
+            #Ensure value is a comma separated list of unique IDs in the valid list
+            used = set()
+            components = value.split(',')
+            try:
+                for i in range(len(components)):
+                    components[i] = int(components[i])
+                    if components[i] not in valid or components[i] in used:
+                        return False
+                    used.add(components[i])
+            except ValueError:
+                return False
+            return True
+
+        type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags}
+        for component_type, ids in type_id_mapping.items():
+            key = f"primary_{component_type}"
+            id_map = { f"{component_type}{id}": id for id in ids }
+            self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                key,
+                ThreespaceSettingParamDescriptor(
+                    validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
+                    valid_values=id_map,
+                    custom_validator=lambda value, ids=ids: validate_primary_components(value, ids)
+                ),
+            )
+
+        #Add default descriptors for any keys that still do not have a description
+        for key in available_settings.keys():
+            if key not in self.__setting_descriptions:
+                self.__setting_descriptions[key] = ThreespaceSettingDescriptor(key)
+
+    def get_all_setting_descriptions(self) -> dict[str, ThreespaceSettingDescriptor]:
+        if self.__setting_descriptions is None:
+            self.__load_setting_descriptions()
+        return self.__setting_descriptions

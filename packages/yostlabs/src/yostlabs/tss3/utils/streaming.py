@@ -173,11 +173,11 @@ class ThreespaceStreamingManager:
             raise RuntimeError(f"Failed to reset streaming manager. {self.num_callbacks_registered} callbacks still registered.\n {self.callbacks}")
         return True
 
-    def update(self):
+    def update(self, **kwargs):
         if self.paused or not self.enabled or not self.sensor.is_streaming: return
 
         self.apply_updated_settings()
-        self.sensor.updateStreaming()
+        self.sensor.updateStreaming(**kwargs)
         result = self.sensor.getOldestStreamingPacket()
         if result is not None:
             while result is not None:
