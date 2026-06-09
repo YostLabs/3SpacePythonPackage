@@ -11,7 +11,18 @@ COMMAND_SOURCE = "log_slots" #Should be stream_slots or log_slots based on how t
 header_info = ThreespaceHeaderInfo()
 commands = []
 
-if SETTINGS_CFG is not None:
+if SETTINGS_CFG is None:
+    #Set configuration settings manually
+    header_info.status_enabled = 0
+    header_info.timestamp_enabled = 0
+    header_info.echo_enabled = 0
+    header_info.checksum_enabled = 0
+    header_info.serial_enabled = 0
+    header_info.length_enabled = 0
+
+    commands = [threespace_command_get(StreamableCommands.GetTaredOrientation.value), 
+                threespace_command_get(StreamableCommands.GetPrimaryCorrectedAccelVec.value)]
+else:
     #Load settings from file
     path = Path(SETTINGS_CFG)
     if not path.exists():
@@ -49,17 +60,6 @@ if SETTINGS_CFG is not None:
             commands.append(threespace_command_get(command_id))
         except ValueError:
             print(f"Warning: {command} is not a valid command ID. Skipping.")
-else:
-    #Set configuration settings manually
-    header_info.status_enabled = 0
-    header_info.timestamp_enabled = 0
-    header_info.echo_enabled = 0
-    header_info.checksum_enabled = 1
-    header_info.serial_enabled = 0
-    header_info.length_enabled = 0
-
-    commands = [threespace_command_get(StreamableCommands.GetTaredOrientation.value), 
-                threespace_command_get(StreamableCommands.GetPrimaryCorrectedAccelVec.value)]
 
 
 #--------------------Create the parser and configure it--------------------
