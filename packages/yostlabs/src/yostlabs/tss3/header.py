@@ -8,6 +8,9 @@ class ThreespaceHeaderInfo:
     format: str = ""
     size: int = 0
 
+    def __post_init__(self):
+        self.__update()
+
     def get_start_byte(self, header_field: int):
         """
         Given a header field, give the initial byte offset for that field when
