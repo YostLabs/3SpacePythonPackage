@@ -267,6 +267,7 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
 
     ThreespaceCommand("setDateTime", 62, "Bbbbbb", ""),
     ThreespaceCommand("getDateTime", 63, "", "Bbbbbb"),
+    ThreespaceCommand("getLoggingStatus", 64, "", "b"),
 
     ThreespaceCommand("getRawGyroRate", 65, "b", "fff"),
     ThreespaceCommand("getRawAccelVec", 66, "b", "fff"),
