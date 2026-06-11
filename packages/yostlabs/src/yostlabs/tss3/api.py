@@ -593,8 +593,8 @@ class ThreespaceSensor:
         if err:
             self.log(f"Err setting {cmd}: {err=} {num_successes=}")
         
-        if "default" in kwargs:
-            self.log("Marking all settings as dirty due to defaults being applied.")
+        if "default" in kwargs or "fs_cfg_load" in kwargs:
+            self.log("Marking all settings as dirty due to defaults being applied/reloaded.")
             self.set_cached_settings_dirty(DIRTY_FLAGS_UNKNOWN_SETTINGS)
         if "reboot" in kwargs:
             self.log("Sensor restarted, marking state as dirty.")
@@ -1507,6 +1507,7 @@ class ThreespaceSensor:
 
     def setDateTime(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> ThreespaceCmdResult[None]: ...
     def getDateTime(self) -> ThreespaceCmdResult[list[int]]: ...
+    def getLoggingStatus(self) -> ThreespaceCmdResult[list[int]]: ...
 
     def getRawGyroRate(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
     def getRawAccelVec(self, id: int) -> ThreespaceCmdResult[list[float]]: ...
