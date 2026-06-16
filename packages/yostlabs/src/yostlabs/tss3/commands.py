@@ -57,14 +57,29 @@ class ThreespaceCommandInfo:
         self.num_out_params = len(self.out_format)
         self.out_size = yost_format_get_size(self.out_format)
 
+def cast_via_struct_char(value: str, format):
+    if format in "bBhHiIlLqQnN": #Integer types
+        if value.startswith("0x"):
+            value = int(value, 16)
+        else:
+            value = int(value)
+    elif format in "efd":
+        value = float(value)
+    return value
+
 class ThreespaceFormat:
 
-    def __init__(self, format_str: str):
-        self.internal_format = format_str
-        self.struct_format = yost_format_to_struct_format(format_str)
+    def __init__(self, format_str: str, from_struct=False):
+        if from_struct:
+            self.struct_format = format_str
+            reversed_dict = {v['c']: k for k, v in yost_format_conversion_dict.items()}
+            self.internal_format = ''.join(reversed_dict[c] for c in format_str)
+        else:
+            self.internal_format = format_str
+            self.struct_format = yost_format_to_struct_format(format_str)
 
-        self.num_params = len(format_str)
-        self.size = yost_format_get_size(format_str)
+        self.num_params = len(self.internal_format)
+        self.size = yost_format_get_size(self.internal_format)
 
     def precompute_segments(self):
         """
@@ -90,6 +105,18 @@ class ThreespaceFormat:
                     self.segments.append(None)
                     i += 1
 
+    def format_data(self, *args):
+        #Gather the different data portions
+        data_parts = []
+        for i, c in enumerate(self.struct_format):
+            if c != 's':
+                data_parts.append(struct.pack(f"<{c}", args[i]))
+            else:
+                data_parts.append(struct.pack(f"<{len(args[i])}sb", bytes(args[i], 'ascii'), 0))
+        
+        cmd_data = b''.join(data_parts)
+        return cmd_data
+
     def parse_response(self, response: bytes):
         """
         Reads format result from an already prepared buffer.
@@ -112,7 +139,7 @@ class ThreespaceFormat:
         if self.num_params == 1:
             return output[0]
         return output
-    
+
     #Read the response dynamically from an input stream
     def read_response(self, com: ThreespaceInputStream):
         raw = bytearray()
@@ -138,17 +165,41 @@ class ThreespaceFormat:
             return output[0], raw
         return output, raw
 
-    def format_data(self, *args):
-        #Gather the different data portions
-        data_parts = []
+    def parse_response_ascii(self, response: str):
+        if self.num_params == 1 and self.struct_format[0] == 's':
+            return response
+        data = response.strip().split(',')
+        if len(data) != self.num_params:
+            raise ValueError(f"Expected {self.num_params} parameters but got {len(data)} in response: {response}")
+        command_data = []
         for i, c in enumerate(self.struct_format):
-            if c != 's':
-                data_parts.append(struct.pack(f"<{c}", args[i]))
-            else:
-                data_parts.append(struct.pack(f"<{len(args[i])}sb", bytes(args[i], 'ascii'), 0))
+            command_data.append(cast_via_struct_char(data[i], c))
+        return command_data
+    
+    def read_response_ascii(self, com: ThreespaceInputStream):
+        if self.num_params == 1 and self.struct_format[0] == 's':
+            response = com.read_until(b'\n') #Read and discard the command name
+            return response.decode().strip(), response
         
-        cmd_data = b''.join(data_parts)
-        return cmd_data
+        peeked = com.peek_until(b'\n').decode()
+
+        # Find the position of the num_params-th comma, or the newline if fewer commas exist.
+        # That delimiter marks the end of the data we need to parse.
+        comma_count = 0
+        end_pos = len(peeked)  # fallback: consume everything peeked
+        for i, c in enumerate(peeked):
+            if c == ',':
+                comma_count += 1
+                if comma_count == self.num_params:
+                    end_pos = i  # comma immediately after the last expected param
+                    break
+            elif c == '\n':
+                end_pos = i  # newline terminates the last param
+                break
+
+        data_to_parse = peeked[:end_pos]  # excludes the trailing comma/newline
+        com.read(end_pos + 1)             # consume up to and including that delimiter
+        return self.parse_response_ascii(data_to_parse), data_to_parse
 
 class ThreespaceCommand:
 
@@ -181,6 +232,9 @@ class ThreespaceCommand:
         The given buffer will be modified to remove the data read as well.
         """
         return self.out_format.parse_response(response)
+    
+    def parse_response_ascii(self, response: str):
+        return self.out_format.parse_response_ascii(response)
 
     #Read the command dynamically from an input stream
     def read_command(self, com: ThreespaceInputStream, verbose=False):
@@ -190,6 +244,11 @@ class ThreespaceCommand:
         if data is None and verbose:
             print(f"Failed to read response for {self.info.name}. Raw data read: {raw}")
         return data, raw
+    
+    def read_response_ascii(self, com: ThreespaceInputStream):
+        if self.out_format.num_params == 0: 
+            return None, ""
+        return self.out_format.read_response_ascii(com)
 
 #Command numbers with special handling. For quick lookup
 #of the command info.
@@ -461,6 +520,15 @@ class ThreespaceGetStreamingBatchCommand(ThreespaceCommand):
         
         return response, raw_response
 
+    def read_response_ascii(self, com: ThreespaceInputStream):
+        response = []
+        raw_response = ""
+        for command in self.commands:
+            if command is None: continue
+            out, raw = command.read_response_ascii(com)
+            raw_response += raw
+            response.append(out)
+        return response, raw_response
 #------------------------------COMMAND LOOKUP FUNCTIONS------------------------------
 
 def threespace_command_get(cmd_num: int):

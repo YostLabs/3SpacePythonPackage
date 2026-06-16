@@ -486,8 +486,8 @@ class ThreespaceStreamingManager:
         return slot_info
 
 #Utility functions
-def get_stream_options_from_str(string: str):
-    options = []
+def get_stream_options_from_str(string: str) -> list[ThreespaceStreamingOption]:
+    options: list[ThreespaceStreamingOption] = []
     slots = string.split(',')
     for slot in slots:
         slot = slot.split(':')
