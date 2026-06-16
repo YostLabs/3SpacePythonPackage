@@ -1,5 +1,8 @@
 from yostlabs.tss3.api import *
+from yostlabs.tss3.settings import threespace_setting_get
+from yostlabs.tss3.utils.streaming import get_stream_options_from_str
 import math
+from pathlib import Path
 
 class ThreespaceBufferInputStream(ThreespaceInputStream):
     """
@@ -256,4 +259,269 @@ class ThreespaceBinaryParser:
         self.__parsing_command = None
         self.misaligned = False
         return ThreespaceCmdResult(result, header, data_raw_binary=raw)
+
+
+def search_folder(
+    folder_path: str | Path,
+    pattern: str = "*",
+    max_depth: int | None = None,
+    max_results: int | None = None,
+) -> list[Path]:
+    """
+    Recursively search *folder_path* for files whose name matches *pattern*.
+
+    Parameters
+    ----------
+    folder_path : str or Path
+        Root directory to search.
+    pattern : str
+        Glob-style filename pattern, e.g. ``"*.bin"`` or ``"*.csv"``.
+        Defaults to ``"*"`` (all files).
+    max_depth : int or None
+        Maximum folder depth to descend into relative to *folder_path*.
+        ``0`` means only files directly inside *folder_path*; ``None``
+        means unlimited depth.
+    max_results : int or None
+        Stop and return early once this many matches have been found.
+        ``None`` means collect all matches.
+
+    Returns
+    -------
+    list[Path]
+        Sorted list of matching file paths.
+    """
+    root = Path(folder_path)
+    matches: list[Path] = []
+
+    def _recurse(current: Path, depth: int):
+        if max_results is not None and len(matches) >= max_results:
+            return
+        try:
+            entries = list(current.iterdir())
+        except PermissionError:
+            return
+        for entry in entries:
+            if max_results is not None and len(matches) >= max_results:
+                return
+            if entry.is_file() and entry.match(pattern):
+                matches.append(entry)
+            elif entry.is_dir() and (max_depth is None or depth < max_depth):
+                _recurse(entry, depth + 1)
+
+    _recurse(root, 0)
+    return sorted(matches)
+
+class ThreespaceConfigDictionary:
+
+    def __init__(self, cfg_path: str | Path):
+        self.cfg_path = Path(cfg_path)
+        if not self.cfg_path.suffix == ".cfg":
+            raise ValueError(f"{cfg_path} is not a .cfg file")
+        if not self.cfg_path.is_file():
+            raise ValueError(f"{cfg_path} is not a valid file path")
+        
+        self.settings: dict[str, Any] = {}
+        self.comments: list[str] = []
+        with self.cfg_path.open('r') as fp:
+            for line in fp:
+                line = line.strip()
+                if line.startswith("#"): #Comment
+                    self.comments.append(line[1:])
+                elif '=' in line: #Key Value
+                    data = line.split("=")
+                    if len(data) != 2:
+                        raise ValueError(f"Invalid line in config file: {line}")
+                    key, value = data
+                    key = key.strip()
+                    value = value.strip()
+                    setting = threespace_setting_get(key)
+                    if setting is None:
+                        print("Warning: Unrecognized setting in config file:", key)
+                        self.settings[key] = value
+                    else:
+                        result = setting.out_format.parse_response_ascii(value)
+                        if len(result) == 1:
+                            result = result[0]
+                        self.settings[key] = result
+                elif line: #Improper formatted line that is not empty
+                    raise ValueError(f"Invalid line in config file: {line}")
+        
+    def __str__(self):
+        return str(self.settings)
+
+    def __getitem__(self, key: str):
+        return self.settings[key]
+    
+    def __contains__(self, key: str):
+        return key in self.settings
+
+class ThreespaceDataFileParser:
+    """
+    A class used for parsing both binary and ascii data
+    files created via logging either from the sensor or
+    the 3-Space Suite.
+
+    Unlike ThreespaceBinaryParser, this class is not designed
+    to parse a generic stream of data that could contain multiple
+    different response types. Instead, this class is purely for the
+    common task of parsing recorded data files.
+    """
+
+    def __init__(self, data_paths: list[str|Path] = None, cfg_path: str=None, folder_path: str=None):
+        self.data_paths: list[Path] = None
+        self.cfg_path: Path = None
+
+        #Filled out by setup
+        self.cfg = None
+        self.header = None
+        self.header_format = None
+        self.command = None
+        self.buffer = None
+        self.binary_parser = None
+
+        if folder_path is not None:
+            self.set_folder(folder_path)
+        if data_paths is not None:
+            self.set_data_files(data_paths)
+        if cfg_path is not None:
+            self.set_config_file(cfg_path)
+        
+        if self.cfg_path is not None and self.data_paths is not None:
+            self.setup()
+
+    def parse_message(self) -> ThreespaceCmdResult:
+        if self.mode == "binary":
+            return self.__parse_binary_message()
+        else:
+            return self.__parse_ascii_message()
+
+    def __parse_binary_message(self):
+        return self.binary_parser.parse_message()
+    
+    def __parse_ascii_message(self):
+        if self.buffer.length == 0:
+            return None
+        result, raw = self.header_format.read_response_ascii(self.buffer)
+        header = ThreespaceHeader.from_tuple(result, self.header)
+
+        result, raw = self.command.read_response_ascii(self.buffer)
+        return ThreespaceCmdResult(result, header=header, data_raw_binary=raw)
+
+    def setup(self, force_slots=None, force_header=None):
+        """
+        Parameters
+        ----------
+        force_slots : optional
+            Can be set to "stream_slots" or "log_slots" to force the parser to parse the data file with the given slots.
+            If None, the parser will automatically determine based on the config file format.
+        force_header : optional
+            Can be set to True or False to force the parser to parse with or without the header. Generally, this will
+            be provided by the config file, and is assumed on otherwise. The only time this would be required is if
+            the data file was gathered via streaming without the header enabled (In which case set to False).
+        """
+        self.cfg = ThreespaceConfigDictionary(self.cfg_path)
+
+        #Determining if from a suite logging session (streaming) or a regular logging session (logging)
+        from_suite = False
+        for comment in self.cfg.comments:
+            if comment.startswith("Suite"):
+                from_suite = True
+                break
+
+        #Load the header object
+        self.header = ThreespaceHeaderInfo()
+        if force_header != False and (from_suite or self.cfg["log_header_enabled"] or force_header):
+            try:
+                self.header.status_enabled = self.cfg["header_status"]
+                self.header.timestamp_enabled = self.cfg["header_timestamp"]
+                self.header.echo_enabled = self.cfg["header_echo"]
+                self.header.checksum_enabled = self.cfg["header_checksum"]
+                self.header.serial_enabled = self.cfg["header_serial"]
+                self.header.length_enabled = self.cfg["header_length"]
+            except KeyError:
+                raise ValueError("Config file is missing header information.")
+
+        #Load the stream/log slots
+        slot_key = None
+        if force_slots is not None:
+            if force_slots not in ["stream_slots", "log_slots"]:
+                raise ValueError("force_slots must be either 'stream_slots' or 'log_slots'")
+            slot_key = force_slots
+        else:
+            slot_key = "stream_slots" if from_suite else "log_slots"
+
+        try:
+            slots = self.cfg[slot_key]
+        except KeyError:
+             raise ValueError(f"Config file is missing {slot_key} information.")
+
+        slots = get_stream_options_from_str(slots)
+        self.command = ThreespaceGetStreamingBatchCommand([threespace_command_get(slot.cmd.value) for slot in slots])
+
+        self.buffer = ThreespaceBufferInputStream()
+        for data_path in self.data_paths:
+            with data_path.open('rb') as f:
+                self.buffer.insert(f.read())
+
+        self.mode = "binary" if self.data_paths[0].suffix == ".bin" else "ascii"
+        if self.mode == "ascii":
+            self.__setup_ascii()
+        else:
+            self.__setup_binary()
+    
+    def __setup_binary(self):
+        self.binary_parser = ThreespaceBinaryParser(self.buffer)
+        self.binary_parser.set_header(self.header)
+        self.binary_parser.register_command(self.command)
+
+    def __setup_ascii(self):
+        #header.format is a string, but for parsing it is useful to have it as a ThreespaceFormat object
+        self.header_format = ThreespaceFormat(self.header.format.strip('<>'), from_struct=True)
+        self.buffer.readline() #Skip the first line since it is just the header format
+
+    def set_data_files(self, data_paths: list[str|Path]):
+        if len(data_paths) == 0:
+            raise ValueError("At least one data file must be provided")
+        paths = [Path(p) for p in data_paths]
+        if any(p.suffix not in [".bin", ".csv"] for p in paths):
+            raise ValueError("Data files must be .bin or .csv files")
+        if any(p.suffix != paths[0].suffix for p in paths):
+            raise ValueError("All data files must have the same file extension")
+        self.data_paths = paths
+
+    def set_config_file(self, cfg_path: str):
+        path = Path(cfg_path)
+        if not path.suffix == ".cfg":
+            raise ValueError(f"{cfg_path} is not a .cfg file")
+        if not path.is_file():
+            raise ValueError(f"{cfg_path} is not a valid file path")
+        
+        self.cfg_path = path
+
+    def set_folder(self, folder_path: str):
+        folder_path: Path = Path(folder_path)
+        if not folder_path.is_dir():
+            raise ValueError(f"{folder_path} is not a valid folder path")
+
+        ascii_files = search_folder(folder_path, "*.csv", max_depth=None, max_results=1)
+        binary_files = search_folder(folder_path, "*.bin", max_depth=None, max_results=1)
+        cfg_files  = search_folder(folder_path, "*.cfg", max_depth=None, max_results=1)
+
+        if len(ascii_files) == 0 and len(binary_files) == 0:
+            raise ValueError(f"No data file (.bin or .csv) found under {folder_path}")
+        elif len(ascii_files) > 0 and len(binary_files) > 0:
+            raise ValueError(f"Multiple data file types found under {folder_path}. Please ensure only .bin or .csv files are present.")
+        
+        if len(ascii_files) > 0:
+            self.set_data_files(ascii_files)
+        else:
+            self.set_data_files(binary_files)
+
+        if len(cfg_files) == 0:
+            raise ValueError(f"No config file (.cfg) found under {folder_path}")
+        elif len(cfg_files) > 1:
+            raise ValueError(f"Multiple config files found under {folder_path}. Please ensure only one .cfg file is present.")
+        else:
+            self.set_config_file(cfg_files[0])
+        
         
