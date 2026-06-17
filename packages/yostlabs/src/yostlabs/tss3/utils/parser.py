@@ -386,8 +386,10 @@ class ThreespaceDataFileParser:
         if cfg_path is not None:
             self.set_config_file(cfg_path)
         
-        if self.cfg_path is not None and self.data_paths is not None:
-            self.setup()
+        if self.cfg_path is not None:
+            self.load_config()
+            if self.data_paths is not None:
+                self.load_data()
 
     def parse_message(self) -> ThreespaceCmdResult:
         if self.mode == "binary":
@@ -407,8 +409,10 @@ class ThreespaceDataFileParser:
         result, raw = self.command.read_response_ascii(self.buffer)
         return ThreespaceCmdResult(result, header=header, data_raw_binary=raw)
 
-    def setup(self, force_slots=None, force_header=None):
+    def load_config(self, force_slots=None, force_header=None):
         """
+        Initializes all required settings for parsing the data file automatically. The config file and data_file paths
+        must be set before calling this method. If a config file is not available, use the setup_manual method instead.
         Parameters
         ----------
         force_slots : optional
@@ -416,9 +420,12 @@ class ThreespaceDataFileParser:
             If None, the parser will automatically determine based on the config file format.
         force_header : optional
             Can be set to True or False to force the parser to parse with or without the header. Generally, this will
-            be provided by the config file, and is assumed on otherwise. The only time this would be required is if
+            be provided by the config file, and is assumed enabled otherwise. The only time this would be required is if
             the data file was gathered via streaming without the header enabled (In which case set to False).
         """
+        if self.cfg_path is None:
+            raise ValueError("Config file must be set before setup")
+        
         self.cfg = ThreespaceConfigDictionary(self.cfg_path)
 
         #Determining if from a suite logging session (streaming) or a regular logging session (logging)
@@ -458,26 +465,76 @@ class ThreespaceDataFileParser:
         slots = get_stream_options_from_str(slots)
         self.command = ThreespaceGetStreamingBatchCommand([threespace_command_get(slot.cmd.value) for slot in slots])
 
-        self.buffer = ThreespaceBufferInputStream()
-        for data_path in self.data_paths:
-            with data_path.open('rb') as f:
-                self.buffer.insert(f.read())
-
+    def load_data(self):
+        """
+        Loads data from data file paths and initializes parsing. load_config must be
+        called before this method to initialize the header and command information required for parsing the data.
+        """
+        if self.data_paths is None:
+            raise ValueError("Data file paths must be set before setup_data")
         self.mode = "binary" if self.data_paths[0].suffix == ".bin" else "ascii"
         if self.mode == "ascii":
             self.__setup_ascii()
         else:
             self.__setup_binary()
     
+    def setup_manual(self, header_info: ThreespaceHeaderInfo, command: ThreespaceGetStreamingBatchCommand|str|list[StreamableCommands]|list[int]):
+        """
+        Initializes all required settings for parsing the data file manually. This method should be used 
+        if the config file is not available, or does not contain the required information to automatically setup the parser.
+
+        Typically, load_config should be used automatically after the constructor, and this will not be called. Only use this
+        if there is no config file available.
+
+        Parameters
+        ----------
+        header_info : ThreespaceHeaderInfo
+            The header format of the data file. If no header, can leave as None.
+        command : ThreespaceGetStreamingBatchCommand or str or list[StreamableCommands] or list[int]
+            The command, or information about streaming to build the command, that will be parsed. 
+            The simplest version is a list of StreamableCommands
+        """
+        self.header = header_info
+
+        if isinstance(command, ThreespaceGetStreamingBatchCommand):
+            self.command = command
+        elif isinstance(command, str):
+            slots = get_stream_options_from_str(command)
+            self.command = ThreespaceGetStreamingBatchCommand([threespace_command_get(slot.cmd.value) for slot in slots])
+        elif isinstance(command, list):
+            cmd_nums = []
+            for c in command:
+                if isinstance(c, StreamableCommands):
+                    cmd_nums.append(c.value)
+                elif isinstance(c, int):
+                    cmd_nums.append(c)
+                else:
+                    raise ValueError(f"Invalid command in list: {c}")
+            self.command = ThreespaceGetStreamingBatchCommand([threespace_command_get(cmd_num) for cmd_num in cmd_nums])
+        else:
+            raise ValueError("Invalid command type")
+        print(self.command)
+        self.load_data()
+
     def __setup_binary(self):
+        self.buffer = ThreespaceBufferInputStream()
+        for data_path in self.data_paths:
+            with data_path.open('rb') as f:
+                self.buffer.insert(f.read())
+
         self.binary_parser = ThreespaceBinaryParser(self.buffer)
         self.binary_parser.set_header(self.header)
         self.binary_parser.register_command(self.command)
 
     def __setup_ascii(self):
+        self.buffer = ThreespaceBufferInputStream()
+        for data_path in self.data_paths:
+            with data_path.open('rb') as f:
+                f.readline() #Skip the first line since it is just the header format
+                self.buffer.insert(f.read())
+
         #header.format is a string, but for parsing it is useful to have it as a ThreespaceFormat object
         self.header_format = ThreespaceFormat(self.header.format.strip('<>'), from_struct=True)
-        self.buffer.readline() #Skip the first line since it is just the header format
 
     def set_data_files(self, data_paths: list[str|Path]):
         if len(data_paths) == 0:
