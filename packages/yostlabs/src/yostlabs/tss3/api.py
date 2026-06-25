@@ -455,6 +455,10 @@ class ThreespaceSensor:
             if setting is None:
                 if key == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
                     raise InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}", result=settings)
+                #Can't use keystring to check expected keys since a query/aggregate key may have been used.
+                #Because the number of keys in the response has no way of being known, also can't just search
+                #ahead for a ';' or '0' because 1. Both of those could be valid data bytes, 2. They could be part
+                #of a subsequent command response/streaming packet.
                 raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}", result=settings)
             if setting.out_format is None:
                 raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}", result=settings)
@@ -639,6 +643,25 @@ class ThreespaceSensor:
             return THREESPACE_AWAIT_COMMAND_FOUND
     
         return THREESPACE_AWAIT_COMMAND_TIMEOUT
+
+    #Helper for handling unregistered settings in binary mode
+    def read_available_setting_keys(self, query="settings") -> dict[str,list[str]]:
+        """
+        Parameters
+        ----------
+        query: used for the setting lookup. 'all' is good for getting all available keys, and 'settings' is good for all writable settings.
+        """
+        result = self.read_settings_ascii(query)
+        keys = list(result.keys())
+        registered = []
+        unregistered = []
+        for key in keys:
+            setting = threespace_setting_get(key) #This will register the setting if it is not already registered
+            if setting is not None:
+                registered.append(key)
+            else:
+                unregistered.append(key)
+        return {"registered": registered, "unregistered": unregistered}
 
 #-------------------------------------ASCII SETTINGS PROTOCOL------------------------------------------------
 
