@@ -415,9 +415,45 @@ class ThreespaceSensor:
         """
         self.check_dirty(ignore_mask=DIRTY_FLAGS_UNKNOWN_SETTINGS | DIRTY_FLAGS_REQUIRED_HEADER_BITS)
 
-        keystr = ';'.join(keys)
+        #Group keys into single units. This is done to avoid the THREESPACE_MAX_CMD_LEN limit, while allowing
+        #an arbitrary length settings query by sending the queries in multiple batches.
+        keystrings = []
+        current_keys = []
+
+        #Start at 1 to account for checksum byte at end of message.
+        #The null terminator is accounted for in the length of the key string since each key will
+        #end with either a ';' or a null terimnator.
+        current_length = 1
+        for key in keys:
+            new_length = current_length + len(key) + 1 #+1 for the ';' or null terminator
+
+            #New key would exceed max length, so finish off the current batch and start a new one
+            if new_length > THREESPACE_MAX_CMD_LEN:
+                keystrings.append(';'.join(current_keys))
+                current_keys = [key]
+                current_length = len(key) + 1
+            else:
+                #Add key to the current batch
+                current_keys.append(key)
+                current_length = new_length
+        
+        #Finish off the last batch if there are any keys left
+        if current_keys:
+            keystrings.append(';'.join(current_keys))
+        
+        response = {}
+        #Now send each keystring and parse the results.
+        for keystring in keystrings:
+            settings = self.__read_settings_single(keystring)
+            if settings is None:
+                raise ResponseError(f"Failed to read settings for keystring: {keystring}")
+            response |= settings #Merge the new settings into the overall result
+        
+        return response
+
+    def __read_settings_single(self, keystr: str):
         if len(keystr) > THREESPACE_MAX_CMD_LEN-2: #-2 for room for null terminator and checksum if using binary format
-            raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystr)))
+            raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystring)))
         checksum = sum(ord(v) for v in keystr) % 256
         
         #StartByte, Message+Null Terminator, Checksum
