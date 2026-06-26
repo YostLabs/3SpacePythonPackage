@@ -120,6 +120,8 @@ class ThreespaceSensor:
         self.getStreamingBatchCommand: ThreespaceGetStreamingBatchCommand = None
         self.funcs = {}
 
+        self.cached_unregistered_settings = set()
+
         self.log("Checking firmware status")
         try:
             self.__cached_in_bootloader = self.__check_bootloader_status()
@@ -697,6 +699,9 @@ class ThreespaceSensor:
                 registered.append(key)
             else:
                 unregistered.append(key)
+        if len(unregistered) > 0:
+            self.log(f"Unregistered settings found: {unregistered}")
+            self.cached_unregistered_settings |= set(unregistered)
         return {"registered": registered, "unregistered": unregistered}
 
 #-------------------------------------ASCII SETTINGS PROTOCOL------------------------------------------------
@@ -2761,57 +2766,66 @@ class ThreespaceSensor:
 
     #----------------------------GATHERING SETTING METADATA FROM SENSOR TYPE----------------------------
 
-    def __load_setting_descriptions(self):
+    def __load_setting_descriptions(self, available_settings: dict[str, Any]) -> None:
+        """
+        Allows specifying a dictionary of setting results to use for generating setting descriptions.
+        This is done to allow specifying specific settings to avoid the readAllSettings which could
+        fail if there are unregistered settings on the device.
+        """
         if self.__setting_descriptions is not None: return
         self.__setting_descriptions = {}
 
         #Add all default keys to the dictionary that exist
-        available_settings = self.readAllSettings()
         for key in available_settings.keys():
             if key in THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS:
                 self.__setting_descriptions[key] = THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS[key]
         
         #Add custom descriptors
-
-        streamable_commands = available_settings["streamable_commands"].split(',')
-        streamable_commands = [int(c) for c in streamable_commands]
-        def validate_streamable(value: str):
-            if not isinstance(value, str):
-                return False
-            kvps = value.split(',')
-            for command in kvps:
-                value = None
-                if ':' in command:
-                    command, value = command.split(':')
-                
-                #Parse command number and ensure it is valid
-                try:
-                    command = int(command)
-                except ValueError:
+        if "streamable_commands" in available_settings:
+            streamable_commands = available_settings["streamable_commands"].split(',')
+            streamable_commands = [int(c) for c in streamable_commands]
+            def validate_streamable(value: str):
+                if not isinstance(value, str):
                     return False
-                
-                if command not in streamable_commands and command != 255: #255 is a special value for "no command"
-                    return False
-
-                #Check value is acceptable
-                if value is not None:
-                    command = self.commands[command]
-                    if len(command.in_format.internal_format) != 1:
-                        return False
+                kvps = value.split(',')
+                for command in kvps:
+                    value = None
+                    if ':' in command:
+                        command, value = command.split(':')
+                    
+                    #Parse command number and ensure it is valid
                     try:
-                        value = int(value)
+                        command = int(command)
                     except ValueError:
                         return False
-            return True
-        
-        for key in ("stream_slots", "log_slots"):
-            self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
-                key,
-                ThreespaceSettingParamDescriptor(
-                    validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
-                    custom_validator=validate_streamable,
-                ),
-            )
+                    
+                    if command not in streamable_commands and command != 255: #255 is a special value for "no command"
+                        return False
+
+                    #Check value is acceptable
+                    if value is not None:
+                        command = self.commands[command]
+                        if len(command.in_format.internal_format) != 1:
+                            return False
+                        try:
+                            value = int(value)
+                        except ValueError:
+                            return False
+                return True
+
+            slot_keys = []
+            if "stream_slots" in available_settings:
+                slot_keys.append("stream_slots")
+            if "log_slots" in available_settings:
+                slot_keys.append("log_slots")
+            for key in slot_keys:
+                self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
+                    key,
+                    ThreespaceSettingParamDescriptor(
+                        validation_mode=ThreespaceSettingParamValidationMode.CUSTOM,
+                        custom_validator=validate_streamable,
+                    ),
+                )
 
         #Range Descriptors
         type_id_mapping = {"accel": self.valid_accels, "gyro": self.valid_gyros, "mag": self.valid_mags}
@@ -2819,7 +2833,10 @@ class ThreespaceSensor:
         for component_type in type_id_mapping:
             valid_id = type_id_mapping[component_type]
             for id in valid_id:
-                valid_ranges = available_settings[f"valid_ranges_{component_type}{id}"].split(',')
+                valid_ranges_key = f"valid_ranges_{component_type}{id}"
+                if valid_ranges_key not in available_settings:
+                    continue
+                valid_ranges = available_settings[valid_ranges_key].split(',')
                 valid_ranges = [int(r) for r in valid_ranges]
                 key = f"range_{component_type}{id}"
                 self.__setting_descriptions[key] = ThreespaceSettingDescriptor(
@@ -2881,7 +2898,29 @@ class ThreespaceSensor:
             if key not in self.__setting_descriptions:
                 self.__setting_descriptions[key] = ThreespaceSettingDescriptor(key)
 
-    def get_all_setting_descriptions(self) -> dict[str, ThreespaceSettingDescriptor]:
+    def get_all_setting_descriptions(self, mode="safe", manual: dict[str,Any]=None) -> dict[str, ThreespaceSettingDescriptor]:
+        """
+        Retrieves all setting descriptions for the device.
+
+        Parameters:
+            mode (str): The mode for retrieving setting descriptions. 
+                        "safe" - Get a setting descriptors that are registered. Requires additional checks, but
+                        ensures no exceptions are thrown. 
+                        "all" - Get all setting descriptors, but if there are unregistered settings, an exception
+                        will be thrown. Only use this if speed is necessary and you are sure there are no unregistered settings.
+            manual (dict): Optional dictionary of settings to use for generating setting descriptions. If provided, this 
+            will ignore 'mode'.
+        After calling, self.cached_unregistered_settings can be checked to see if there are any settings
+        that are not registered.
+        """
         if self.__setting_descriptions is None:
-            self.__load_setting_descriptions()
+            if manual is not None:
+                self.__load_setting_descriptions(manual)
+            elif mode == "safe":
+                available_setting_keys = self.read_available_setting_keys(query="all")
+                self.__load_setting_descriptions(self.read_settings(*available_setting_keys["registered"]))
+            elif mode == "all":
+                self.__load_setting_descriptions(self.readAllSettings())
+            else:
+                raise ValueError("Invalid mode specified. Must be 'safe' or 'all'.")
         return self.__setting_descriptions
