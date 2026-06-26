@@ -241,11 +241,18 @@ THREESPACE_SETTINGS_LIST: list[ThreespaceSetting] = [
     ThreespaceCmdSetting("ble_disconnect"),
     ThreespaceReadWriteSetting("gps_standby", "b"),
     ThreespaceReadWriteSetting("gps_led", "b"),
+    ThreespaceReadWriteSetting("gps_periodic_fix_times", "BB"),
+    ThreespaceReadWriteSetting("gps_periodic_unfixed_times", "BB"),
+    ThreespaceReadWriteSetting("gps_periodic_enabled", "b"),
     ThreespaceCmdSetting("sd_cfg_load"),
     ThreespaceReadWriteSetting("sd_msc_enabled", "b"),
     ThreespaceReadWriteSetting("sd_msc_auto", "b"),
     ThreespaceReadWriteSetting("cat", "S"),
     ThreespaceReadWriteSetting("running_avg", "f"),
+
+    ThreespaceReadWriteSetting("usb_timeout", "f"),
+    ThreespaceReadWriteSetting("rtc_gps_sync_interval", "U"),
+    ThreespaceReadWriteSetting("rtc_gps_force_sync", "b"),
 ]
 THREESPACE_SETTINGS: dict[str, ThreespaceSetting] = { setting.name : setting for setting in THREESPACE_SETTINGS_LIST }
 
@@ -537,8 +544,8 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
     TSD("stream_delay", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=int(0xFFFFFFFFFFFFFFFF / 1_000_000))),
     TSD("stream_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Duration": 0, "Count": 1})),
     TSD("stream_count", TSPD(validation_mode=TSPDV.RANGE, min_value=1, max_value=0xFFFFFFFFFFFFFFFF)),
-    TSD("debug_level", TSPD(preferred_display_mode="hex")),
-    TSD("debug_module", TSPD(preferred_display_mode="hex")),
+    TSD("debug_level", TSPD(preferred_display_mode="hex", validation_mode=TSPDV.RANGE, min_value=0, max_value=0xFFFFFFFF)),
+    TSD("debug_module", TSPD(preferred_display_mode="hex", validation_mode=TSPDV.RANGE, min_value=0, max_value=0xFFFFFFFF)),
     TSD("debug_mode", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Buffered": 0, "Immediate": 1})),
     TSD("debug_led", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("debug_fault", TSPD(validation_mode=TSPDV.BOOL)),
@@ -563,7 +570,7 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
     TSD("pin_mode0", TSPD(validation_mode=TSPDV.ENUM, valid_values={"UART": 1, "Orient Level": 4, "Orient Pulse": 5, "Button": 7, "TransactionIRQ": 8})),
     TSD("pin_mode1", TSPD(validation_mode=TSPDV.ENUM, valid_values={"SPI": 2, "I2C": 3, "Orient Level": 4, "Orient Pulse": 5, "Button": 7})),
     TSD("uart_baudrate", TSPD(validation_mode=TSPDV.ENUM, valid_values=[4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 2000000, 4000000])),
-    TSD("i2c_addr", TSPD(preferred_display_mode="hex")),
+    TSD("i2c_addr", TSPD(preferred_display_mode="hex", validation_mode=TSPDV.RANGE, min_value=0x05, max_value=0x7F)),
     TSD("power_hold_time", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=-1, max_value=60)), #Technically -1 is the only value less than 0 that is valid, but don't have a great way to express that right now
     TSD("power_hold_state", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("power_initial_hold_state", TSPD(validation_mode=TSPDV.BOOL)),
@@ -617,8 +624,22 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
     TSD("bat_offset_threshold", TSPD(unit="celsius", suffix="C", validation_mode=TSPDV.RANGE, min_value=0, max_value=100)),
     TSD("gps_standby", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("gps_led", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("gps_periodic_fix_times", descriptors=[
+        TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=0xFFFF),
+        TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=0xFFFF)
+    ]),
+    TSD("gps_periodic_unfixed_times", descriptors=[
+        TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=0xFFFF),
+        TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=0xFFFF)
+    ]),
+    TSD("gps_periodic_enabled", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("sd_msc_enabled", TSPD(validation_mode=TSPDV.BOOL)),
-    TSD("sd_msc_auto", TSPD(validation_mode=TSPDV.BOOL))
+    TSD("sd_msc_auto", TSPD(validation_mode=TSPDV.BOOL)),
+
+    #Custom
+    TSD("usb_timeout", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=18_446_744_073_709)),
+    TSD("rtc_gps_sync_interval", TSPD(unit="seconds", suffix="s", validation_mode=TSPDV.RANGE, min_value=0, max_value=0xFFFFFFFFFFFFFFFF)),
+    TSD("rtc_gps_force_sync", TSPD(validation_mode=TSPDV.BOOL)),
 ]
 
 THREESPACE_SETTINGS_DEFAULT_DESCRIPTORS: dict[str, ThreespaceSettingDescriptor] = { descriptor.key : descriptor for descriptor in THREESPACE_SETTINGS_DEFAULT_DESC_LIST }
