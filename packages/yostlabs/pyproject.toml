@@ -5,13 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "yostlabs"
 #If uploading again on the same day, add a fourth number
-version = "2026.6.17"
+version = "2026.6.26"
 authors = [
   { name="Yost Labs Inc.", email="techsupport@yostlabs.com" },
   { name="Andy Riedlinger", email="techsupport@yostlabs.com" },
 ]
 description = "Python resources and API for 3Space sensors from Yost Labs Inc."
-readme = "../../README.md"
+#This allows the readme to exist outside of the project directory and
+#inserted by the hatch build hook.
+dynamic = ["readme"]
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -47,3 +49,6 @@ Issues = "https://github.com/YostLabs/3SpacePythonPackage/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/yostlabs"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
