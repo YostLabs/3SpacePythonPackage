@@ -204,7 +204,7 @@ class ButtonTest(SensorTestBase):
         if "log_start_event" in self.cache:
             self.sensor.writeLogStartEvent("2") #Command only
 
-if __name__ == "__main__":
+def run_test():
     sensor = ThreespaceSensor()
     test = ButtonTest(sensor)
 
@@ -218,3 +218,7 @@ if __name__ == "__main__":
         print("\033[?25h", end="", flush=True) #Show the cursor in the terminal
     print(f"\nResults: {test.result}")
     print(f"Overall success: {test.overall_success}")
+
+
+if __name__ == "__main__":
+    run_test()

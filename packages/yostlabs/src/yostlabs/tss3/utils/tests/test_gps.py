@@ -125,7 +125,7 @@ class GPSTest(SensorTestBase):
         self.sensor.write_settings(**self.gps_settings_cache)
         self.__clear_messages()
 
-if __name__ == "__main__":
+def run_test():
     sensor = ThreespaceSensor()
     test = GPSTest(sensor)
     test.start()
@@ -136,5 +136,8 @@ if __name__ == "__main__":
     
     print(f"Results: {test.result}")
     print(f"Overall Success: {test.overall_success}")
+
+if __name__ == "__main__":
+    run_test()
 
     

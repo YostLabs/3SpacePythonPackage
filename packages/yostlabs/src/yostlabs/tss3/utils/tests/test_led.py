@@ -84,7 +84,7 @@ class LEDTest(SensorTestBase):
         self.sensor.writeLedRgb(self.expected_color)
 
 
-if __name__ == "__main__":
+def run_test():
     sensor = ThreespaceSensor()
 
     test = LEDTest(sensor)
@@ -97,3 +97,7 @@ if __name__ == "__main__":
             test.verify_match(True)
     print(f"Results: {test.result}")
     print(f"Overall success: {test.overall_success}")
+
+if __name__ == "__main__":
+    run_test()
+    
