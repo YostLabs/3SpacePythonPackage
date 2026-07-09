@@ -1,5 +1,6 @@
 from yostlabs.tss3.utils.tests.base import SensorTestBase
 from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.consts import *
 
 import enum
 import time
@@ -47,8 +48,8 @@ class GPSTest(SensorTestBase):
 
         #Enable Debug Info messages for GPS
         self.sensor.writeDebugMode(0)
-        self.sensor.writeDebugLevel(0x04)
-        self.sensor.writeDebugModule(0x10000000)
+        self.sensor.writeDebugLevel(THREESPACE_DEBUG_LEVEL_INFO)
+        self.sensor.writeDebugModule(THREESPACE_DEBUG_MODULE_GPS)
 
         #Ensure not in standby
         self.state_start_time = time.perf_counter()
