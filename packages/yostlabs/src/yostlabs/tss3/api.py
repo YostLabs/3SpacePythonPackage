@@ -269,19 +269,22 @@ class ThreespaceSensor:
                 return command
         return None
     
-    def __attempt_rediscover_self(self):
+    def attempt_reconnect(self):
         """
         Trys to change the com class currently being used to be a detected
         com class with the same serial number. Useful for re-enumeration, such as when
         entering bootloader and using USB.
         """
         for potential_com in self.com.auto_detect():
-            potential_com.open()
-            sensor = ThreespaceSensor(potential_com)
-            if sensor.serial_number == self.serial_number:
-                self.com = potential_com
-                return True
-            sensor.cleanup() #Handles closing the potential_com
+            try:
+                potential_com.open()
+                sensor = ThreespaceSensor(potential_com)
+                if sensor.serial_number == self.serial_number:
+                    self.com = potential_com
+                    return True
+                sensor.cleanup() #Handles closing the potential_com
+            except:
+                continue
         return False
 
     def __cache_header_settings(self):
@@ -369,7 +372,7 @@ class ThreespaceSensor:
         #set the most severe state and get correct operations.
         if dirty_flags & DIRTY_FLAGS_UNKNOWN_STATE:
             if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
-                success = self.__attempt_rediscover_self()
+                success = self.attempt_reconnect()
                 if not success:
                     raise SensorConnectionError("Sensor connection lost")
             
@@ -1353,7 +1356,7 @@ class ThreespaceSensor:
         time.sleep(self.restart_delay) #Give it time to boot into bootloader
         if self.com.reenumerates:
             self.com.close()
-            success = self.__attempt_rediscover_self()
+            success = self.attempt_reconnect()
             if not success:
                 raise SensorConnectionError("Failed to reconnect to sensor in bootloader")
         in_bootloader = self.__check_bootloader_status()
@@ -1417,7 +1420,7 @@ class ThreespaceSensor:
         time.sleep(self.restart_delay) #Give time to boot into firmware
         if self.com.reenumerates:
             self.com.close()
-            success = self.__attempt_rediscover_self()
+            success = self.attempt_reconnect()
             if not success:
                 raise SensorConnectionError("Failed to reconnect to sensor in firmware")
         in_bootloader = self.__check_bootloader_status()
