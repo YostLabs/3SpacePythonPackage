@@ -6,12 +6,16 @@
 
 from yostlabs.tss3.utils.tests.base import SensorTestBase
 from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.consts import *
 
 class SelfTest(SensorTestBase):
 
     def __init__(self, sensor: ThreespaceSensor):
         super().__init__(sensor)
+
+        # Initialize dict. Keys must be in order of the bits in the result.
         self.result = {
+            "raw": 0,
             "accel": True,
             "gyro": True,
             "mag": True,
@@ -25,7 +29,24 @@ class SelfTest(SensorTestBase):
         }
 
     def start(self):
-        self.result["self_test"] = self.sensor.runSelfTest()
+        result = self.sensor.selfTest().data
+        self.result["raw"] = result
+
+        keys = list(self.result.keys())
+        keys.remove("raw")
+        for i, key in enumerate(keys):
+            self.result[key] = not bool(result & (1 << i))
+        self.overall_success = (result == 0)
 
     def cancel(self):
         pass
+
+def run_test():
+    sensor = ThreespaceSensor()
+    test = SelfTest(sensor)
+    test.start()
+    print(test.result)
+    print("Overall success:", test.overall_success)
+
+if __name__ == "__main__":
+    run_test()
