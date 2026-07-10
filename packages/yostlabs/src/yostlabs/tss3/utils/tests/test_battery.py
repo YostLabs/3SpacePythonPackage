@@ -174,8 +174,7 @@ class BatteryTest(SensorTestBase):
                 self.__go_next_state()
                 self.update()
         except Exception as e:
-            print(e)
-            print("Sensor is still disconnected. Please reconnect the sensor to continue the test.")
+            print("Exception occurred in BatteryTest:", e)
     
 
     def __cleanup(self):
