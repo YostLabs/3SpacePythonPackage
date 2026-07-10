@@ -716,7 +716,7 @@ class ThreespaceSensor:
         ----------
         query: used for the setting lookup. 'all' is good for getting all available keys, and 'settings' is good for all writable settings.
         """
-        result = self.read_settings_ascii(query)
+        result = self.read_settings_ascii(query, format="Dict")
         keys = list(result.keys())
         registered = []
         unregistered = []
