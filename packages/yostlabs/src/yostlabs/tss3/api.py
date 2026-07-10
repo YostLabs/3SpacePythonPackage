@@ -731,6 +731,10 @@ class ThreespaceSensor:
             self.cached_unregistered_settings |= set(unregistered)
         return {"registered": registered, "unregistered": unregistered}
 
+    def has_setting(self, key: str) -> bool:
+        registered_settings = self.read_available_setting_keys(key)["registered"]
+        return len(registered_settings) > 0
+
 #-------------------------------------ASCII SETTINGS PROTOCOL------------------------------------------------
 
     #Helper for converting python types to strings that set_settings can understand

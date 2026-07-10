@@ -175,6 +175,8 @@ class BatteryTest(SensorTestBase):
                 self.update()
         except Exception as e:
             print("Exception occurred in BatteryTest:", e)
+            self.overall_success = False
+            self.state = BatteryTestState.Finished
     
 
     def __cleanup(self):
