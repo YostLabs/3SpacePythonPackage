@@ -124,14 +124,7 @@ class ThreespaceSensor:
 
         self.log("Checking firmware status")
         try:
-            self.__cached_in_bootloader = self.__check_bootloader_status()
-            if not self.in_bootloader:
-                self.log("Initializing firmware")
-                self.__firmware_init()
-            else:
-                self.log("Initializing bootloader")
-                self.__cache_serial_number(self.bootloader_get_sn())
-                self.__empty_debug_cache()
+            self.__dynamic_reinit()
         #This is just to prevent a situation where instantiating the API creates and fails to release a com class on failure when user catches the exception
         #If user provides the com class, it is up to them to handle its state on error
         except Exception as e:
@@ -158,6 +151,16 @@ class ThreespaceSensor:
                 data = self.com.read_all()
                 if len(data) > 0:
                     break #Refresh the start time and wait for more data
+
+    def __dynamic_reinit(self):
+        self.__cached_in_bootloader = self.__check_bootloader_status()
+        if not self.__cached_in_bootloader:
+            self.log("Initializing firmware")
+            self.__firmware_init()
+        else:
+            self.log("Initializing bootloader")
+            self.__cache_serial_number(self.bootloader_get_sn())
+            self.__empty_debug_cache()
 
     def __firmware_init(self):
         """
@@ -281,6 +284,7 @@ class ThreespaceSensor:
                 sensor = ThreespaceSensor(potential_com)
                 if sensor.serial_number == self.serial_number:
                     self.com = potential_com
+                    self.__dynamic_reinit()  # Reinitialize the sensor state after reconnect
                     return True
                 sensor.cleanup() #Handles closing the potential_com
             except:
@@ -375,6 +379,7 @@ class ThreespaceSensor:
                 success = self.attempt_reconnect()
                 if not success:
                     raise SensorConnectionError("Sensor connection lost")
+                return #Attempt_Reconnect handles reinitializing the state
             
             self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
             was_in_bootloader = self.__cached_in_bootloader
@@ -1337,15 +1342,21 @@ class ThreespaceSensor:
 
 #---------------------------------POWER STATE CHANGING COMMANDS & BOOTLOADER------------------------------------
 
-    def __softwareReset(self):
+    def __softwareReset(self, timeout=1):
+        print(f"{timeout=}")
         self.check_dirty()
         cmd = self.commands[THREESPACE_SOFTWARE_RESET_COMMAND_NUM]
         cmd.send_command(self.com)
         self.com.close()
-        #TODO: Make this actually wait instead of an arbitrary sleep length
-        time.sleep(self.restart_delay) #Give it time to restart
-        self.com.open()
-        self.__firmware_init()
+        start_time = time.perf_counter()
+        success = False
+        while not success and time.perf_counter() - start_time < timeout:
+            try:
+                success = self.attempt_reconnect()
+            except:
+                continue
+        if not success:
+            raise SensorConnectionError("Failed to reconnect to sensor after software reset")
 
     def __enterBootloader(self):
         if self.in_bootloader: return
@@ -1651,7 +1662,7 @@ class ThreespaceSensor:
         """
         warnings.warn("commitSettings is deprecated, use commitSettingsSafe instead.", DeprecationWarning, stacklevel=2)
 
-    def softwareReset(self): ...
+    def softwareReset(self, timeout=1): ...
     def enterBootloader(self): ...
 
     def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...
