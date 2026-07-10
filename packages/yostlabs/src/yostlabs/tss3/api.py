@@ -1689,15 +1689,25 @@ class ThreespaceSensor:
         return self.write_settings(default=None)[0]
     
     def hardReset(self, timeout=3) -> bool:
-        #Not using write_settings to avoid trying to retrieve a response since there will be none
-        #due to the sensor resetting. Instead, just send the command and attempt to reconnect.
-        self.com.write(b"!hardreset\r\n")
+        #Doing this because the binary method can't differentiate between
+        #no response due to command not being supported or no response due to the sensor resetting.
+        #The ascii version will always get a response if not supported.
+        
+        try:
+            err, num_success = self.write_settings_ascii("hardreset")
+        except:
+            # If the sensor actually reset, the response will typically timeout or throw some communication error.
+            pass
+        else:
+            if err == 2:
+                raise InvalidKeyError("Hard reset not supported.")
+
         #Most ports can't maintain connection when the sensor hard resets.
         #If they can (like SPI/I2C/UART) they can reconnect very quickly (The open/close functions are typically)
         #empty since they aren't stateful like USB or BLE. So, just close the connection to speed up the reconnect process.
         self.com.close()
         success = self.attempt_reconnect(timeout=timeout)
-
+        
         if not success:
             raise SensorConnectionError("Failed to reconnect to sensor after hard reset")
 
