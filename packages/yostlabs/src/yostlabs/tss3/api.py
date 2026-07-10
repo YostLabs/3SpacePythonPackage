@@ -296,7 +296,8 @@ class ThreespaceSensor:
                     closed_port = True
 
                 #Need to rediscover the com port
-                for potential_com in self.com.auto_detect():
+                potential_coms = [self.com] if not self.com.reenumerates else self.com.auto_detect()
+                for potential_com in potential_coms:
                     try:
                         potential_com.open()
                         sensor = ThreespaceSensor(potential_com)
@@ -305,7 +306,7 @@ class ThreespaceSensor:
                             self.__dynamic_reinit()  # Reinitialize the sensor state after reconnect
                             return True
                         sensor.cleanup() #Handles closing the potential_com
-                    except:
+                    except Exception as e:
                         continue
         return False
 
@@ -1686,6 +1687,21 @@ class ThreespaceSensor:
     
     def restoreDefaultSettings(self) -> int:
         return self.write_settings(default=None)[0]
+    
+    def hardReset(self, timeout=3) -> bool:
+        #Not using write_settings to avoid trying to retrieve a response since there will be none
+        #due to the sensor resetting. Instead, just send the command and attempt to reconnect.
+        self.com.write(b"!hardreset\r\n")
+        #Most ports can't maintain connection when the sensor hard resets.
+        #If they can (like SPI/I2C/UART) they can reconnect very quickly (The open/close functions are typically)
+        #empty since they aren't stateful like USB or BLE. So, just close the connection to speed up the reconnect process.
+        self.com.close()
+        success = self.attempt_reconnect(timeout=timeout)
+
+        if not success:
+            raise SensorConnectionError("Failed to reconnect to sensor after hard reset")
+
+        return success
 
     def readAllSettings(self) -> dict[str,Any]:
         return self.read_settings("all")
