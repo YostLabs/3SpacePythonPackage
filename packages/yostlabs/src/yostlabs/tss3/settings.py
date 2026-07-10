@@ -86,6 +86,9 @@ THREESPACE_SETTINGS_LIST: list[ThreespaceSetting] = [
     ThreespaceReadWriteSetting("euler_order", "S"),
     ThreespaceReadSetting("update_rate_filter", "u"),
     ThreespaceReadSetting("update_rate_sms", "u"),
+    ThreespaceReadWriteSetting("heading_vector", "fff"),
+    ThreespaceWriteSetting("heading_vector_axis", "S"),
+    ThreespaceReadWriteSetting("heading_offset", "fb"),
     ThreespaceReadWriteSetting("offset", "ffff"),
     ThreespaceReadWriteSetting("base_offset", "ffff"),
     ThreespaceReadWriteSetting("tare_quat", "ffff"),
@@ -231,6 +234,8 @@ THREESPACE_SETTINGS_LIST: list[ThreespaceSetting] = [
     ThreespaceReadWriteSetting("rtc_minute", "b"),
     ThreespaceReadWriteSetting("rtc_second", "b"),
     ThreespaceReadWriteSetting("rtc_datetime", "Bbbbbb"),
+    ThreespaceReadWriteSetting("rtc_source", "b"),
+    ThreespaceReadWriteSetting("utc_offset", "f"),
     ThreespaceReadWriteSetting("bat_chg_rate", "B"),
     ThreespaceReadWriteSetting("bat_cold_threshold", "ff"),
     ThreespaceReadWriteSetting("bat_warm_threshold", "ff"),
@@ -551,6 +556,10 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
     TSD("debug_led", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("debug_fault", TSPD(validation_mode=TSPDV.BOOL)),
     TSD("debug_wdt", TSPD(validation_mode=TSPDV.BOOL)),
+    TSD("heading_offset", descriptors = [
+        TSPD(unit="degrees", suffix="degrees", validation_mode=TSPDV.RANGE, min_value=-180.0, max_value=180.0),
+        TSPD(validation_mode=TSPDV.ENUM, valid_values={"Manual": 0, "GPS": 1})
+        ]),
     TSD("axis_order", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=_validate_axis_order)),
     TSD("axis_order_c", TSPD(validation_mode=TSPDV.CUSTOM, custom_validator=_validate_axis_order_c)),
     TSD("axis_offset_enabled", TSPD(validation_mode=TSPDV.BOOL)),
@@ -612,6 +621,8 @@ THREESPACE_SETTINGS_DEFAULT_DESC_LIST: list[ThreespaceSettingDescriptor] = [
         TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59), #Minute
         TSPD(validation_mode=TSPDV.RANGE, min_value=0, max_value=59), #Second
     ]),
+    TSD("rtc_source", TSPD(validation_mode=TSPDV.ENUM, valid_values={"Auto": 0, "Manual": 1, "System": 2, "RTC": 3})),
+    TSD("utc_offset", TSPD(unit="hours", suffix="h", validation_mode=TSPDV.RANGE, min_value=-12, max_value=14)),
     TSD("bat_chg_rate", TSPD(unit="milliamps", suffix="mA", validation_mode=TSPDV.RANGE, min_value=0, max_value=2000)),
     TSD("bat_cold_threshold", descriptors=[
         TSPD(unit="celsius", suffix="C", validation_mode=TSPDV.RANGE, min_value=-273.15, max_value=100), 

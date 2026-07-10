@@ -283,9 +283,13 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
     ThreespaceCommand("getBarometerAltitude", 15, "b", "f"),
     ThreespaceCommand("getBarometerPressure", 16, "b", "f"),
 
+    ThreespaceCommand("getHeading", 17, "", "f"),
+
     ThreespaceCommand("setOffsetWithCurrentOrientation", 19, "", ""),
     ThreespaceCommand("resetBaseOffset", 20, "", ""),
     ThreespaceCommand("setBaseOffsetWithCurrentOrientation", 22, "", ""),
+
+    ThreespaceCommand("getInterruptStatus", 31, "", "b"),
 
     ThreespaceCommand("getAllPrimaryNormalizedData", 32, "", "fffffffff"),
     ThreespaceCommand("getPrimaryNormalizedGyroRate", 33, "", "fff"),
@@ -348,6 +352,7 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
     
     ThreespaceCommand("getDateTimeString", 93, "", "S"),
     ThreespaceCommand("getTimestamp", 94, "", "U"),
+    ThreespaceCommand("setTimestamp", 95, "U", ""),
 
     ThreespaceCommand("tareWithCurrentOrientation", 96, "", ""),
     ThreespaceCommand("setBaseTareWithCurrentOrientation", 97, "", ""),
@@ -380,12 +385,18 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
     ThreespaceCommand("getBatteryPercent", 202, "", "b"),
     ThreespaceCommand("getBatteryStatus", 203, "", "b"),
 
+    #WMM
+    ThreespaceCommand("wmmGetField", 208, "", "fffffff"),
+    ThreespaceCommand("wmmUpdatePosition", 209, "", ""),
+    ThreespaceCommand("wmmUpdateDate", 210, "", ""),
+
     ThreespaceCommand("getGpsActiveState", 214, "", "b"),
     ThreespaceCommand("getGpsCoord", 215, "", "dd"),
     ThreespaceCommand("getGpsAltitude", 216, "", "f"),
     ThreespaceCommand("getGpsFixState", 217, "", "b"),
     ThreespaceCommand("getGpsHdop", 218, "", "f"),
     ThreespaceCommand("getGpsSatellites", 219, "", "b"),
+    ThreespaceCommand("setGpsData", 221, "ddf", ""),
 
     ThreespaceCommand("commitSettings", 225, "", ""),
     ThreespaceCommand("softwareReset", THREESPACE_SOFTWARE_RESET_COMMAND_NUM, "", ""),
@@ -418,6 +429,8 @@ class StreamableCommands(Enum):
     GetPrimaryBarometerAltitude = 14
     GetBarometerAltitudeById = 15
     GetBarometerPressureById = 16
+
+    GetHeading = 17
 
     GetAllPrimaryNormalizedData = 32
     GetPrimaryNormalizedGyroRate = 33
