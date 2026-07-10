@@ -272,23 +272,41 @@ class ThreespaceSensor:
                 return command
         return None
     
-    def attempt_reconnect(self):
+    def attempt_reconnect(self, timeout=1):
         """
         Trys to change the com class currently being used to be a detected
         com class with the same serial number. Useful for re-enumeration, such as when
         entering bootloader and using USB.
         """
-        for potential_com in self.com.auto_detect():
-            try:
-                potential_com.open()
-                sensor = ThreespaceSensor(potential_com)
-                if sensor.serial_number == self.serial_number:
-                    self.com = potential_com
-                    self.__dynamic_reinit()  # Reinitialize the sensor state after reconnect
+        closed_port = False
+        start_time = time.perf_counter()
+        while time.perf_counter() - start_time < timeout:
+            if self.com.check_open():
+                #Com port still function, just try and reinit the sensor
+                try:
+                    self.__dynamic_reinit()
                     return True
-                sensor.cleanup() #Handles closing the potential_com
-            except:
-                continue
+                except:
+                    continue
+            else:
+                #Even though it is considered not open, the OS may be holding onto info
+                #This is to clean that up.
+                if not closed_port:
+                    self.com.close()
+                    closed_port = True
+
+                #Need to rediscover the com port
+                for potential_com in self.com.auto_detect():
+                    try:
+                        potential_com.open()
+                        sensor = ThreespaceSensor(potential_com)
+                        if sensor.serial_number == self.serial_number:
+                            self.com = potential_com
+                            self.__dynamic_reinit()  # Reinitialize the sensor state after reconnect
+                            return True
+                        sensor.cleanup() #Handles closing the potential_com
+                    except:
+                        continue
         return False
 
     def __cache_header_settings(self):
@@ -1347,14 +1365,8 @@ class ThreespaceSensor:
         self.check_dirty()
         cmd = self.commands[THREESPACE_SOFTWARE_RESET_COMMAND_NUM]
         cmd.send_command(self.com)
-        self.com.close()
-        start_time = time.perf_counter()
-        success = False
-        while not success and time.perf_counter() - start_time < timeout:
-            try:
-                success = self.attempt_reconnect()
-            except:
-                continue
+        success = self.attempt_reconnect(timeout=timeout)
+
         if not success:
             raise SensorConnectionError("Failed to reconnect to sensor after software reset")
 
