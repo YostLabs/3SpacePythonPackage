@@ -67,6 +67,7 @@ class ComponentTest(SensorTestBase):
 
     CHECK_UPDATE_RATE_WAIT_DURATION = 2.0    # seconds to wait before checking update rate (gives time for it to update)
     UPDATE_RATE_TOLERANCE = 0.01    # 1% tolerance for update rate vs true ODR
+    GYRO_ACCEL_DOT_THRESHOLD = 0.9  # minimum acceptable dot product for gyro-accel cross-check
     MAG_MIN_LENGTH = 0.21           # minimum acceptable average mag vector magnitude
     GYRO_FLIP_MIN_DEGREES = 120.0   # integrated rotation threshold to count as a flip
 
@@ -98,6 +99,7 @@ class ComponentTest(SensorTestBase):
             },
             # "accel", "gyro", "mag", "baro" keys are populated in CheckingComponents.
             # Structure: result[ctype][cid][test_name] = {success, ...}
+            "gyro_accel_check": {},  # (gyro_id, accel_id) -> {success, dot_product}
         }
 
     # ------------------------------------------------------------------
@@ -423,6 +425,8 @@ class ComponentTest(SensorTestBase):
                 self.overall_success = False
 
     def __analyze_gyro_flip(self):
+        principal_axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
         for gyro_id in self._gyro_ids:
             times = self._flip_samples.get("time", [])
             gyro_values = self._flip_samples.get("gyro", {}).get(gyro_id, [])
@@ -431,7 +435,7 @@ class ComponentTest(SensorTestBase):
                 self.__comp_result("gyro", gyro_id)["flip"] = {
                     "success": False,
                     "reason": "insufficient samples for integration",
-                    "total_rotation_deg": None,
+                    "max_rotation_deg": None,
                 }
                 self.overall_success = False
                 continue
@@ -439,7 +443,7 @@ class ComponentTest(SensorTestBase):
             # Integrate angular velocity (rad/s) into a cumulative rotation quaternion
             q = [0.0, 0.0, 0.0, 1.0]  # identity: [x, y, z, w]
             for i in range(1, len(timed_values)):
-                dt = (timed_values[i][0] - timed_values[i - 1][0])
+                dt = timed_values[i][0] - timed_values[i - 1][0]
                 gyro = timed_values[i][1]  # [wx, wy, wz] in rad/s
                 angle = vec_len(gyro) * dt
                 if angle > 1e-12:
@@ -447,19 +451,48 @@ class ComponentTest(SensorTestBase):
                     dq = quat_from_axis_angle(axis, angle)
                     q = quat_mul(q, dq)
 
-            # Measure how far a reference up vector was rotated by the accumulated rotation
-            up = [0.0, 1.0, 0.0]
-            rotated_up = quat_rotate_vec(q, up)
-            cos_angle = max(-1.0, min(1.0, vec_dot(up, vec_normalize(rotated_up))))
-            total_deg = math.degrees(math.acos(cos_angle))
-            passed = total_deg >= self.GYRO_FLIP_MIN_DEGREES
+            # Pass if any principal axis was rotated >= GYRO_FLIP_MIN_DEGREES.
+            # Checking all three avoids false negatives when the flip axis is
+            # aligned with the single reference vector used in a one-axis check.
+            max_deg = 0.0
+            best_axis = None
+            for axis in principal_axes:
+                rotated = quat_rotate_vec(q, axis)
+                cos_a = max(-1.0, min(1.0, vec_dot(axis, vec_normalize(rotated))))
+                deg = math.degrees(math.acos(cos_a))
+                if deg > max_deg:
+                    max_deg = deg
+                    best_axis = axis
 
-            self.__comp_result("gyro", gyro_id)["flip"] = {
+            passed = max_deg >= self.GYRO_FLIP_MIN_DEGREES
+
+            flip_result = {
                 "success": passed,
-                "total_rotation_deg": total_deg,
-                "quat": q,
-                "rotated_up": rotated_up
+                "max_rotation_deg": max_deg,
+                "best_axis": best_axis,
             }
+
+            # Cross-check against every accel that passed its own flip test:
+            # rotate the initial accel vector by q and verify it aligns with
+            # the observed final accel vector (dot >= self.GYRO_ACCEL_DOT_THRESHOLD).
+            for accel_id in self._accel_ids:
+                accel_flip = self.result.get("accel", {}).get(accel_id, {}).get("flip", {})
+                if not accel_flip.get("success"):
+                    continue
+                accel_vals = self._flip_samples.get("accel", {}).get(accel_id, [])
+                if len(accel_vals) < 2:
+                    continue
+                predicted = quat_rotate_vec(q, accel_vals[0])
+                dot = vec_dot(vec_normalize(predicted), vec_normalize(accel_vals[-1]))
+                check_passed = dot >= self.GYRO_ACCEL_DOT_THRESHOLD
+                self.result["gyro_accel_check"][(gyro_id, accel_id)] = {
+                    "success": check_passed,
+                    "dot_product": dot,
+                }
+                if not check_passed:
+                    self.overall_success = False
+
+            self.__comp_result("gyro", gyro_id)["flip"] = flip_result
             if not passed:
                 self.overall_success = False
 
@@ -603,6 +636,19 @@ def print_results(result: dict, show_only_failures: bool = False):
                     print(f"  {cid}")
                     printed_id_header = True
                 print(f"    {test_name}: {_fmt(test_data)}")
+
+    # Gyro-accel cross-check block
+    gyro_accel = result.get("gyro_accel_check", {})
+    if gyro_accel:
+        printed_header = False
+        for (gyro_id, accel_id), check_data in gyro_accel.items():
+            success = check_data.get("success")
+            if show_only_failures and success is not False:
+                continue
+            if not printed_header:
+                print("Gyro-Accel Cross-Check")
+                printed_header = True
+            print(f"  gyro={gyro_id}, accel={accel_id}: {_fmt(check_data)}")
 
 
 def run_test(show_only_failures: bool = False):
