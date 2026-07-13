@@ -307,7 +307,7 @@ class ComponentTest(SensorTestBase):
             "static_check": {"success": None, "static_error": None },
             "set_odr_50": {"success": None, "error": None, "true_odr": None},
             "update_rate_50": {"success": None, "expected": None, "actual": None},
-            "flip": {"success": None},
+            "flip": {"success": None },
         }
 
     # ------------------------------------------------------------------
@@ -335,8 +335,8 @@ class ComponentTest(SensorTestBase):
 
         for mag_id in self._mag_ids:
             is_static, error = self.__check_static_vector(self._static_samples, "mag", mag_id)
-            avg_vec = self.__average_vector(self._static_samples, "mag", mag_id)
-            mag_len = vec_len(avg_vec) if avg_vec is not None else 0.0
+            mag_vecs = self._static_samples.get("mag", {}).get(mag_id, [])
+            mag_len = sum(vec_len(v) for v in mag_vecs) / len(mag_vecs) if mag_vecs else 0.0
             length_ok = mag_len >= self.MAG_MIN_LENGTH
             self.__comp_result("mag", mag_id)["static_check"] = {
                 "success": not is_static and length_ok,
@@ -378,13 +378,6 @@ class ComponentTest(SensorTestBase):
             return False, ""
         return True, f"all samples identical: {first}"
 
-    def __average_vector(self, samples: dict, ctype: str, cid: int) -> list[float] | None:
-        values = samples.get(ctype, {}).get(cid, [])
-        if not values:
-            return None
-        n = len(values)
-        return [sum(v[i] for v in values) / n for i in range(len(values[0]))]
-
     # ------------------------------------------------------------------
     # Flip data analysis
     # ------------------------------------------------------------------
@@ -395,7 +388,7 @@ class ComponentTest(SensorTestBase):
             if len(values) < 2:
                 self.__comp_result("accel", accel_id)["flip"] = {
                     "success": False,
-                    "reason": "insufficient samples",
+                    "error": "insufficient samples",
                 }
                 self.overall_success = False
                 continue
@@ -446,7 +439,7 @@ class ComponentTest(SensorTestBase):
             # Integrate angular velocity (rad/s) into a cumulative rotation quaternion
             q = [0.0, 0.0, 0.0, 1.0]  # identity: [x, y, z, w]
             for i in range(1, len(timed_values)):
-                dt = (timed_values[i][0] - timed_values[i - 1][0]) / 1_000_000  # µs -> s
+                dt = (timed_values[i][0] - timed_values[i - 1][0])
                 gyro = timed_values[i][1]  # [wx, wy, wz] in rad/s
                 angle = vec_len(gyro) * dt
                 if angle > 1e-12:
@@ -455,7 +448,7 @@ class ComponentTest(SensorTestBase):
                     q = quat_mul(q, dq)
 
             # Measure how far a reference up vector was rotated by the accumulated rotation
-            up = [0.0, 0.0, 1.0]
+            up = [0.0, 1.0, 0.0]
             rotated_up = quat_rotate_vec(q, up)
             cos_angle = max(-1.0, min(1.0, vec_dot(up, vec_normalize(rotated_up))))
             total_deg = math.degrees(math.acos(cos_angle))
@@ -464,6 +457,8 @@ class ComponentTest(SensorTestBase):
             self.__comp_result("gyro", gyro_id)["flip"] = {
                 "success": passed,
                 "total_rotation_deg": total_deg,
+                "quat": q,
+                "rotated_up": rotated_up
             }
             if not passed:
                 self.overall_success = False
@@ -656,4 +651,4 @@ def run_test(show_only_failures: bool = False):
 
 
 if __name__ == "__main__":
-    run_test(show_only_failures=True)
+    run_test(show_only_failures=False)
