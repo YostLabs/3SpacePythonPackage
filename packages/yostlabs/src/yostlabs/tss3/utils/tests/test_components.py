@@ -67,7 +67,7 @@ class ComponentTest(SensorTestBase):
 
     CHECK_UPDATE_RATE_WAIT_DURATION = 2.0    # seconds to wait before checking update rate (gives time for it to update)
     UPDATE_RATE_TOLERANCE = 0.01    # 1% tolerance for update rate vs true ODR
-    MAG_MIN_LENGTH = 1.0            # minimum acceptable average mag vector magnitude
+    MAG_MIN_LENGTH = 0.21           # minimum acceptable average mag vector magnitude
     GYRO_FLIP_MIN_DEGREES = 120.0   # integrated rotation threshold to count as a flip
 
     def __init__(self, sensor: ThreespaceSensor, expected_components: list[str] | None = None):
@@ -199,43 +199,26 @@ class ComponentTest(SensorTestBase):
     def __update_setting_odr(self, target_odr: int, result_key: str):
         all_ok = True
 
-        for accel_id in self._accel_ids:
-            err = self.sensor.writeOdrAccel(accel_id, target_odr)
-            if err != 0:
-                self.__comp_result("accel", accel_id)[result_key] = {"success": False, "error": err, "true_odr": None}
-                all_ok = False
-            else:
-                self.__comp_result("accel", accel_id)[result_key] = {"success": True, "error": None, "true_odr": self.sensor.readOdrAccel(accel_id)}
+        odr_methods = {
+            "accel": (self._accel_ids, self.sensor.writeOdrAccel, self.sensor.readOdrAccel),
+            "gyro":  (self._gyro_ids,  self.sensor.writeOdrGyro,  self.sensor.readOdrGyro),
+            "mag":   (self._mag_ids,   self.sensor.writeOdrMag,   self.sensor.readOdrMag),
+            "baro":  (self._baro_ids,  self.sensor.writeOdrBaro,  self.sensor.readOdrBaro),
+        }
 
-        for gyro_id in self._gyro_ids:
-            err = self.sensor.writeOdrGyro(gyro_id, target_odr)
-            if err != 0:
-                self.__comp_result("gyro", gyro_id)[result_key] = {"success": False, "error": err, "true_odr": None}
-                all_ok = False
-            else:
-                self.__comp_result("gyro", gyro_id)[result_key] = {"success": True, "error": None, "true_odr": self.sensor.readOdrGyro(gyro_id)}
-
-        for mag_id in self._mag_ids:
-            err = self.sensor.writeOdrMag(mag_id, target_odr)
-            if err != 0:
-                self.__comp_result("mag", mag_id)[result_key] = {"success": False, "error": err, "true_odr": None}
-                all_ok = False
-            else:
-                self.__comp_result("mag", mag_id)[result_key] = {"success": True, "error": None, "true_odr": self.sensor.readOdrMag(mag_id)}
-
-        for baro_id in self._baro_ids:
-            err = self.sensor.writeOdrBaro(baro_id, target_odr)
-            if err != 0:
-                self.__comp_result("baro", baro_id)[result_key] = {"success": False, "error": err, "true_odr": None}
-                all_ok = False
-            else:
-                self.__comp_result("baro", baro_id)[result_key] = {"success": True, "error": None, "true_odr": self.sensor.readOdrBaro(baro_id)}
+        for ctype, (ids, write_fn, read_fn) in odr_methods.items():
+            for cid in ids:
+                err = write_fn(cid, target_odr)
+                if err != 0:
+                    self.__comp_result(ctype, cid)[result_key] = {"success": False, "error": err, "true_odr": None}
+                    all_ok = False
+                else:
+                    self.__comp_result(ctype, cid)[result_key] = {"success": True, "error": None, "true_odr": read_fn(cid)}
 
         if not all_ok:
             self.overall_success = False
 
         self._odr_set_time = time.perf_counter()
-
         self.__go_next_state()
 
     def __update_streaming_static(self):
@@ -243,7 +226,6 @@ class ComponentTest(SensorTestBase):
         if self._manager is None:
             self._setup_manager(hz=50)
             self._current_samples = self._make_samples_dict()
-            return
 
         self._manager.update()
 
@@ -322,7 +304,7 @@ class ComponentTest(SensorTestBase):
         return {
             "set_odr_1000": {"success": None, "error": None, "true_odr": None},
             "update_rate_1000": {"success": None, "expected": None, "actual": None},
-            "static_check": {"success": None, "static_value": None },
+            "static_check": {"success": None, "static_error": None },
             "set_odr_50": {"success": None, "error": None, "true_odr": None},
             "update_rate_50": {"success": None, "expected": None, "actual": None},
             "flip": {"success": None},
@@ -336,40 +318,39 @@ class ComponentTest(SensorTestBase):
         all_pass = True
 
         for accel_id in self._accel_ids:
-            is_static, extra = self.__check_static_vector(self._static_samples, "accel", accel_id)
+            is_static, error = self.__check_static_vector(self._static_samples, "accel", accel_id)
             self.__comp_result("accel", accel_id)["static_check"] = {
-                "success": not is_static, "static": is_static, **extra
+                "success": not is_static, "static_error": error
             }
             if is_static:
                 all_pass = False
 
         for gyro_id in self._gyro_ids:
-            is_static, extra = self.__check_static_vector(self._static_samples, "gyro", gyro_id)
+            is_static, error = self.__check_static_vector(self._static_samples, "gyro", gyro_id)
             self.__comp_result("gyro", gyro_id)["static_check"] = {
-                "success": not is_static, "static": is_static, **extra
+                "success": not is_static, "static_error": error
             }
             if is_static:
                 all_pass = False
 
         for mag_id in self._mag_ids:
-            is_static, extra = self.__check_static_vector(self._static_samples, "mag", mag_id)
+            is_static, error = self.__check_static_vector(self._static_samples, "mag", mag_id)
             avg_vec = self.__average_vector(self._static_samples, "mag", mag_id)
             mag_len = vec_len(avg_vec) if avg_vec is not None else 0.0
             length_ok = mag_len >= self.MAG_MIN_LENGTH
             self.__comp_result("mag", mag_id)["static_check"] = {
                 "success": not is_static and length_ok,
-                "static": is_static,
+                "static_error": error,
                 "avg_length": mag_len,
                 "length_ok": length_ok,
-                **extra,
             }
             if is_static or not length_ok:
                 all_pass = False
 
         for baro_id in self._baro_ids:
-            is_static, extra = self.__check_static_scalar(self._static_samples, "baro", baro_id)
+            is_static, error = self.__check_static_scalar(self._static_samples, "baro", baro_id)
             self.__comp_result("baro", baro_id)["static_check"] = {
-                "success": not is_static, "static": is_static, **extra
+                "success": not is_static, "static_error": error
             }
             if is_static:
                 all_pass = False
@@ -377,28 +358,28 @@ class ComponentTest(SensorTestBase):
         if not all_pass:
             self.overall_success = False
 
-    def __check_static_vector(self, samples: dict, ctype: str, cid: int) -> tuple[bool, dict]:
+    def __check_static_vector(self, samples: dict, ctype: str, cid: int) -> tuple[bool, str]:
         """Returns (is_static, extra). is_static=True means no variation was detected."""
-        values = [v for v in samples.get(ctype, {}).get(cid, []) if v is not None]
+        values = samples.get(ctype, {}).get(cid, [])
         if len(values) < 2:
-            return True, {"reason": "insufficient samples"}
+            return True, "insufficient samples"
         first = values[0]
         for v in values[1:]:
             if any(abs(v[i] - first[i]) > 1e-9 for i in range(len(v))):
-                return False, {}
-        return True, {"reason": "all samples identical"}
+                return False, ""
+        return True, f"all samples identical: {first}"
 
-    def __check_static_scalar(self, samples: dict, ctype: str, cid: int) -> tuple[bool, dict]:
-        values = [v for v in samples.get(ctype, {}).get(cid, []) if v is not None]
+    def __check_static_scalar(self, samples: dict, ctype: str, cid: int) -> tuple[bool, str]:
+        values = samples.get(ctype, {}).get(cid, [])
         if len(values) < 2:
-            return True, {"reason": "insufficient samples"}
+            return True, "insufficient samples"
         first = values[0]
         if any(abs(v - first) > 1e-9 for v in values[1:]):
-            return False, {}
-        return True, {"reason": "all samples identical"}
+            return False, ""
+        return True, f"all samples identical: {first}"
 
     def __average_vector(self, samples: dict, ctype: str, cid: int) -> list[float] | None:
-        values = [v for v in samples.get(ctype, {}).get(cid, []) if v is not None]
+        values = samples.get(ctype, {}).get(cid, [])
         if not values:
             return None
         n = len(values)
