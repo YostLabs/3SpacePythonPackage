@@ -65,12 +65,10 @@ class ComponentTest(SensorTestBase):
         - Baro: no data verification performed.
     """
 
-    STATIC_STREAM_DURATION = 2.0    # seconds of data for the static noise check
-    FLIP_MIN_WAIT_DURATION = 2.0    # minimum seconds that must pass before reviewing flipped data for ODR change
+    CHECK_UPDATE_RATE_WAIT_DURATION = 2.0    # seconds to wait before checking update rate (gives time for it to update)
     UPDATE_RATE_TOLERANCE = 0.01    # 1% tolerance for update rate vs true ODR
     MAG_MIN_LENGTH = 1.0            # minimum acceptable average mag vector magnitude
     GYRO_FLIP_MIN_DEGREES = 120.0   # integrated rotation threshold to count as a flip
-    FLIP_SETTLE_DELAY = 0.5         # seconds after flip signal before sampling "flipped" data
 
     def __init__(self, sensor: ThreespaceSensor, expected_components: list[str] | None = None):
         super().__init__(sensor)
@@ -85,13 +83,12 @@ class ComponentTest(SensorTestBase):
         self._baro_ids: list[int] = []
 
         self._manager: ThreespaceStreamingManager | None = None
-        self._current_samples: list[dict] = []
-        self._static_samples: list[dict] = []
-        self._flip_samples: list[dict] = []
+        self._current_samples: dict = {}
+        self._static_samples: dict = {}
+        self._flip_samples: dict = {}
 
-        self._stream_start_time: float | None = None
-        self._flip_signal_time: float | None = None
         self._flip_done_flag: bool = False
+        self._odr_set_time: float | None = None
 
         self.result = {
             "valid_components": {
@@ -147,18 +144,15 @@ class ComponentTest(SensorTestBase):
         """Call when the sensor has been placed flat and is stable on a surface."""
         if self.state != ComponentTestState.AwaitingFlatSurface:
             return
-        self._current_samples = []
+        self._current_samples = self._make_samples_dict()
         self._flip_done_flag = False
-        self._flip_signal_time = None
         self._setup_manager(hz=50)
-        self._stream_start_time = time.perf_counter()
         self.__go_next_state()
 
     def notify_flip_done(self):
         """Call once the sensor has been flipped upside down."""
         if self.state != ComponentTestState.StreamingFlip:
             return
-        self._flip_signal_time = time.perf_counter()
         self._flip_done_flag = True
 
     # ------------------------------------------------------------------
@@ -240,22 +234,23 @@ class ComponentTest(SensorTestBase):
         if not all_ok:
             self.overall_success = False
 
+        self._odr_set_time = time.perf_counter()
+
         self.__go_next_state()
 
     def __update_streaming_static(self):
         # First entry: set up streaming and return; subsequent calls check elapsed time.
         if self._manager is None:
             self._setup_manager(hz=50)
-            self._current_samples = []
-            self._stream_start_time = time.perf_counter()
+            self._current_samples = self._make_samples_dict()
             return
 
         self._manager.update()
 
-        if time.perf_counter() - self._stream_start_time >= self.STATIC_STREAM_DURATION:
+        if time.perf_counter() - self._odr_set_time >= self.CHECK_UPDATE_RATE_WAIT_DURATION:
             self._stop_manager()
-            self._static_samples = self._current_samples[:]
-            self._current_samples = []
+            self._static_samples = self._current_samples
+            self._current_samples = self._make_samples_dict()
             self.__analyze_static_data()
             self.__go_next_state()
 
@@ -263,12 +258,12 @@ class ComponentTest(SensorTestBase):
         self._manager.update()
         if self._flip_done_flag:
             self._stop_manager()
-            self._flip_samples = self._current_samples[:]
-            self._current_samples = []
+            self._flip_samples = self._current_samples
+            self._current_samples = {}
             self.__go_next_state()
 
     def __update_waiting_for_min_duration(self):
-        if time.perf_counter() - self._stream_start_time >= self.FLIP_MIN_WAIT_DURATION:
+        if time.perf_counter() - self._odr_set_time >= self.CHECK_UPDATE_RATE_WAIT_DURATION:
             self.__go_next_state()
 
     def __update_reading_update_rate(self, odr_result_key: str, rate_result_key: str):
@@ -341,8 +336,7 @@ class ComponentTest(SensorTestBase):
         all_pass = True
 
         for accel_id in self._accel_ids:
-            key = ("accel", accel_id)
-            is_static, extra = self.__check_static_vector(self._static_samples, key)
+            is_static, extra = self.__check_static_vector(self._static_samples, "accel", accel_id)
             self.__comp_result("accel", accel_id)["static_check"] = {
                 "success": not is_static, "static": is_static, **extra
             }
@@ -350,8 +344,7 @@ class ComponentTest(SensorTestBase):
                 all_pass = False
 
         for gyro_id in self._gyro_ids:
-            key = ("gyro", gyro_id)
-            is_static, extra = self.__check_static_vector(self._static_samples, key)
+            is_static, extra = self.__check_static_vector(self._static_samples, "gyro", gyro_id)
             self.__comp_result("gyro", gyro_id)["static_check"] = {
                 "success": not is_static, "static": is_static, **extra
             }
@@ -359,9 +352,8 @@ class ComponentTest(SensorTestBase):
                 all_pass = False
 
         for mag_id in self._mag_ids:
-            key = ("mag", mag_id)
-            is_static, extra = self.__check_static_vector(self._static_samples, key)
-            avg_vec = self.__average_vector(self._static_samples, key)
+            is_static, extra = self.__check_static_vector(self._static_samples, "mag", mag_id)
+            avg_vec = self.__average_vector(self._static_samples, "mag", mag_id)
             mag_len = vec_len(avg_vec) if avg_vec is not None else 0.0
             length_ok = mag_len >= self.MAG_MIN_LENGTH
             self.__comp_result("mag", mag_id)["static_check"] = {
@@ -375,8 +367,7 @@ class ComponentTest(SensorTestBase):
                 all_pass = False
 
         for baro_id in self._baro_ids:
-            key = ("baro", baro_id)
-            is_static, extra = self.__check_static_scalar(self._static_samples, key)
+            is_static, extra = self.__check_static_scalar(self._static_samples, "baro", baro_id)
             self.__comp_result("baro", baro_id)["static_check"] = {
                 "success": not is_static, "static": is_static, **extra
             }
@@ -386,9 +377,9 @@ class ComponentTest(SensorTestBase):
         if not all_pass:
             self.overall_success = False
 
-    def __check_static_vector(self, samples: list[dict], key: tuple) -> tuple[bool, dict]:
+    def __check_static_vector(self, samples: dict, ctype: str, cid: int) -> tuple[bool, dict]:
         """Returns (is_static, extra). is_static=True means no variation was detected."""
-        values = [s[key] for s in samples if key in s and s[key] is not None]
+        values = [v for v in samples.get(ctype, {}).get(cid, []) if v is not None]
         if len(values) < 2:
             return True, {"reason": "insufficient samples"}
         first = values[0]
@@ -397,8 +388,8 @@ class ComponentTest(SensorTestBase):
                 return False, {}
         return True, {"reason": "all samples identical"}
 
-    def __check_static_scalar(self, samples: list[dict], key: tuple) -> tuple[bool, dict]:
-        values = [s[key] for s in samples if key in s and s[key] is not None]
+    def __check_static_scalar(self, samples: dict, ctype: str, cid: int) -> tuple[bool, dict]:
+        values = [v for v in samples.get(ctype, {}).get(cid, []) if v is not None]
         if len(values) < 2:
             return True, {"reason": "insufficient samples"}
         first = values[0]
@@ -406,8 +397,8 @@ class ComponentTest(SensorTestBase):
             return False, {}
         return True, {"reason": "all samples identical"}
 
-    def __average_vector(self, samples: list[dict], key: tuple) -> list[float] | None:
-        values = [s[key] for s in samples if key in s and s[key] is not None]
+    def __average_vector(self, samples: dict, ctype: str, cid: int) -> list[float] | None:
+        values = [v for v in samples.get(ctype, {}).get(cid, []) if v is not None]
         if not values:
             return None
         n = len(values)
@@ -417,34 +408,17 @@ class ComponentTest(SensorTestBase):
     # Flip data analysis
     # ------------------------------------------------------------------
 
-    def __flat_samples(self) -> list[dict]:
-        """Samples recorded before the flip signal was given."""
-        if self._flip_signal_time is None:
-            return self._flip_samples
-        return [s for s in self._flip_samples if s["time"] < self._flip_signal_time]
-
-    def __flipped_samples(self) -> list[dict]:
-        """Samples recorded after a settling delay following the flip signal."""
-        if self._flip_signal_time is None:
-            return []
-        cutoff = self._flip_signal_time + self.FLIP_SETTLE_DELAY
-        return [s for s in self._flip_samples if s["time"] > cutoff]
-
     def __analyze_accel_flip(self):
-        flat = self.__flat_samples()
-        flipped = self.__flipped_samples()
         for accel_id in self._accel_ids:
-            key = ("accel", accel_id)
-            flat_avg = self.__average_vector(flat, key)
-            flipped_avg = self.__average_vector(flipped, key)
-            if flat_avg is None or flipped_avg is None:
+            values = self._flip_samples.get("accel", {}).get(accel_id, [])
+            if len(values) < 2:
                 self.__comp_result("accel", accel_id)["flip"] = {
                     "success": False,
-                    "reason": "insufficient samples for direction comparison",
+                    "reason": "insufficient samples",
                 }
                 self.overall_success = False
                 continue
-            dot = vec_dot(vec_normalize(flat_avg), vec_normalize(flipped_avg))
+            dot = vec_dot(vec_normalize(values[0]), vec_normalize(values[-1]))
             direction_changed = dot < 0.0
             self.__comp_result("accel", accel_id)["flip"] = {
                 "success": direction_changed,
@@ -455,20 +429,16 @@ class ComponentTest(SensorTestBase):
                 self.overall_success = False
 
     def __analyze_mag_flip(self):
-        flat = self.__flat_samples()
-        flipped = self.__flipped_samples()
         for mag_id in self._mag_ids:
-            key = ("mag", mag_id)
-            flat_avg = self.__average_vector(flat, key)
-            flipped_avg = self.__average_vector(flipped, key)
-            if flat_avg is None or flipped_avg is None:
+            values = self._flip_samples.get("mag", {}).get(mag_id, [])
+            if len(values) < 2:
                 self.__comp_result("mag", mag_id)["flip"] = {
                     "success": False,
-                    "reason": "insufficient samples for direction comparison",
+                    "reason": "insufficient samples",
                 }
                 self.overall_success = False
                 continue
-            dot = vec_dot(vec_normalize(flat_avg), vec_normalize(flipped_avg))
+            dot = vec_dot(vec_normalize(values[0]), vec_normalize(values[-1]))
             direction_changed = dot < 0.0
             self.__comp_result("mag", mag_id)["flip"] = {
                 "success": direction_changed,
@@ -480,12 +450,9 @@ class ComponentTest(SensorTestBase):
 
     def __analyze_gyro_flip(self):
         for gyro_id in self._gyro_ids:
-            key = ("gyro", gyro_id)
-            timed_values = [
-                (s["time"], s[key])
-                for s in self._flip_samples
-                if key in s and s[key] is not None
-            ]
+            times = self._flip_samples.get("time", [])
+            gyro_values = self._flip_samples.get("gyro", {}).get(gyro_id, [])
+            timed_values = [(t, g) for t, g in zip(times, gyro_values) if g is not None]
             if len(timed_values) < 2:
                 self.__comp_result("gyro", gyro_id)["flip"] = {
                     "success": False,
@@ -498,7 +465,7 @@ class ComponentTest(SensorTestBase):
             # Integrate angular velocity (rad/s) into a cumulative rotation quaternion
             q = [0.0, 0.0, 0.0, 1.0]  # identity: [x, y, z, w]
             for i in range(1, len(timed_values)):
-                dt = timed_values[i][0] - timed_values[i - 1][0]
+                dt = (timed_values[i][0] - timed_values[i - 1][0]) / 1_000_000  # µs -> s
                 gyro = timed_values[i][1]  # [wx, wy, wz] in rad/s
                 angle = vec_len(gyro) * dt
                 if angle > 1e-12:
@@ -524,8 +491,22 @@ class ComponentTest(SensorTestBase):
     # Streaming manager helpers
     # ------------------------------------------------------------------
 
+    def _make_samples_dict(self) -> dict:
+        """Create an empty per-component samples dict aligned to the current component IDs."""
+        d: dict = {"time": []}
+        if self._accel_ids:
+            d["accel"] = {cid: [] for cid in self._accel_ids}
+        if self._gyro_ids:
+            d["gyro"] = {cid: [] for cid in self._gyro_ids}
+        if self._mag_ids:
+            d["mag"] = {cid: [] for cid in self._mag_ids}
+        if self._baro_ids:
+            d["baro"] = {cid: [] for cid in self._baro_ids}
+        return d
+
     def _setup_manager(self, hz: int):
         self._manager = ThreespaceStreamingManager(self.sensor)
+        self._manager.register_command(self, StreamableCommands.GetTimestamp, immediate_update=False)
         for accel_id in self._accel_ids:
             self._manager.register_command(self, StreamableCommands.GetRawAccelVec, param=accel_id, immediate_update=False)
         for gyro_id in self._gyro_ids:
@@ -549,16 +530,19 @@ class ComponentTest(SensorTestBase):
         # Collect one sample per packet so gyro integration captures every update
         if status != ThreespaceStreamingStatus.Data:
             return
-        sample = {"time": time.perf_counter()}
+        self._current_samples["time"].append(self._manager.get_value(StreamableCommands.GetTimestamp) / 1_000_000)
         for accel_id in self._accel_ids:
-            sample[("accel", accel_id)] = self._manager.get_value(StreamableCommands.GetRawAccelVec, accel_id)
+            self._current_samples["accel"][accel_id].append(
+                self._manager.get_value(StreamableCommands.GetRawAccelVec, accel_id))
         for gyro_id in self._gyro_ids:
-            sample[("gyro", gyro_id)] = self._manager.get_value(StreamableCommands.GetRawGyroRate, gyro_id)
+            self._current_samples["gyro"][gyro_id].append(
+                self._manager.get_value(StreamableCommands.GetRawGyroRate, gyro_id))
         for mag_id in self._mag_ids:
-            sample[("mag", mag_id)] = self._manager.get_value(StreamableCommands.GetRawMagVec, mag_id)
+            self._current_samples["mag"][mag_id].append(
+                self._manager.get_value(StreamableCommands.GetRawMagVec, mag_id))
         for baro_id in self._baro_ids:
-            sample[("baro", baro_id)] = self._manager.get_value(StreamableCommands.GetBarometerAltitudeById, baro_id)
-        self._current_samples.append(sample)
+            self._current_samples["baro"][baro_id].append(
+                self._manager.get_value(StreamableCommands.GetBarometerAltitudeById, baro_id))
 
     # ------------------------------------------------------------------
     # State machine helpers
