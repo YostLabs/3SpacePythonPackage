@@ -56,7 +56,6 @@ class BatteryTest(SensorTestBase):
                                    debug_module=THREESPACE_DEBUG_MODULE_BATTERY)
 
         self.__go_next_state()
-        self.update()
 
     def cancel(self):
         if self.state == BatteryTestState.Inactive:
@@ -125,7 +124,6 @@ class BatteryTest(SensorTestBase):
         else:
             self.result["self_test"]["success"] = True
             self.__go_next_state()
-            self.update()
 
     def __update_checking_status(self):
         self.result["status"]["status"] = self.sensor.getBatteryStatus().data
@@ -135,7 +133,6 @@ class BatteryTest(SensorTestBase):
             self.state = BatteryTestState.Finished
         else:
             self.__go_next_state()
-            self.update()
 
     def __start_awaiting_disconnect(self):
         self.state = BatteryTestState.AwaitingDisconnect
@@ -149,7 +146,6 @@ class BatteryTest(SensorTestBase):
             self.result["reconnect"]["disconnect_time"] = self.last_time
             self.last_time = time.perf_counter()
             self.__go_next_state()
-            self.update()
 
     def __update_awaiting_reconnect(self):
         try:
@@ -172,7 +168,6 @@ class BatteryTest(SensorTestBase):
                         self.result["reconnect"]["success"] = True
                 
                 self.__go_next_state()
-                self.update()
         except Exception as e:
             print("Exception occurred in BatteryTest:", e)
             self.overall_success = False
@@ -199,6 +194,8 @@ class BatteryTest(SensorTestBase):
                 self.__cleanup()
             case _:
                 raise Exception("Invalid state for going to the next state.")
+        
+        self.update()
             
 
 def run_test():
