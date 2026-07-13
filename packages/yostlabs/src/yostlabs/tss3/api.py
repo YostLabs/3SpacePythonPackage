@@ -277,17 +277,24 @@ class ThreespaceSensor:
         Trys to change the com class currently being used to be a detected
         com class with the same serial number. Useful for re-enumeration, such as when
         entering bootloader and using USB.
+
+        Params
+        ------
+        timeout: float
+            The maximum amount of time, in seconds, to attempt the reconnection before giving up. If 0, will only attempt once
+            and be non-blocking
         """
         closed_port = False
         start_time = time.perf_counter()
-        while time.perf_counter() - start_time < timeout:
+        elapsed_time = -1 #To guarantee at least 1 iteration of the loop, initialize to a negative value
+        while elapsed_time < timeout:
             if self.com.check_open():
                 #Com port still function, just try and reinit the sensor
                 try:
                     self.__dynamic_reinit()
                     return True
                 except:
-                    continue
+                    pass
             else:
                 #Even though it is considered not open, the OS may be holding onto info
                 #This is to clean that up.
@@ -308,6 +315,7 @@ class ThreespaceSensor:
                         sensor.cleanup() #Handles closing the potential_com
                     except Exception as e:
                         continue
+            elapsed_time = time.perf_counter() - start_time
         return False
 
     def __cache_header_settings(self):
