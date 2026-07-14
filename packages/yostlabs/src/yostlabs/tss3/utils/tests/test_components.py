@@ -215,9 +215,9 @@ class ComponentTest(SensorTestBase):
         self._settings_cache["stream_interval"] = self.sensor.readStreamInterval()
 
         if self._expected_components is not None:
-            detected_list = [c.strip() for c in detected_str.split(',') if c.strip()]
+            detected_list = [c.strip().lower() for c in detected_str.split(',') if c.strip()]
             self.result["valid_components"]["success"] = (
-                set(detected_list) == set(self._expected_components)
+                set(detected_list) == set(c.lower() for c in self._expected_components)
             )
             if not self.result["valid_components"]["success"]:
                 self.overall_success = False
@@ -821,8 +821,8 @@ def print_results(result: dict, show_only_failures: bool = False):
                 print(f"  gyro={gyro_id}, accel={accel_id}: {_fmt(check_data)}")
 
 
-def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False):
-    test = ComponentTest(sensor)
+def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False, expected_components: list[str] | None = None) -> tuple[bool | None, dict]:
+    test = ComponentTest(sensor, expected_components=expected_components)
 
     _enter_event = threading.Event()
 
