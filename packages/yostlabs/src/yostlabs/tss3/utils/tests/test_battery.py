@@ -1,5 +1,5 @@
 from yostlabs.tss3.utils.tests.base import SensorTestBase
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError
 from yostlabs.tss3.consts import *
 import enum
 import time
@@ -45,6 +45,7 @@ class BatteryTest(SensorTestBase):
         }
 
         self.settings_cache = None
+        self.manual_power_hold_state = False
 
     def start(self):
         if self.state != BatteryTestState.Inactive:
@@ -54,7 +55,6 @@ class BatteryTest(SensorTestBase):
         self.sensor.write_settings(debug_mode=0, 
                                    debug_level=THREESPACE_DEBUG_LEVEL_ERR, 
                                    debug_module=THREESPACE_DEBUG_MODULE_BATTERY)
-
         self.__go_next_state()
 
     def cancel(self):
@@ -88,8 +88,12 @@ class BatteryTest(SensorTestBase):
     def __cache_settings(self):
         self.settings_cache = self.sensor.read_settings(
             "debug_level", "debug_module", 
-            "debug_mode", "power_hold_state"
+            "debug_mode"
         )
+        try:
+            self.settings_cache |= self.sensor.read_settings("power_hold_state")
+        except InvalidKeyError:
+            self.manual_power_hold_state = True
 
     # ------------------------------------------------------------------
     # Private state handlers
@@ -122,7 +126,8 @@ class BatteryTest(SensorTestBase):
 
     def __start_awaiting_disconnect(self):
         self.state = BatteryTestState.AwaitingDisconnect
-        self.sensor.writePowerHoldState(1) #Keep the sensor powered on after disconnect to test battery
+        if not self.manual_power_hold_state:
+            self.sensor.writePowerHoldState(1) #Keep the sensor powered on after disconnect to test battery
         self.last_time = self.sensor.getTimestamp().data
 
     def __update_awaiting_disconnect(self):
@@ -192,7 +197,10 @@ def run_test(sensor: ThreespaceSensor):
         while test.state != BatteryTestState.Finished:
                 if test.state != last_state:
                     if test.state == BatteryTestState.AwaitingDisconnect:
-                        print("Please remove the sensor from the USB port.")
+                        if test.manual_power_hold_state:
+                            print("Please ensure the sensor will remain powered on and disconnect the sensor from the USB port.")
+                        else:
+                            print("Please remove the sensor from the USB port.")
                     elif test.state == BatteryTestState.AwaitingReconnect:
                         print("Please reconnect the sensor to the USB port.")
                     last_state = test.state
