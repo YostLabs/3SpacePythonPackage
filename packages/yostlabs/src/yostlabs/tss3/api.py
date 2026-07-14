@@ -113,7 +113,6 @@ class ThreespaceSensor:
         self.serial_number = None
         self.hardware_version: ThreespaceHardwareVersion = None
         self.short_serial_number = None
-        self.sensor_family = None
         self.firmware_version = None
 
         self.commands: list[ThreespaceCommand] = [None] * 256
@@ -363,12 +362,20 @@ class ThreespaceSensor:
         self.hardware_version = ThreespaceHardwareVersion.from_serial_number(serial_number)
 
         self.short_serial_number = self.hardware_version.short_serial_number
-        self.sensor_family = self.hardware_version.family_name
         if self.sensor_family == "Unknown":
             self.log(f"Unknown Sensor Family detected, {self.hardware_version.family_id}")
 
     def __cache_debug_mode(self):
         self.immediate_debug = self.readDebugMode()
+
+    @property
+    def sensor_family(self):
+        family = self.hardware_version.family_name
+        if family == "Unknown":
+            #Check to see if the com class knows (Like via PID in USB)
+            if hasattr(self.com, "suffix"):
+                family = self.com.suffix
+        return family
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
     def set_cached_settings_dirty(self, 
