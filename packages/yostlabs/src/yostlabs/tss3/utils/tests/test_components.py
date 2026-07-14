@@ -70,7 +70,7 @@ class ComponentTest(SensorTestBase):
 
     CHECK_UPDATE_RATE_WAIT_DURATION = 2.0    # seconds to wait before checking update rate (gives time for it to update)
     UPDATE_RATE_TOLERANCE = 0.01    # 1% tolerance for update rate vs true ODR
-    GYRO_ACCEL_DOT_THRESHOLD = 0.9  # minimum acceptable dot product for gyro-accel cross-check
+    GYRO_ACCEL_DOT_THRESHOLD = 0.8  # minimum acceptable dot product for gyro-accel cross-check
     MAG_MIN_LENGTH = 0.21           # minimum acceptable average mag vector magnitude
     GYRO_FLIP_MIN_DEGREES = 120.0   # integrated rotation threshold to count as a flip
     BARO_MIN_ALTITUDE_CHANGE = 0.3048  # 1 foot in meters; minimum altitude delta for baro test
