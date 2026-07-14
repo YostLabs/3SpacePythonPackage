@@ -87,7 +87,10 @@ class ThreespaceHardwareVersion:
     
     @property
     def family_name(self):
-        return THREESPACE_SN_FAMILY_TO_NAME.get(self.family_id, "Unknown")
+        family = THREESPACE_SN_FAMILY_TO_NAME.get(self.family_id, "Unknown")
+        if family == "DEV":
+            family = "Unknown"
+        return family
     
     @property
     def short_serial_number(self):
