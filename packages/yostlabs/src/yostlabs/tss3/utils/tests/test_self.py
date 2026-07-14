@@ -41,12 +41,18 @@ class SelfTest(SensorTestBase):
     def cancel(self):
         pass
 
-def run_test():
-    sensor = ThreespaceSensor()
+def run_test(sensor: ThreespaceSensor):
     test = SelfTest(sensor)
     test.start()
-    print(test.result)
-    print("Overall success:", test.overall_success)
+    return test.overall_success, test.result
+
+def auto_run_test():
+    sensor = ThreespaceSensor()
+    overall_success, results = run_test(sensor)
+    sensor.cleanup()
+    print(results)
+    print("Overall success:", overall_success)
+    return overall_success, results
 
 if __name__ == "__main__":
-    run_test()
+    auto_run_test()

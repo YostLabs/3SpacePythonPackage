@@ -267,8 +267,7 @@ class RTCTest(SensorTestBase):
                 pass
 
 
-def run_test():
-    sensor = ThreespaceSensor()
+def run_test(sensor: ThreespaceSensor):
     test = RTCTest(sensor)
     test.start()
 
@@ -290,13 +289,15 @@ def run_test():
         print("\nTest cancelled by user.")
         return (False if not test.overall_success else None), test.result
 
-    sensor.cleanup()
-
-    print(f"Results: {test.result}")
-    print(f"Overall success: {test.overall_success}")
-
     return test.overall_success, test.result
 
+def auto_run_test():
+    sensor = ThreespaceSensor()
+    overall_success, results = run_test(sensor)
+    sensor.cleanup()
+    print(f"Results: {results}")
+    print(f"Overall success: {overall_success}")
+    return overall_success, results
 
 if __name__ == "__main__":
-    run_test()
+    auto_run_test()

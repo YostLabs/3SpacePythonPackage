@@ -816,8 +816,7 @@ def print_results(result: dict, show_only_failures: bool = False):
             print(f"  gyro={gyro_id}, accel={accel_id}: {_fmt(check_data)}")
 
 
-def run_test(show_only_failures: bool = False):
-    sensor = ThreespaceSensor()
+def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False):
     test = ComponentTest(sensor)
 
     _enter_event = threading.Event()
@@ -878,13 +877,17 @@ def run_test(show_only_failures: bool = False):
                 test.cancel()
                 print("\nTest cancelled by user.")
                 return (False if not test.overall_success else None), test.result
-    sensor.cleanup()
-
-    print_results(test.result, show_only_failures)
-    print(f"\nOverall success: {test.overall_success}")
-
     return test.overall_success, test.result
 
 
+def auto_run_test(show_only_failures: bool = False):
+    sensor = ThreespaceSensor()
+    overall_success, results = run_test(sensor, show_only_failures)
+    sensor.cleanup()
+    print_results(results, show_only_failures)
+    print(f"\nOverall success: {overall_success}")
+    return overall_success, results
+
+
 if __name__ == "__main__":
-    run_test(show_only_failures=True)
+    auto_run_test(show_only_failures=True)

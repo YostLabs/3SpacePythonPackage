@@ -184,8 +184,7 @@ class BatteryTest(SensorTestBase):
         self.update()
             
 
-def run_test():
-    sensor = ThreespaceSensor()
+def run_test(sensor: ThreespaceSensor):
     test = BatteryTest(sensor)
     last_state = test.state
     test.start()
@@ -203,12 +202,16 @@ def run_test():
         test.cancel()
         print("\nTest cancelled by user.")
         return (False if not test.overall_success else None), test.result
-    sensor.cleanup()
-    
-    print(test.result)
-    print("Overall success:", test.overall_success)
 
     return test.overall_success, test.result
 
+def auto_run_test():
+    sensor = ThreespaceSensor()
+    overall_success, results = run_test(sensor)
+    sensor.cleanup()
+    print(results)
+    print("Overall success:", overall_success)
+    return overall_success, results
+
 if __name__ == "__main__":
-    run_test()
+    auto_run_test()

@@ -204,8 +204,7 @@ class ButtonTest(SensorTestBase):
         if "log_start_event" in self.cache:
             self.sensor.writeLogStartEvent("2") #Command only
 
-def run_test():
-    sensor = ThreespaceSensor()
+def run_test(sensor: ThreespaceSensor):
     test = ButtonTest(sensor)
 
     test.start()
@@ -219,12 +218,15 @@ def run_test():
         test.fail()
     finally:
         print("\033[?25h", end="", flush=True) #Show the cursor in the terminal
-    sensor.cleanup()
-    
-    print(f"\nResults: {test.result}")
-    print(f"Overall success: {test.overall_success}")
     return test.overall_success, test.result
 
+def auto_run_test():
+    sensor = ThreespaceSensor()
+    overall_success, results = run_test(sensor)
+    sensor.cleanup()
+    print(f"\nResults: {results}")
+    print(f"Overall success: {overall_success}")
+    return overall_success, results
 
 if __name__ == "__main__":
-    run_test()
+    auto_run_test()
