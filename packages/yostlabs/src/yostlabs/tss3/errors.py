@@ -78,3 +78,6 @@ class SettingAccessError(SettingError):
 
 class UnsupportedCommandError(ThreespaceError):
     """Raised when a command is not available on the connected sensor model."""
+
+class UnsupportedTestError(ThreespaceError):
+    """Raised when a test is not available on the connected sensor model."""

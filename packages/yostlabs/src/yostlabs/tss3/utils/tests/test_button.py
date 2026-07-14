@@ -1,5 +1,6 @@
 from yostlabs.tss3.utils.tests.base import SensorTestBase
-from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError
+from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.errors import InvalidKeyError, UnsupportedTestError
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus, StreamableCommands, threespace_command_get
 from typing import Any
 import time
@@ -50,7 +51,7 @@ class ButtonTest(SensorTestBase):
 
     def start(self):
         if not self.sensor.has_command(threespace_command_get(StreamableCommands.GetButtonState.value)):
-            raise Exception("Sensor does not support button state command.")
+            raise UnsupportedTestError("Sensor does not support button state command.")
         
         #This is done so that the button readings can be verified 
         #without the button triggering any other actions on the sensor.
@@ -227,7 +228,7 @@ def run_test(sensor: ThreespaceSensor):
         test.fail()
     finally:
         print("\033[?25h", end="", flush=True) #Show the cursor in the terminal
-        print("Completed button test.")
+        print("\nCompleted button test.")
     return test.overall_success, test.result
 
 def auto_run_test():
