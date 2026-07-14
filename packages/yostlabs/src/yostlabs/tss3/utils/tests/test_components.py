@@ -200,7 +200,7 @@ class ComponentTest(SensorTestBase):
         for ctype, ids in [("accel", self._accel_ids), ("gyro", self._gyro_ids),
                            ("mag", self._mag_ids), ("baro", self._baro_ids)]:
             if ids:
-                self.result[ctype] = {cid: self.__make_component_entry() for cid in ids}
+                self.result[ctype] = {cid: self.__make_component_entry(ctype) for cid in ids}
 
         # Cache current ODRs and stream settings for restoration on cleanup
         for accel_id in self._accel_ids:
@@ -327,24 +327,26 @@ class ComponentTest(SensorTestBase):
         return self.result[ctype][cid]
 
     @staticmethod
-    def __make_component_entry() -> dict:
+    def __make_component_entry(ctype: str) -> dict:
         """Returns a fresh per-component result template."""
-        return {
+        entry = {
             "set_odr_1000": {"success": None, "error": None, "true_odr": None},
             "update_rate_1000": {"success": None, "expected": None, "actual": None},
             "static_check": {"success": None, "static_error": None },
             "set_odr_50": {"success": None, "error": None, "true_odr": None},
             "update_rate_50": {"success": None, "expected": None, "actual": None},
             "flip": {"success": None },
-            "altitude_test": {
+        }
+        if ctype == "baro":
+            entry["altitude_test"] = {
                 "success": None,
                 "starting_altitude": None,
                 "high_altitude_threshold": None,
                 "high_altitude": None,
                 "low_altitude_threshold": None,
                 "low_altitude": None,
-            },
-        }
+            }
+        return entry
 
     # ------------------------------------------------------------------
     # Static data analysis
@@ -893,4 +895,4 @@ def auto_run_test(show_only_failures: bool = False):
 
 
 if __name__ == "__main__":
-    auto_run_test(show_only_failures=True)
+    auto_run_test(show_only_failures=False)
