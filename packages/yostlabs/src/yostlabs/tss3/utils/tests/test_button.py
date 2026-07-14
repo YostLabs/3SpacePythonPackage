@@ -207,10 +207,19 @@ class ButtonTest(SensorTestBase):
 def run_test(sensor: ThreespaceSensor):
     test = ButtonTest(sensor)
 
+    last_state = test.state
+
     test.start()
     print("\033[?25l", end="", flush=True) #Hide the cursor in the terminal
     try:
         while not test.state == ButtonTestState.Finished:
+            if last_state != test.state:
+                last_state = test.state
+                match test.state:
+                    case ButtonTestState.AwaitingButtonHeld:
+                        print("\nPlease hold the button down for 2 seconds.")
+                    case ButtonTestState.AwaitingButtonRelease:
+                        print("\nPlease release the button for 2 seconds.")
             print(f"Desired State: {test.desired_button_state}, Button State: {test.button_state}, Match Time: {test.button_match_time:.02f}".ljust(80), end="\r", flush=True)
             test.update()
     except KeyboardInterrupt:
@@ -218,6 +227,7 @@ def run_test(sensor: ThreespaceSensor):
         test.fail()
     finally:
         print("\033[?25h", end="", flush=True) #Show the cursor in the terminal
+        print("Completed button test.")
     return test.overall_success, test.result
 
 def auto_run_test():
