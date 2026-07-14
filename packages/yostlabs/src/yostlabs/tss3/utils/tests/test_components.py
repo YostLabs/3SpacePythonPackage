@@ -111,7 +111,7 @@ class ComponentTest(SensorTestBase):
             },
             # "accel", "gyro", "mag", "baro" keys are populated in CheckingComponents.
             # Structure: result[ctype][cid][test_name] = {success, ...}
-            "gyro_accel_check": {},  # (gyro_id, accel_id) -> {success, dot_product}
+            "gyro_accel_check": {},  # gyro_id -> accel_id -> {success, dot_product}
         }
 
     # ------------------------------------------------------------------
@@ -519,7 +519,9 @@ class ComponentTest(SensorTestBase):
                 predicted = quat_rotate_vec(q, accel_vals[0])
                 dot = vec_dot(vec_normalize(predicted), vec_normalize(accel_vals[-1]))
                 check_passed = dot >= self.GYRO_ACCEL_DOT_THRESHOLD
-                self.result["gyro_accel_check"][(gyro_id, accel_id)] = {
+                if gyro_id not in self.result["gyro_accel_check"]:
+                    self.result["gyro_accel_check"][gyro_id] = {}
+                self.result["gyro_accel_check"][gyro_id][accel_id] = {
                     "success": check_passed,
                     "dot_product": dot,
                 }
@@ -806,14 +808,15 @@ def print_results(result: dict, show_only_failures: bool = False):
     gyro_accel = result.get("gyro_accel_check", {})
     if gyro_accel:
         printed_header = False
-        for (gyro_id, accel_id), check_data in gyro_accel.items():
-            success = check_data.get("success")
-            if show_only_failures and success is not False:
-                continue
-            if not printed_header:
-                print("Gyro-Accel Cross-Check")
-                printed_header = True
-            print(f"  gyro={gyro_id}, accel={accel_id}: {_fmt(check_data)}")
+        for gyro_id, accel_checks in gyro_accel.items():
+            for accel_id, check_data in accel_checks.items():
+                success = check_data.get("success")
+                if show_only_failures and success is not False:
+                    continue
+                if not printed_header:
+                    print("Gyro-Accel Cross-Check")
+                    printed_header = True
+                print(f"  gyro={gyro_id}, accel={accel_id}: {_fmt(check_data)}")
 
 
 def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False):
