@@ -1,5 +1,5 @@
 from yostlabs.tss3.utils.tests.base import SensorTestBase
-from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError
+from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError, ResponseTimeoutError
 from yostlabs.tss3.consts import *
 import enum
 import time
@@ -132,10 +132,11 @@ class BatteryTest(SensorTestBase):
 
     def __update_awaiting_disconnect(self):
         try:
+            self.last_read_attempt_time = time.perf_counter()
             self.last_time = self.sensor.getTimestamp().data
-        except OSError as e:
+        except (OSError, ResponseTimeoutError) as e:
             self.result["reconnect"]["disconnect_time"] = self.last_time
-            self.last_time = time.perf_counter()
+            self.last_time = self.last_read_attempt_time
             self.__go_next_state()
 
     def __update_awaiting_reconnect(self):
