@@ -78,7 +78,7 @@ class ButtonTest(SensorTestBase):
             self.fail()
 
     def fail(self):
-        if not self.state in [ButtonTestState.Inactive, ButtonTestState.Finished]:
+        if self.state in [ButtonTestState.Inactive, ButtonTestState.Finished]:
             raise Exception("Button test not active.")
         self.overall_success = False
         self.state = ButtonTestState.Finished
@@ -214,10 +214,16 @@ def run_test():
         while not test.state == ButtonTestState.Finished:
             print(f"Desired State: {test.desired_button_state}, Button State: {test.button_state}, Match Time: {test.button_match_time:.02f}".ljust(80), end="\r", flush=True)
             test.update()
+    except KeyboardInterrupt:
+        print("\nTest failed by user.")
+        test.fail()
     finally:
         print("\033[?25h", end="", flush=True) #Show the cursor in the terminal
+    sensor.cleanup()
+    
     print(f"\nResults: {test.result}")
     print(f"Overall success: {test.overall_success}")
+    return test.overall_success, test.result
 
 
 if __name__ == "__main__":

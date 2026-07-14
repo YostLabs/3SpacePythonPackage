@@ -77,20 +77,6 @@ class BatteryTest(SensorTestBase):
                 self.__update_awaiting_reconnect()
 
     # ------------------------------------------------------------------
-    # Disconnect state helpers
-    # ------------------------------------------------------------------
-
-    def can_auto_validate_disconnect(self) -> bool:
-        """Returns True if the sensor supports automatic disconnect validation (e.g. via BLE),
-        False if the user must manually confirm."""
-        pass
-
-    def verify_disconnect(self, passed: bool):
-        """Manually report whether the disconnect-while-powered test passed.
-        Only call this when can_auto_validate_disconnect() returns False."""
-        pass
-
-    # ------------------------------------------------------------------
     # Generic helpers
     # ------------------------------------------------------------------
 
@@ -203,17 +189,26 @@ def run_test():
     test = BatteryTest(sensor)
     last_state = test.state
     test.start()
-    while test.state != BatteryTestState.Finished:
-        if test.state != last_state:
-            if test.state == BatteryTestState.AwaitingDisconnect:
-                print("Please remove the sensor from the USB port.")
-            elif test.state == BatteryTestState.AwaitingReconnect:
-                print("Please reconnect the sensor to the USB port.")
-            last_state = test.state
-        
-        test.update()
+    try:
+        while test.state != BatteryTestState.Finished:
+                if test.state != last_state:
+                    if test.state == BatteryTestState.AwaitingDisconnect:
+                        print("Please remove the sensor from the USB port.")
+                    elif test.state == BatteryTestState.AwaitingReconnect:
+                        print("Please reconnect the sensor to the USB port.")
+                    last_state = test.state
+                
+                test.update()
+    except KeyboardInterrupt:
+        test.cancel()
+        print("\nTest cancelled by user.")
+        return (False if not test.overall_success else None), test.result
+    sensor.cleanup()
+    
     print(test.result)
     print("Overall success:", test.overall_success)
+
+    return test.overall_success, test.result
 
 if __name__ == "__main__":
     run_test()

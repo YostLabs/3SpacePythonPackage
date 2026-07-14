@@ -273,21 +273,29 @@ def run_test():
     test.start()
 
     last_state = test.state
-    while test.state != RTCTestState.Finished:
-        if test.state != last_state:
-            if test.state == RTCTestState.AwaitingPowerCycle:
-                print("Hard reset is not supported on this sensor.")
-                print("Please disconnect the sensor and plug it back in (power cycle it).")
-            elif test.state == RTCTestState.AwaitingPowerCycleReconnect:
-                print("Sensor disconnected. Please reconnect the sensor to continue the test.")
-            last_state = test.state
+    try:
+        while test.state != RTCTestState.Finished:
+            if test.state != last_state:
+                if test.state == RTCTestState.AwaitingPowerCycle:
+                    print("Hard reset is not supported on this sensor.")
+                    print("Please disconnect the sensor and plug it back in (power cycle it).")
+                elif test.state == RTCTestState.AwaitingPowerCycleReconnect:
+                    print("Sensor disconnected. Please reconnect the sensor to continue the test.")
+                last_state = test.state
 
-        test.update()
-        time.sleep(0.05)
+            test.update()
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        test.cancel()
+        print("\nTest cancelled by user.")
+        return (False if not test.overall_success else None), test.result
+
+    sensor.cleanup()
 
     print(f"Results: {test.result}")
     print(f"Overall success: {test.overall_success}")
-    sensor.cleanup()
+
+    return test.overall_success, test.result
 
 
 if __name__ == "__main__":

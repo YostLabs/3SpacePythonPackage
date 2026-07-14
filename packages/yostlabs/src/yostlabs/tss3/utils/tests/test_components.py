@@ -834,51 +834,54 @@ def run_test(show_only_failures: bool = False):
 
     last_state = test.state
     awaiting_enter = False
+
     while test.state != ComponentTestState.Finished:
         try:
-            if test.state != last_state:
-                # Exiting a baro-awaiting state: terminate the \r status line
-                if last_state in (ComponentTestState.BaroAwaitingRaise,
-                                ComponentTestState.BaroAwaitingLower):
-                    print()
-                if test.state == ComponentTestState.AwaitingFlatSurface:
-                    print("Place the sensor on a flat, level surface, then press Enter.")
-                    _start_waiting_for_enter()
-                    awaiting_enter = True
-                elif test.state == ComponentTestState.StreamingFlip:
-                    print("Streaming started. Flip the sensor upside down, then press Enter.")
-                    _start_waiting_for_enter()
-                    awaiting_enter = True
-                elif test.state == ComponentTestState.BaroAwaitingRaise:
-                    print(f"Raise the sensor at least 1 ft ({ComponentTest.BARO_MIN_ALTITUDE_CHANGE:.3f} m) "
-                        f"above its starting position and hold still. Call test.notify_baro_fail() to skip.")
-                elif test.state == ComponentTestState.BaroAwaitingLower:
-                    print(f"Lower the sensor at least 1 ft ({ComponentTest.BARO_MIN_ALTITUDE_CHANGE:.3f} m) "
-                        f"below its starting position and hold still. Call test.notify_baro_fail() to skip.")
-                last_state = test.state
+            while test.state != ComponentTestState.Finished:
+                if test.state != last_state:
+                    # Exiting a baro-awaiting state: terminate the \r status line
+                    if last_state in (ComponentTestState.BaroAwaitingRaise,
+                                    ComponentTestState.BaroAwaitingLower):
+                        print()
+                    if test.state == ComponentTestState.AwaitingFlatSurface:
+                        print("Place the sensor on a flat, level surface, then press Enter.")
+                        _start_waiting_for_enter()
+                        awaiting_enter = True
+                    elif test.state == ComponentTestState.StreamingFlip:
+                        print("Streaming started. Flip the sensor upside down, then press Enter.")
+                        _start_waiting_for_enter()
+                        awaiting_enter = True
+                    elif test.state == ComponentTestState.BaroAwaitingRaise:
+                        print(f"Raise the sensor at least 1 ft ({ComponentTest.BARO_MIN_ALTITUDE_CHANGE:.3f} m) "
+                            f"above its starting position and hold still. Call test.notify_baro_fail() to skip.")
+                    elif test.state == ComponentTestState.BaroAwaitingLower:
+                        print(f"Lower the sensor at least 1 ft ({ComponentTest.BARO_MIN_ALTITUDE_CHANGE:.3f} m) "
+                            f"below its starting position and hold still. Call test.notify_baro_fail() to skip.")
+                    last_state = test.state
 
-            if awaiting_enter and _enter_event.is_set():
-                awaiting_enter = False
-                if test.state == ComponentTestState.AwaitingFlatSurface:
-                    test.notify_flat_ready()
-                elif test.state == ComponentTestState.StreamingFlip:
-                    test.notify_flip_done()
+                if awaiting_enter and _enter_event.is_set():
+                    awaiting_enter = False
+                    if test.state == ComponentTestState.AwaitingFlatSurface:
+                        test.notify_flat_ready()
+                    elif test.state == ComponentTestState.StreamingFlip:
+                        test.notify_flip_done()
 
-            test.update()
-            _print_baro_status(test)
-            time.sleep(0.005)
+                test.update()
+                _print_baro_status(test)
+                time.sleep(0.005)
         except KeyboardInterrupt:
-            if test.state in [ComponentTestState.BaroAwaitingRaise, ComponentTestState.BaroAwaitingLower]:
+            if test.state in (ComponentTestState.BaroAwaitingRaise, ComponentTestState.BaroAwaitingLower):
                 print("\nBarometer test interrupted by user. Marking barometer test as failed.")
                 test.notify_baro_fail()
+                # outer while re-enters the inner loop to finish the test
             else:
                 test.cancel()
                 print("\nTest cancelled by user.")
-                return None, test.result
+                return (False if not test.overall_success else None), test.result
+    sensor.cleanup()
 
     print_results(test.result, show_only_failures)
     print(f"\nOverall success: {test.overall_success}")
-    sensor.cleanup()
 
     return test.overall_success, test.result
 

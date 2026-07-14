@@ -131,12 +131,19 @@ def run_test():
     test = GPSTest(sensor)
     test.start()
 
-    while test.state != GPSTestState.Finished:
-        test.update()
-        time.sleep(0.01)
+    try:
+        while test.state != GPSTestState.Finished:
+            test.update()
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        test.cancel()
+        print("\nTest cancelled by user.")
+        return (False if not test.overall_success else None), test.result
+    sensor.cleanup()
     
     print(f"Results: {test.result}")
     print(f"Overall Success: {test.overall_success}")
+    return test.overall_success, test.result
 
 if __name__ == "__main__":
     run_test()

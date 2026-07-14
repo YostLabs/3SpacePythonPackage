@@ -89,14 +89,21 @@ def run_test():
 
     test = LEDTest(sensor)
     test.start()
-    while test.state != LEDTestState.Finished:
-        result = input(f"Is the LED {test.expected_color_name}? (Y/n)")
-        if result.lower() == "n":
-            test.verify_match(False)
-        elif result.lower() == "y" or result == "":
-            test.verify_match(True)
+    try:
+        while test.state != LEDTestState.Finished:
+            result = input(f"Is the LED {test.expected_color_name}? (Y/n)")
+            if result.lower() == "n":
+                test.verify_match(False)
+            elif result.lower() == "y" or result == "":
+                test.verify_match(True)
+    except KeyboardInterrupt:
+        test.cancel()
+        print("\nTest cancelled by user.")
+        return (False if not test.overall_success else None), test.result
+    sensor.cleanup()
     print(f"Results: {test.result}")
     print(f"Overall success: {test.overall_success}")
+    return test.overall_success, test.result
 
 if __name__ == "__main__":
     run_test()
