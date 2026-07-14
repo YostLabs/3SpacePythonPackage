@@ -90,7 +90,7 @@ class GPSTest(SensorTestBase):
         num_messages = self.sensor.getNumDebugMessages().data
         for _ in range(num_messages):
             message = self.sensor.getOldestDebugMessage().data
-            if "$GPGGA" in message:
+            if "$GPGGA" in message or "$GNGGA" in message:
                 self.result["gps_active"]["success"] = True
                 self.result["gps_active"]["message"] = message
 
