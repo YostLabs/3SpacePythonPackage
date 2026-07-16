@@ -1,5 +1,4 @@
 from yostlabs.communication.base import ThreespaceComClass
-from yostlabs.communication.serial import ThreespaceSerialComClass
 
 from yostlabs.tss3.consts import *
 import yostlabs.tss3.specs as specs
@@ -52,6 +51,7 @@ class ThreespaceSensor:
     
     def __init__(self, com = None, timeout=2, verbose=False, initial_clear_timeout=None):
         if com is None: #Default to attempting to use the serial com class if none is provided
+            from yostlabs.communication.serial import ThreespaceSerialComClass
             com = ThreespaceSerialComClass
         self.verbose = verbose
 
@@ -75,6 +75,7 @@ class ThreespaceSensor:
                 self.com.open()
                 manually_opened_com = True
         else: #Unknown type, try making a ThreespaceSerialComClass out of this
+            from yostlabs.communication.serial import ThreespaceSerialComClass
             try:
                 self.com = ThreespaceSerialComClass(com)
             except:
@@ -525,6 +526,7 @@ class ThreespaceSensor:
         settings = {}
         checksum = 0
         end_reached = False
+        error: Exception = None
         while not end_reached:
             key = self.com.read_until(b'\0')
             if key[-1] != 0:
@@ -534,21 +536,26 @@ class ThreespaceSensor:
 
             if setting is None:
                 if key == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
-                    raise InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}", result=settings)
-                #Can't use keystring to check expected keys since a query/aggregate key may have been used.
-                #Because the number of keys in the response has no way of being known, also can't just search
-                #ahead for a ';' or '0' because 1. Both of those could be valid data bytes, 2. They could be part
-                #of a subsequent command response/streaming packet.
-                raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}", result=settings)
-            if setting.out_format is None:
-                raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}", result=settings)
+                    error = InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}")
+
+                else:
+                    #Can't use keystring to check expected keys since a query/aggregate key may have been used.
+                    #Because the number of keys in the response has no way of being known, also can't just search
+                    #ahead for a ';' or '0' because 1. Both of those could be valid data bytes, 2. They could be part
+                    #of a subsequent command response/streaming packet.
+                    raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}", result=settings)
             
             checksum += sum(ord(v) for v in key)
 
-            #Now parse the value
-            data, raw = setting.out_format.read_response(self.com)
-            settings[key] = data
-            checksum += sum(raw)
+            #Allows reading <KEY_ERROR> still, just don't access any data
+            if setting is not None:
+                if setting.out_format is None:
+                    raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}", result=settings)
+                
+                #Now parse the value
+                data, raw = setting.out_format.read_response(self.com)
+                settings[key] = data
+                checksum += sum(raw)
 
             #Check if more to read or if this is the end of the response
             buffer = self.com.read(1)
@@ -558,10 +565,14 @@ class ThreespaceSensor:
             elif buffer[0] != ord(';'):
                 raise ResponseError(f"Failed to read setting, expected ';' or null terminator but got: {buffer}", result=settings)
         
-        #Reading key values has finished, not check the checksum
+        #Reading key values has finished, now check the checksum
         reported_checksum = self.com.read(1)
         if reported_checksum[0] != checksum % 256:
             raise ChecksumMismatchError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}", result=settings)
+
+        if error:
+            error.result = settings
+            raise error
 
         return settings
             
@@ -1144,6 +1155,7 @@ class ThreespaceSensor:
             result = self.__await_command(cmd)
             if result == THREESPACE_AWAIT_COMMAND_FOUND:
                 break
+            self.log("Reattempting command due to timeout:", cmd.info.name)
             retries += 1
         
         if retries == MAX_RETRIES:
