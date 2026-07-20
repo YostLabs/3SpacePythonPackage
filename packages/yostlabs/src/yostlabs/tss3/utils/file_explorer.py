@@ -23,6 +23,7 @@ class DirItem:
     ftype: DirItemType
     name: str
     size: int
+    absolute_path: str
 
     @property
     def is_dir(self) -> bool:
@@ -53,9 +54,10 @@ class SensorFile:
 
     _MAX_CHUNK = 4000  # hardware limit for a single fileReadBytes call
 
-    def __init__(self, explorer: "SensorFileExplorer", file_size: int):
+    def __init__(self, explorer: "SensorFileExplorer", file_size: int, name: str):
         self._explorer = explorer
         self.size = file_size
+        self.name = name
 
     def __enter__(self) -> "SensorFile":
         return self
@@ -174,6 +176,9 @@ class SensorFileExplorer:
         self._cwd: str = "/"
         self._open_file: SensorFile | None = None
 
+        # Ensure no file is left open from previous operations
+        self.sensor.closeFile()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -181,6 +186,10 @@ class SensorFileExplorer:
     def _navigate_to_cwd(self) -> None:
         """Navigate the sensor to the tracked absolute path."""
         self.sensor.changeDirectory(self._cwd)
+
+    def resolve_path(self, path: str) -> str:
+        """Resolve *path* to an absolute path using the tracked directory."""
+        return posixpath.normpath(posixpath.join(self._cwd, path))
 
     @property
     def cwd(self) -> str:
@@ -215,7 +224,7 @@ class SensorFileExplorer:
             if ftype_val == DirItemType.END:
                 break
 
-            yield DirItem(DirItemType(ftype_val), name, size)
+            yield DirItem(DirItemType(ftype_val), name, size, posixpath.join(self._cwd, name))
 
     def list_directory(self) -> list[DirItem]:
         """Return all items in the current directory as a list."""
@@ -238,7 +247,7 @@ class SensorFileExplorer:
         tracked path and the result is sent to the sensor as an absolute
         path, updating the internal tracker on success.
         """
-        new_cwd = posixpath.normpath(posixpath.join(self._cwd, path))
+        new_cwd = self.resolve_path(path)
         self.sensor.changeDirectory(new_cwd)
         self._cwd = new_cwd
 
@@ -246,7 +255,7 @@ class SensorFileExplorer:
     # File access
     # ------------------------------------------------------------------
 
-    def open(self, path: str) -> SensorFile:
+    def open(self, path: str | DirItem) -> SensorFile:
         """
         Open *path* for reading and return a :class:`SensorFile` handle.
 
@@ -255,32 +264,49 @@ class SensorFileExplorer:
             with file_explorer.open("log.bin") as fp:
                 data = fp.read()
 
+        *path* may be a string (relative to the tracked directory) or a
+        :class:`DirItem` obtained from a directory listing, in which case
+        its stored absolute path is used directly.  Passing a ``DirItem``
+        that is not a file raises ``ValueError``.
+
         Only one file may be open at a time; opening a second raises
         ``IOError``.
-
-        Parameters
-        ----------
-        path : str
-            Path to the file, relative to the tracked directory.
         """
         if self._open_file is not None:
             raise IOError(
                 "A file is already open. Close it before opening another."
             )
-        self._navigate_to_cwd()
-        self.sensor.openFile(path)
+        if isinstance(path, DirItem):
+            if not path.is_file:
+                raise ValueError(
+                    f"{path.name!r} is not a file (ftype={path.ftype.name})."
+                )
+            abs_path = path.absolute_path
+            filename = path.name
+        else:
+            abs_path = self.resolve_path(path)
+            filename = posixpath.basename(abs_path)
+        self.sensor.openFile(abs_path)
         file_size = self.sensor.fileGetRemainingSize().data
-        self._open_file = SensorFile(self, file_size)
+        self._open_file = SensorFile(self, file_size, filename)
         return self._open_file
 
     # ------------------------------------------------------------------
     # Deletion
     # ------------------------------------------------------------------
 
-    def delete(self, path: str) -> None:
-        """Delete the file at *path* (relative to the tracked directory)."""
-        self._navigate_to_cwd()
-        self.sensor.deleteFile(path)
+    def delete(self, path: str | DirItem) -> None:
+        """
+        Delete the file at *path*.
+
+        *path* may be a string (relative to the tracked directory) or a
+        :class:`DirItem` obtained from a directory listing, in which case
+        its stored absolute path is used directly.
+        """
+        if isinstance(path, DirItem):
+            self.sensor.deleteFile(path.absolute_path)
+        else:
+            self.sensor.deleteFile(self.resolve_path(path))
 
     # ------------------------------------------------------------------
     # Terminal-style command interface
@@ -292,11 +318,11 @@ class SensorFileExplorer:
 
         Supported commands
         ------------------
-        ls
+        ls or dir
             List the current directory.  Returns ``list[DirItem]``.
         cd <path>
             Change directory.  Returns ``None``.
-        cat <path>
+        cat or type <path>
             Read a file and return its contents as ``bytes``.
         rm <path>
             Delete a file.  Returns ``None``.
@@ -317,16 +343,16 @@ class SensorFileExplorer:
         cmd = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else None
 
-        if cmd == "ls":
+        if cmd == "ls" or cmd == "dir":
             return self.list_directory()
         elif cmd == "cd":
             if arg is None:
                 raise ValueError("cd requires a path argument")
             self.change_directory(arg)
             return None
-        elif cmd == "cat":
+        elif cmd == "cat" or cmd == "type":
             if arg is None:
-                raise ValueError("cat requires a file argument")
+                raise ValueError(f"{cmd} requires a file argument")
             with self.open(arg) as fp:
                 return fp.read()
         elif cmd == "rm":
@@ -336,85 +362,51 @@ class SensorFileExplorer:
             return None
         else:
             raise ValueError(
-                f"Unknown command: {cmd!r}. Supported: ls, cd, cat, rm"
+                f"Unknown command: {cmd!r}. Supported: ls / dir, cd, cat / type, rm"
             )
-if __name__ == "__main__":
+    
+    def execute_verbose(self, command_string: str):
+        """
+        Execute a command and print the result to stdout.
+
+        This is a convenience wrapper around :meth:`execute` for interactive
+        use.  It prints directory listings in a table format and decodes
+        file contents as UTF-8 (with replacement for invalid bytes).
+        """
+        result = self.execute(command_string)
+        if isinstance(result, list):
+            for item in result:
+                print(f"{item.ftype.name:10} {item.size:10} {item.name}")
+        elif isinstance(result, bytes):
+            try:
+                print(result.decode())
+            except:
+                print(result)
+
+def run_cmd_line():
     sensor = ThreespaceSensor()
-
-    fp = open("test.txt", "wb")
-
     file_explorer = SensorFileExplorer(sensor)
-    file_explorer.change_directory("CONFIG")
+
+    try:
+        while True:
+            command = input(f"{file_explorer.cwd}> ")
+            file_explorer.execute_verbose(command)
+    except KeyboardInterrupt:
+        print("\nExiting...")
+
+def test_file_explorer():
+    sensor = ThreespaceSensor()
+    file_explorer = SensorFileExplorer(sensor)
+
+    file_explorer.change_directory("config")
     for file in file_explorer:
         print(file)
+    print(file_explorer.list_directory())
 
-    import pathlib
-    import os
-    file_path = pathlib.Path(__file__).parent / "file_explorer.py"
-    with file_explorer.open("/DATA/session-04/data0.csv") as fp:
-        print(f"{fp.size=}")
-        print(fp.read(fp.size-1))
-        print(fp.read())
+    with file_explorer.open("sensor.cfg") as fp:
+        print(fp.read().decode())
 
-    # print(file_explorer.list_directory())
-    # print(file_explorer.read_file("sensor.cfg").decode())
-
-# # ---------------------------------------------------------------------------
-# # Reference: low-level sensor file commands
-# # ---------------------------------------------------------------------------
-
-# sensor = ThreespaceSensor()
-
-# # Ftype can be:
-# # 1 - Directory
-# # 0 - File
-# # 128 - End of directory
-# # 255 - Error (Can sometimes be recovered by changing directory)
-# #   This is because if you modify the directory using fs_msc_auto the contents may change and need reloaded
-# #   And 255 is indicating that a change has occurred and you must refresh the directory contents by changing directory
-# #       Changing directory to just '.' does work to refresh the current directory contents
-# ftype, name, size = sensor.getNextDirectoryItem()
-
-# # Change the directory to the given path relative to the current directory.
-# sensor.changeDirectory("../session-05")
-
-# # Open a file for reading. Path is relative to CWD. Only one file can be open at a time.
-# # You can not open another file before closing the current one.
-# sensor.openFile("test.txt")
-
-# # Closes the currently open file
-# sensor.closeFile()
-
-# # Gets the number of bytes remaining after the cursor in the currently open file
-# remaining_size = sensor.fileGetRemainingSize()
-
-# # Reads data after cursor until up to and including the next '\n' character or EOF.
-# line_string = sensor.fileReadLine().data
-
-# # Reads the specified number of bytes after the cursor in the currently open file.
-# # If the number is greater than the remaining size, any bytes past the end will be
-# # filled with 0xff. The cursor will move forward by the number of bytes read.
-# # The max number of bytes that can be read is 4000.
-# data = sensor.fileReadBytes(200).data
-
-# sensor.deleteFile("test.txt")
-
-# #Sets the cursor to the specified position. 0 is the beggining of the file
-# sensor.setCursor(5)
-
-# # Starts file streaming (Outputs the data in chunks as fast as possible)
-# sensor.fileStartStream()
-
-# # Forces streaming to stop early (It will stop automatically when entire file is read out)
-# sensor.fileStopStream() 
-
-# # Can be used to check state of file streaming
-# sensor.is_file_streaming
-
-# # Common pattern for efficent reading
-# sensor.fileStartStream()
-# while sensor.is_file_streaming:
-#     pass
-# file_data = sensor.getFileStreamData()
-
-
+if __name__ == "__main__":
+    run_cmd_line()
+        
+    
