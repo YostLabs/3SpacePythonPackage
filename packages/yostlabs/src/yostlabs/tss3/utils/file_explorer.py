@@ -142,6 +142,19 @@ class SensorFile:
         """
         return self._explorer.sensor.fileReadLine().data
 
+    def __iter__(self) -> Iterator[str]:
+        """
+        Iterate over the file line by line.
+
+        Allows ``for line in fp:`` just like Python's built-in ``open()``.
+        Each yielded string includes the trailing newline (if present).
+        Iteration stops at end-of-file.
+        """
+        line = self.readline()
+        while line is not None:
+            yield line
+            line = self.readline()
+
 
 # ---------------------------------------------------------------------------
 # SensorFileExplorer
@@ -156,10 +169,9 @@ class SensorFileExplorer:
 
     * Iteration over current-directory contents via iter_directory / list_directory.
     * Navigation via change_directory.
-    * Unlimited-size file reads via read_file (uses the streaming mechanism
-      internally so single-call 4 000-byte cap does not apply).
+    * Unlimited-size file reads.
     * File deletion via delete.
-    * Terminal-style string commands (ls, cd, cat, rm) via execute.
+    * Terminal-style string commands (ls, cd, cat, rm, ...) via execute.
 
     An internal absolute path is tracked and the sensor is always navigated
     to that location before any operation.  This guards against the sensor's
@@ -292,6 +304,77 @@ class SensorFileExplorer:
         return self._open_file
 
     # ------------------------------------------------------------------
+    # Recursive traversal
+    # ------------------------------------------------------------------
+
+    def walk(
+        self,
+        top: str = ".",
+        *,
+        topdown: bool = True,
+    ) -> Iterator[tuple[str, list[DirItem], list[DirItem]]]:
+        """
+        Walk the directory tree rooted at *top*, mirroring :func:`os.walk`.
+
+        Yields ``(dirpath, subdirs, files)`` for each directory visited,
+        where *dirpath* is the absolute path of the directory, *subdirs*
+        is a list of :class:`DirItem` objects for its sub-directories, and
+        *files* is a list of :class:`DirItem` objects for its files.
+
+        Parameters
+        ----------
+        top : str
+            Starting directory (default: current directory).
+        topdown : bool
+            If ``True`` (default) each directory is yielded before its
+            children.  If ``False`` children are yielded first.
+        """
+        saved_cwd = self._cwd
+        try:
+            self.change_directory(top)
+            root = self._cwd
+            items = self.list_directory()
+            subdirs = [i for i in items if i.is_dir]
+            files   = [i for i in items if i.is_file]
+
+            if topdown:
+                yield root, subdirs, files
+
+            for subdir in subdirs:
+                yield from self.walk(subdir.absolute_path, topdown=topdown)
+
+            if not topdown:
+                yield root, subdirs, files
+        finally:
+            # Always restore the original working directory.
+            self.change_directory(saved_cwd)
+
+    # ------------------------------------------------------------------
+    # Path queries
+    # ------------------------------------------------------------------
+
+    def exists(self, path: str) -> bool:
+        """
+        Return ``True`` if *path* exists on the sensor's file system.
+
+        The check is performed by listing the parent directory and scanning
+        for an entry whose name matches the final component of *path*.
+        """
+        abs_path = self.resolve_path(path)
+        if abs_path == "/":
+            return True  # root always exists
+        parent = posixpath.dirname(abs_path)
+        name   = posixpath.basename(abs_path)
+        saved_cwd = self._cwd
+        try:
+            self.change_directory(parent)
+            return any(item.name == name for item in self.iter_directory())
+        except Exception:
+            return False
+        finally:
+            self.change_directory(saved_cwd)
+
+    # ------------------------------------------------------------------
     # Deletion
     # ------------------------------------------------------------------
 
@@ -404,9 +487,20 @@ def test_file_explorer():
     print(file_explorer.list_directory())
 
     with file_explorer.open("sensor.cfg") as fp:
-        print(fp.read().decode())
+        print(fp.read())
+        # for line in fp:
+        #     print(line)
+
+def iterate_files():
+    sensor = ThreespaceSensor()
+    file_explorer = SensorFileExplorer(sensor)
+    for root, subdirs, files in file_explorer.walk("/"):
+        print(root)
+        for subdir in subdirs:
+            print("  ", subdir.name)
+        for file in files:
+            print("  ", file.name)
 
 if __name__ == "__main__":
-    run_cmd_line()
+    test_file_explorer()
         
-    
