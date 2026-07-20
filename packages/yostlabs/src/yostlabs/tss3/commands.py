@@ -159,7 +159,11 @@ class ThreespaceFormat:
                 raw += response
                 if response[-1] != 0:
                     return None, raw
-                output.append(response[:-1].decode())
+                try:
+                    output.append(response[:-1].decode())
+                except:
+                    #Byte string
+                    output.append(response[:-1])
 
         if self.num_params == 1:
             return output[0], raw
@@ -255,6 +259,7 @@ class ThreespaceCommand:
 THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM = 84
 THREESPACE_START_STREAMING_COMMAND_NUM = 85
 THREESPACE_STOP_STREAMING_COMMAND_NUM = 86
+THREESPACE_FILE_READ_LINE_COMMAND_NUM = 176
 THREESPACE_FILE_READ_BYTES_COMMAND_NUM = 177
 THREESPACE_SOFTWARE_RESET_COMMAND_NUM = 226
 THREESPACE_ENTER_BOOTLOADER_COMMAND_NUM = 229
