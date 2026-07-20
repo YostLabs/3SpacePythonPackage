@@ -1288,6 +1288,12 @@ class ThreespaceSensor:
             if self.file_stream_length != 0:
                 self.log(f"File streaming stopped due to last packet. However still expected {self.file_stream_length} more bytes.")
 
+    def __fileReadLine(self) -> ThreespaceCmdResult[bytes]:    
+        response = self.execute_command(self.commands[THREESPACE_FILE_READ_LINE_COMMAND_NUM])
+        if response.data == b'\xff':
+            response.data = None
+        return response
+
     def __fileReadBytes(self, num_bytes: int) -> ThreespaceCmdResult[bytes]:    
         self.check_dirty()
         cmd = self.commands[THREESPACE_FILE_READ_BYTES_COMMAND_NUM]
