@@ -1,3 +1,4 @@
+import posixpath
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Iterator
@@ -50,6 +51,10 @@ class SensorFileExplorer:
     * File deletion via delete.
     * Terminal-style string commands (ls, cd, cat, rm) via execute.
 
+    An internal absolute path is tracked and the sensor is always navigated
+    to that location before any operation.  This guards against the sensor's
+    CWD being reset to the root when the OS accesses the drive concurrently.
+
     Parameters
     ----------
     sensor : ThreespaceSensor
@@ -58,6 +63,20 @@ class SensorFileExplorer:
 
     def __init__(self, sensor: ThreespaceSensor):
         self.sensor = sensor
+        self._cwd: str = "/"
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _navigate_to_cwd(self) -> None:
+        """Navigate the sensor to the tracked absolute path."""
+        self.sensor.changeDirectory(self._cwd)
+
+    @property
+    def cwd(self) -> str:
+        """The current tracked absolute directory path."""
+        return self._cwd
 
     # ------------------------------------------------------------------
     # Directory iteration
@@ -67,32 +86,22 @@ class SensorFileExplorer:
         """
         Iterate over every item in the current directory.
 
+        Navigates to the tracked absolute path before listing so that an
+        OS-triggered CWD reset does not produce stale results.
+
         Yields
         ------
         DirItem
             One entry per file or subdirectory.
-
-        Notes
-        -----
-        If the sensor reports a directory-changed error (ftype 255) the
-        listing is refreshed automatically by issuing ``changeDirectory(".")``
-        and restarted once.  A second consecutive error raises RuntimeError.
         """
-        refreshed = False
+        self._navigate_to_cwd()
         while True:
             result = self.sensor.getNextDirectoryItem()
             ftype_val, name, size = result.data
             ftype_val = int(ftype_val)
 
             if ftype_val == DirItemType.ERROR:
-                if refreshed:
-                    raise RuntimeError(
-                        "Directory listing failed after refresh. "
-                        "The directory contents may be unstable."
-                    )
-                self.sensor.changeDirectory(".")
-                refreshed = True
-                continue
+                raise RuntimeError("Directory listing failed")
 
             if ftype_val == DirItemType.END:
                 break
@@ -103,13 +112,26 @@ class SensorFileExplorer:
         """Return all items in the current directory as a list."""
         return list(self.iter_directory())
 
+    def __iter__(self) -> Iterator[DirItem]:
+        """Iterate over the current directory; delegates to iter_directory()."""
+        return self.iter_directory()
+
     # ------------------------------------------------------------------
     # Navigation
     # ------------------------------------------------------------------
 
     def change_directory(self, path: str) -> None:
-        """Change the current directory to *path* (relative to CWD)."""
-        self.sensor.changeDirectory(path)
+        """
+        Change the tracked directory to *path*.
+
+        *path* may be relative (e.g. ``"session-01"``, ``"../other"``) or
+        absolute (e.g. ``"/CONFIG"``).  It is resolved against the current
+        tracked path and the result is sent to the sensor as an absolute
+        path, updating the internal tracker on success.
+        """
+        new_cwd = posixpath.normpath(posixpath.join(self._cwd, path))
+        self.sensor.changeDirectory(new_cwd)
+        self._cwd = new_cwd
 
     # ------------------------------------------------------------------
     # File reading
@@ -121,18 +143,20 @@ class SensorFileExplorer:
 
         There is no limit on file size.  The sensor's file-streaming
         mechanism is used so data is transferred in chunks automatically.
-        The file is opened and closed around the operation.
+        Navigates to the tracked absolute path first, then opens and closes
+        the file around the transfer.
 
         Parameters
         ----------
         path : str
-            Path to the file, relative to the current directory.
+            Path to the file, relative to the tracked directory.
 
         Returns
         -------
         bytes
             Raw file contents.
         """
+        self._navigate_to_cwd()
         self.sensor.openFile(path)
         try:
             self.sensor.fileStartStream()
@@ -147,7 +171,8 @@ class SensorFileExplorer:
     # ------------------------------------------------------------------
 
     def delete(self, path: str) -> None:
-        """Delete the file at *path* (relative to CWD)."""
+        """Delete the file at *path* (relative to the tracked directory)."""
+        self._navigate_to_cwd()
         self.sensor.deleteFile(path)
 
     # ------------------------------------------------------------------
@@ -207,7 +232,14 @@ class SensorFileExplorer:
             )
 
 if __name__ == "__main__":
-    
+    sensor = ThreespaceSensor()
+
+    file_explorer = SensorFileExplorer(sensor)
+    file_explorer.change_directory("CONFIG")
+    for file in file_explorer:
+        print(file)
+    # print(file_explorer.list_directory())
+    # print(file_explorer.read_file("sensor.cfg").decode())
 
 # # ---------------------------------------------------------------------------
 # # Reference: low-level sensor file commands
