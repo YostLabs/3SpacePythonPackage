@@ -53,8 +53,9 @@ class SensorFile:
 
     _MAX_CHUNK = 4000  # hardware limit for a single fileReadBytes call
 
-    def __init__(self, explorer: "SensorFileExplorer"):
+    def __init__(self, explorer: "SensorFileExplorer", file_size: int):
         self._explorer = explorer
+        self.size = file_size
 
     def __enter__(self) -> "SensorFile":
         return self
@@ -98,12 +99,45 @@ class SensorFile:
             to_read -= len(chunk)
         return bytes(data)
 
+    def eof(self) -> bool:
+        """Return ``True`` if the cursor is at end-of-file."""
+        return self._explorer.sensor.fileGetRemainingSize().data == 0
+
+    def tell(self) -> int:
+        """Return the current cursor position (bytes from the start of the file)."""
+        remaining = self._explorer.sensor.fileGetRemainingSize().data
+        return self.size - remaining
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        """
+        Move the cursor and return the new absolute position.
+
+        Parameters
+        ----------
+        pos : int
+            Byte offset used together with *whence*.
+        whence : int
+            ``0`` — absolute position (default)
+            ``1`` — relative to the current position
+            ``2`` — relative to the end of the file
+        """
+        if whence == 0:
+            target = pos
+        elif whence == 1:
+            target = self.tell() + pos
+        elif whence == 2:
+            target = self.size + pos
+        else:
+            raise ValueError(f"Invalid whence value: {whence!r}. Expected 0, 1, or 2.")
+        target = max(0, min(target, self.size))
+        self._explorer.sensor.setCursor(target)
+        return target
+
     def readline(self) -> str:
         """
         Read and return the next line up to and including the newline,
         or an empty string at end-of-file.
         """
-        f = open("test.txt", "wb")
         return self._explorer.sensor.fileReadLine().data
 
 
@@ -235,7 +269,8 @@ class SensorFileExplorer:
             )
         self._navigate_to_cwd()
         self.sensor.openFile(path)
-        self._open_file = SensorFile(self)
+        file_size = self.sensor.fileGetRemainingSize().data
+        self._open_file = SensorFile(self, file_size)
         return self._open_file
 
     # ------------------------------------------------------------------
@@ -316,15 +351,11 @@ if __name__ == "__main__":
     import pathlib
     import os
     file_path = pathlib.Path(__file__).parent / "file_explorer.py"
-    with open(file_path, "rb") as fp:
-        print(fp.tell())
-        print(fp.read(10))
-        print(fp.tell())
-        fp.seek(-10, os.SEEK_END)
-        print(fp.tell())
-    with file_explorer.open("sensor.cfg") as fp:
-        #print(fp.read().decode())
-        pass
+    with file_explorer.open("/DATA/session-04/data0.csv") as fp:
+        print(f"{fp.size=}")
+        print(fp.read(fp.size-1))
+        print(fp.read())
+
     # print(file_explorer.list_directory())
     # print(file_explorer.read_file("sensor.cfg").decode())
 
