@@ -34,6 +34,80 @@ class DirItem:
 
 
 # ---------------------------------------------------------------------------
+# SensorFile
+# ---------------------------------------------------------------------------
+
+class SensorFile:
+    """
+    File-like handle for a file opened on the sensor.
+
+    Obtain one via ``SensorFileExplorer.open()``.  Use as a context manager
+    so the file is always closed, even if an exception occurs::
+
+        with file_explorer.open("data.bin") as fp:
+            header = fp.read(16)
+            rest   = fp.read()       # rest of file
+
+    Only one ``SensorFile`` may be open at a time per sensor.
+    """
+
+    _MAX_CHUNK = 4000  # hardware limit for a single fileReadBytes call
+
+    def __init__(self, explorer: "SensorFileExplorer"):
+        self._explorer = explorer
+
+    def __enter__(self) -> "SensorFile":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the file and release the sensor's file handle."""
+        if self._explorer._open_file is self:
+            self._explorer.sensor.closeFile()
+            self._explorer._open_file = None
+
+    def read(self, n: int = -1) -> bytes:
+        """
+        Read and return up to *n* bytes from the current cursor position.
+
+        Parameters
+        ----------
+        n : int
+            Number of bytes to read.  Pass ``-1`` (default) to read
+            everything from the current position to end-of-file.
+        """
+        sensor = self._explorer.sensor
+        if n == 0:
+            return b""
+        if n == -1:
+            # Streaming reads from cursor to EOF with no size limit.
+            sensor.fileStartStream()
+            while sensor.is_file_streaming:
+                sensor.updateStreaming()
+            return bytes(sensor.getFileStreamData())
+        
+        # Partial read: cap at remaining bytes to avoid 0xff padding past EOF.
+        remaining = sensor.fileGetRemainingSize().data
+        to_read = min(n, remaining)
+        data = bytearray()
+        while to_read > 0:
+            chunk = sensor.fileReadBytes(min(to_read, self._MAX_CHUNK)).data
+            data.extend(chunk)
+            to_read -= len(chunk)
+        return bytes(data)
+
+    def readline(self) -> str:
+        """
+        Read and return the next line up to and including the newline,
+        or an empty string at end-of-file.
+        """
+        f = open("test.txt", "wb")
+        return self._explorer.sensor.fileReadLine().data
+
+
+# ---------------------------------------------------------------------------
 # SensorFileExplorer
 # ---------------------------------------------------------------------------
 
@@ -64,6 +138,7 @@ class SensorFileExplorer:
     def __init__(self, sensor: ThreespaceSensor):
         self.sensor = sensor
         self._cwd: str = "/"
+        self._open_file: SensorFile | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -134,37 +209,34 @@ class SensorFileExplorer:
         self._cwd = new_cwd
 
     # ------------------------------------------------------------------
-    # File reading
+    # File access
     # ------------------------------------------------------------------
 
-    def read_file(self, path: str) -> bytes:
+    def open(self, path: str) -> SensorFile:
         """
-        Read the entire contents of *path* and return them as bytes.
+        Open *path* for reading and return a :class:`SensorFile` handle.
 
-        There is no limit on file size.  The sensor's file-streaming
-        mechanism is used so data is transferred in chunks automatically.
-        Navigates to the tracked absolute path first, then opens and closes
-        the file around the transfer.
+        Use as a context manager to ensure the file is always closed::
+
+            with file_explorer.open("log.bin") as fp:
+                data = fp.read()
+
+        Only one file may be open at a time; opening a second raises
+        ``IOError``.
 
         Parameters
         ----------
         path : str
             Path to the file, relative to the tracked directory.
-
-        Returns
-        -------
-        bytes
-            Raw file contents.
         """
+        if self._open_file is not None:
+            raise IOError(
+                "A file is already open. Close it before opening another."
+            )
         self._navigate_to_cwd()
         self.sensor.openFile(path)
-        try:
-            self.sensor.fileStartStream()
-            while self.sensor.is_file_streaming:
-                self.sensor.updateStreaming()
-            return bytes(self.sensor.getFileStreamData())
-        finally:
-            self.sensor.closeFile()
+        self._open_file = SensorFile(self)
+        return self._open_file
 
     # ------------------------------------------------------------------
     # Deletion
@@ -220,7 +292,8 @@ class SensorFileExplorer:
         elif cmd == "cat":
             if arg is None:
                 raise ValueError("cat requires a file argument")
-            return self.read_file(arg)
+            with self.open(arg) as fp:
+                return fp.read()
         elif cmd == "rm":
             if arg is None:
                 raise ValueError("rm requires a file argument")
@@ -230,14 +303,28 @@ class SensorFileExplorer:
             raise ValueError(
                 f"Unknown command: {cmd!r}. Supported: ls, cd, cat, rm"
             )
-
 if __name__ == "__main__":
     sensor = ThreespaceSensor()
+
+    fp = open("test.txt", "wb")
 
     file_explorer = SensorFileExplorer(sensor)
     file_explorer.change_directory("CONFIG")
     for file in file_explorer:
         print(file)
+
+    import pathlib
+    import os
+    file_path = pathlib.Path(__file__).parent / "file_explorer.py"
+    with open(file_path, "rb") as fp:
+        print(fp.tell())
+        print(fp.read(10))
+        print(fp.tell())
+        fp.seek(-10, os.SEEK_END)
+        print(fp.tell())
+    with file_explorer.open("sensor.cfg") as fp:
+        #print(fp.read().decode())
+        pass
     # print(file_explorer.list_directory())
     # print(file_explorer.read_file("sensor.cfg").decode())
 
