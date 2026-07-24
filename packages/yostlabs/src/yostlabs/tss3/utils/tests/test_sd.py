@@ -2,7 +2,9 @@ import enum
 import time
 
 from yostlabs.tss3.utils.tests.base import SensorTestBase
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.utils.file_explorer import SensorFileExplorer
+from yostlabs.tss3.utils.mass_storage import find_removable_volumes
+from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 
 # FatFs result codes returned in the response header status field
 FR_OK               =   0   # Succeeded
@@ -35,7 +37,7 @@ class SdTest(SensorTestBase):
     3. Allow logging to run for 2 seconds, then stop.
     """
 
-    LOG_DURATION = 2.0  # seconds
+    EXPECTED_LOG_DURATION = 2.0  # seconds
 
     def __init__(self, sensor: ThreespaceSensor):
         super().__init__(sensor)
@@ -63,7 +65,12 @@ class SdTest(SensorTestBase):
     def start(self):
         if self.state != SdTestState.Inactive:
             raise Exception("SD test already started.")
-        self.__settings_cache = self.sensor.read_settings("header_status")
+        self.__settings_cache = self.sensor.read_settings("header_status", 
+                                                          "log_start_event", "log_stop_event", "log_stop_count",
+                                                          "log_slots", "log_rate",
+                                                          "log_style", "log_base_filename",
+                                                          "log_folder_mode", "log_data_mode", "log_output_settings")
+
         self.sensor.writeHeaderStatusEnabled(True)
         self.__go_next_state()
 
@@ -148,6 +155,12 @@ class SdTest(SensorTestBase):
         result = self.sensor.startDataLogging()
         status = result.header.status
 
+        #Command Only, Count, Continous, Session#, Ascii
+        self.sensor.write_settings(log_start_event=2, log_stop_event=4, log_stop_count=int(50 * self.EXPECTED_LOG_DURATION), 
+                                   log_slots=[StreamableCommands.GetTimestamp, StreamableCommands.GetUntaredOrientation], 
+                                   log_rate=100, log_style=0, log_base_filename="sd_test",
+                                   log_folder_mode=0, log_data_mode=1, log_output_settings=1)
+
         if status == FR_OK:
             self.result["start_logging"]["success"] = True
             self.result["start_logging"]["status"] = status
@@ -166,7 +179,10 @@ class SdTest(SensorTestBase):
             self.__cleanup()
 
     def __update_logging(self):
+        elapsed_time = time.perf_counter() - self.__log_start_time
+
         if time.perf_counter() - self.__log_start_time >= self.LOG_DURATION:
+            self.sensor.getLoggingStatus()
             result = self.sensor.stopDataLogging()
             self.result["stop_logging"]["success"] = (result.header.status == 0)
             self.result["stop_logging"]["status"] = result.header.status

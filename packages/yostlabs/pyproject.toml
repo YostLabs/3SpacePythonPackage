@@ -27,7 +27,9 @@ dependencies = [
   "numpy",
   "yostlabs-math>=2026.3.11",
   "bleak",
-  "async-timeout"
+  "async-timeout",
+  "pywin32; sys_platform == 'win32'",
+  "wmi; sys_platform == 'win32'"
 ]
 
 # [project.optional-dependencies]
