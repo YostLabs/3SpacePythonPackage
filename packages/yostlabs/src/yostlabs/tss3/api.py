@@ -77,6 +77,8 @@ class ThreespaceSensor:
         else: #Unknown type, try making a ThreespaceSerialComClass out of this
             try:
                 self.com = ThreespaceSerialComClass(com)
+                self.com.open()
+                manually_opened_com = True
             except:
                 raise ValueError("Failed to create default ThreespaceSerialComClass from parameter:", type(com), com)
 
