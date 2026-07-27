@@ -16,10 +16,12 @@ import json
 import math
 import sys
 import threading
+import time
+from typing import Any
 
 import numpy as np
 
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 from yostlabs.communication.ble import ThreespaceBLEComClass
 from yostlabs.tss3.utils.calibration import ThreespaceGradientDescentCalibration
 from yostlabs.math import quaternion
@@ -118,11 +120,32 @@ def _gather_sample(
     accel_totals = {i: np.zeros(3, dtype=np.float64) for i in accels}
     mag_totals   = {i: np.zeros(3, dtype=np.float64) for i in mags}
 
-    for _ in range(READINGS_PER_SAMPLE):
-        for sid in accels:
-            accel_totals[sid] += np.array(sensor.getRawAccelVec(sid).data, dtype=np.float64)
-        for sid in mags:
-            mag_totals[sid] += np.array(sensor.getRawMagVec(sid).data, dtype=np.float64)
+    last_packet_time = time.perf_counter()
+    samples_gathered = 0
+    sensor.clearStreamingPackets()
+    sensor.startStreaming()
+
+    #Check for a timeout in case the sensor is not responding or streaming is not working
+    while samples_gathered < READINGS_PER_SAMPLE and time.perf_counter() - last_packet_time < 1.0:
+        sensor.updateStreaming()
+        packet = sensor.getOldestStreamingPacket()
+        while packet is not None:
+            i = 0
+            for sid in accels:
+                accel_totals[sid] += np.array(packet.data[i], dtype=np.float64)
+                i += 1
+            for sid in mags:
+                mag_totals[sid] += np.array(packet.data[i], dtype=np.float64)
+                i += 1
+
+            last_packet_time = time.perf_counter()
+            samples_gathered += 1
+            if samples_gathered >= READINGS_PER_SAMPLE:
+                break
+
+            packet = sensor.getOldestStreamingPacket()
+
+    sensor.stopStreaming()
 
     accel_avg = {i: accel_totals[i] / READINGS_PER_SAMPLE for i in accels}
     mag_avg   = {i: mag_totals[i]   / READINGS_PER_SAMPLE for i in mags}
@@ -182,6 +205,7 @@ def _run_wizard(args: argparse.Namespace) -> int:
     cached_axis_offset: int | None = None
     cached_accel_odrs: dict[int, int] = {}
     cached_mag_odrs:   dict[int, int] = {}
+    cached_streaming_config: dict[str,Any] = {}
 
     def restore_sensor() -> None:
         try:
@@ -195,6 +219,8 @@ def _run_wizard(args: argparse.Namespace) -> int:
             for sid, odr in cached_mag_odrs.items():
                 if odr < MIN_ODR:
                     sensor.writeOdrMag(sid, odr)
+            if cached_streaming_config:
+                sensor.write_settings(**cached_streaming_config)
         except Exception as exc:
             print(f"Warning: failed to restore sensor settings: {exc}", file=sys.stderr)
 
@@ -205,6 +231,7 @@ def _run_wizard(args: argparse.Namespace) -> int:
             cached_accel_odrs[sid] = sensor.readOdrAccel(sid)
         for sid in selected_mags:
             cached_mag_odrs[sid] = sensor.readOdrMag(sid)
+        cached_streaming_config = sensor.read_settings("stream_slots", "stream_mode", "stream_hz", "stream_count")
 
         # Raise ODR if below minimum
         for sid, odr in cached_accel_odrs.items():
@@ -217,6 +244,24 @@ def _run_wizard(args: argparse.Namespace) -> int:
         # Calibration math requires XYZ axis order with no offset applied
         sensor.writeAxisOrder("xyz")
         sensor.writeAxisOffsetEnabled(0)
+
+        #Configure streaming to get the samples to avoid long delays from polling each sample individually (especially over BLE)
+        #Also using streaming mode count to avoid potential issues getting streaming to stop over BLE if using a device with a low
+        #interval causing the BLE stack to be saturated.
+        stream_slots = []
+        for sid in selected_accels:
+            stream_slots.append(f"{StreamableCommands.GetRawAccelVec.value}:{sid}")
+        for sid in selected_mags:
+            stream_slots.append(f"{StreamableCommands.GetRawMagVec.value}:{sid}")
+        stream_slots = ','.join(stream_slots)
+        #I could use the streaming manager, but just going to use streaming directly
+        #and know the slots were set in the order of accels/mags, so they can be read back in the same order.
+        sensor.write_settings(
+            stream_slots=stream_slots,
+            stream_hz=MIN_ODR,
+            stream_mode=1, #Count based
+            stream_count=READINGS_PER_SAMPLE
+        )
     except Exception as e:
         print(f"Error: failed to configure sensor: {e}", file=sys.stderr)
         restore_sensor()
@@ -334,9 +379,12 @@ def _run_wizard(args: argparse.Namespace) -> int:
         print(" done.")
 
     # --- Save ---
+    results = json.dumps(result, indent=2)
+    print("\nCalibration results:")
+    print(results)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
+            f.write(results)
         print(f"\nResults saved to {args.output}")
 
     # --- Apply ---
