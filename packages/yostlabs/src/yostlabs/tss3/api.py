@@ -1175,7 +1175,7 @@ class ThreespaceSensor:
         self.streaming_packets.clear()
     
     #This is called for all streaming types
-    def updateStreaming(self, max_checks=float('inf'), timeout=None, blocking=False):
+    def updateStreaming(self, max_checks=float('inf'), timeout=0.1, blocking=False):
         """
         Returns true if any amount of data was processed whether valid or not. This is called for all streaming types.
 
