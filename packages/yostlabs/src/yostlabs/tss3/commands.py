@@ -170,6 +170,7 @@ class ThreespaceFormat:
         return output, raw
 
     def parse_response_ascii(self, response: str):
+        if self.num_params == 0: return None
         if self.num_params == 1 and self.struct_format[0] == 's':
             return response
         data = response.strip().split(',')
@@ -181,6 +182,7 @@ class ThreespaceFormat:
         return command_data
     
     def read_response_ascii(self, com: ThreespaceInputStream):
+        if self.num_params == 0: return None, ""
         if self.num_params == 1 and self.struct_format[0] == 's':
             response = com.read_until(b'\n') #Read and discard the command name
             return response.decode().strip(), response
