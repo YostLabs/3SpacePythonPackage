@@ -1,14 +1,34 @@
 """
 Gradient Descent Calibration Tool for 3Space sensors.
 
-Replicates the Gradient Descent Calibration in the suite as a CLI tool.
-Walks the user through 24 orientations, collects raw accel/mag data from
-a connected sensor, runs gradient descent, and optionally applies the result.
+Provides a programmatic wizard class (ThreespaceCalibrationWizard) and a CLI
+entry point that wraps it.
 
-Usage:
+Usage (CLI)::
+
     yostlabs-calibration COM3
     yostlabs-calibration COM3 --mags 0 --no-apply --output results.json
     python -m yostlabs.tss3.tools.calibration_tool COM3
+
+Usage (programmatic)::
+
+    wizard = ThreespaceCalibrationWizard(sensor)
+    wizard.start()
+    wizard.print_header()
+    while not wizard.is_done() and not wizard.is_cancelled() and not wizard.is_error():
+        wizard.print_instructions()
+        user_input = input("> ").strip().lower()
+        if user_input == "q":
+            wizard.cancel()
+        elif user_input == "b":
+            wizard.back()
+        else:
+            wizard.next()
+            while wizard.is_busy():
+                pass
+    if wizard.result:
+        wizard.apply_result()
+        sensor.commitSettings()
 """
 
 import argparse
@@ -17,6 +37,7 @@ import math
 import sys
 import threading
 import time
+from enum import Enum, auto
 from typing import Any
 
 import numpy as np
@@ -33,6 +54,7 @@ from yostlabs.math import quaternion
 
 MIN_ODR = 500              # Hz – components below this are raised during calibration
 READINGS_PER_SAMPLE = 100  # readings averaged per orientation step
+TOTAL_STEPS = 24
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +74,7 @@ _ORIENTATION_ROOTS = [
 def _build_orientations() -> list[np.ndarray]:
     """Return the 24 calibration quaternions in wizard order."""
     orientations = []
-    rotation_sign = -1 #1 = CCW, -1 = CW
+    rotation_sign = -1  # 1 = CCW, -1 = CW
     for root in _ORIENTATION_ROOTS:
         forward_vec = root[1]
         down_vec = [-v for v in root[0]]
@@ -62,8 +84,7 @@ def _build_orientations() -> list[np.ndarray]:
         for _ in range(3):
             q = np.array(quaternion.quat_mul(orientations[-1].tolist(), rotation), dtype=np.float64)
             orientations.append(q)
-        rotation_sign *= -1 #Reverse rotation direction to prevent cable from twisting too much
-
+        rotation_sign *= -1  # Reverse rotation direction to prevent cable from twisting too much
     return orientations
 
 
@@ -106,9 +127,33 @@ _ORIENTATION_LABELS: list[tuple[str, str]] = [
     ("+Z right", "+Y forward"),
 ]
 
+_AXIS_REFERENCE_TEXT = (
+    "Axis reference:\n"
+    "  'up'        = face pointing away from ground (against gravity)\n"
+    "  'down'      = face pointing towards the ground (with gravity)\n"
+    "  'forward'   = face pointing opposite your body (away from your eyes)\n"
+    "  'backwards' = face pointing in towards your body (towards your eyes)\n"
+    "  'left'      = face pointing to your left side\n"
+    "  'right'     = face pointing to your right side"
+)
+
 
 # ---------------------------------------------------------------------------
-# Sensor I/O helpers
+# Internal state enum
+# ---------------------------------------------------------------------------
+
+class _WizardState(Enum):
+    IDLE        = auto()
+    WAITING     = auto()   # At a step, ready for next() to be called
+    COLLECTING  = auto()   # Background thread: gathering sensor readings
+    CALCULATING = auto()   # Background thread: running gradient descent
+    DONE        = auto()   # Calculation complete; result is available
+    CANCELLED   = auto()
+    ERROR       = auto()
+
+
+# ---------------------------------------------------------------------------
+# Sensor I/O helper
 # ---------------------------------------------------------------------------
 
 def _gather_sample(
@@ -125,7 +170,7 @@ def _gather_sample(
     sensor.clearStreamingPackets()
     sensor.startStreaming()
 
-    #Check for a timeout in case the sensor is not responding or streaming is not working
+    # Check for a timeout in case the sensor is not responding or streaming is not working
     while samples_gathered < READINGS_PER_SAMPLE and time.perf_counter() - last_packet_time < 1.0:
         sensor.updateStreaming()
         packet = sensor.getOldestStreamingPacket()
@@ -138,13 +183,12 @@ def _gather_sample(
                 mag_totals[sid] += np.array(packet.data[i], dtype=np.float64)
                 i += 1
 
-            last_packet_time = time.perf_counter()
+            last_packet_time = time.perf_counter() 
             samples_gathered += 1
             if samples_gathered >= READINGS_PER_SAMPLE:
                 break
 
             packet = sensor.getOldestStreamingPacket()
-
     sensor.stopStreaming()
 
     accel_avg = {i: accel_totals[i] / READINGS_PER_SAMPLE for i in accels}
@@ -152,18 +196,425 @@ def _gather_sample(
     return accel_avg, mag_avg
 
 
-def _run_gradient_thread(
-    gradient: ThreespaceGradientDescentCalibration,
-    samples: list[np.ndarray],
-    origin: np.ndarray,
-    result_out: list,
-    **kwargs,
-) -> None:
-    result_out.extend(gradient.calculate(samples, origin, **kwargs).tolist())
+# ---------------------------------------------------------------------------
+# ThreespaceCalibrationWizard
+# ---------------------------------------------------------------------------
+
+class ThreespaceCalibrationWizard:
+    """Programmatic gradient descent calibration wizard for 3Space sensors.
+
+    The wizard walks through 24 orientations, collects raw accel/mag data,
+    runs gradient descent, and produces a calibration result that can then
+    be applied to the sensor.
+
+    Typical usage::
+
+        wizard = ThreespaceCalibrationWizard(sensor)
+        wizard.start()
+        wizard.print_header()
+        while not wizard.is_done() and not wizard.is_cancelled() and not wizard.is_error():
+            wizard.print_instructions()
+            user_input = input("> ").strip().lower()
+            if user_input == "q":
+                wizard.cancel()
+            elif user_input == "b":
+                wizard.back()
+            else:
+                wizard.next()
+                while wizard.is_busy():
+                    pass
+        if wizard.result:
+            wizard.apply_result()
+            sensor.commitSettings()
+    """
+
+    def __init__(
+        self,
+        sensor: ThreespaceSensor,
+        accels: list[int] | None = None,
+        mags: list[int] | None = None,
+        verbose: bool = False,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        sensor:
+            Connected ThreespaceSensor instance.
+        accels:
+            Accelerometer component IDs to calibrate.  ``None`` calibrates
+            all valid accelerometers reported by the sensor.
+        mags:
+            Magnetometer component IDs to calibrate.  ``None`` calibrates
+            all valid magnetometers reported by the sensor.
+        verbose:
+            Pass ``True`` to print gradient-descent progress during
+            calculation.
+        """
+        self._sensor           = sensor
+        self._requested_accels = accels
+        self._requested_mags   = mags
+        self._verbose          = verbose
+
+        # Populated in start()
+        self._selected_accels: list[int]      = []
+        self._selected_mags:   list[int]      = []
+        self._orientations:    list[np.ndarray] = []
+
+        # Cached sensor settings restored after collection / on cancel
+        self._cached_axis_order:       str | None       = None
+        self._cached_axis_offset:      int | None       = None
+        self._cached_accel_odrs:       dict[int, int]   = {}
+        self._cached_mag_odrs:         dict[int, int]   = {}
+        self._cached_streaming_config: dict[str, Any]   = {}
+        self._sensor_configured:       bool             = False
+
+        # Collected samples keyed by component ID
+        self._accel_samples: dict[int, list[np.ndarray]] = {}
+        self._mag_samples:   dict[int, list[np.ndarray]] = {}
+
+        # Internal state
+        self._state:  _WizardState       = _WizardState.IDLE
+        self._step:   int                = 0
+        self._thread: threading.Thread | None = None
+        self._error:  str | None         = None
+
+        # Public result dict; None until the wizard reaches DONE state.
+        # Keys: "accels" and "mags", each mapping component-ID strings to
+        # {"matrix": [...], "bias": [...]} dicts.
+        self.result: dict | None = None
+
+    # ------------------------------------------------------------------
+    # Read-only properties
+    # ------------------------------------------------------------------
+
+    @property
+    def step(self) -> int:
+        """Current 0-based step index (0 – TOTAL_STEPS-1)."""
+        return self._step
+
+    @property
+    def total_steps(self) -> int:
+        """Total number of orientation steps (always 24)."""
+        return TOTAL_STEPS
+
+    @property
+    def selected_accels(self) -> list[int]:
+        """Accelerometer IDs selected for calibration (populated after start())."""
+        return list(self._selected_accels)
+
+    @property
+    def selected_mags(self) -> list[int]:
+        """Magnetometer IDs selected for calibration (populated after start())."""
+        return list(self._selected_mags)
+
+    @property
+    def error(self) -> str | None:
+        """Error message when the wizard is in the ERROR state, else None."""
+        return self._error
+
+    # ------------------------------------------------------------------
+    # Status predicates
+    # ------------------------------------------------------------------
+
+    def is_busy(self) -> bool:
+        """Return True while sample collection or gradient descent is running."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def is_done(self) -> bool:
+        """Return True once calibration is complete and *result* is available."""
+        return self._state == _WizardState.DONE
+
+    def is_cancelled(self) -> bool:
+        """Return True if the wizard was cancelled."""
+        return self._state == _WizardState.CANCELLED
+
+    def is_error(self) -> bool:
+        """Return True if the wizard encountered an unrecoverable error."""
+        return self._state == _WizardState.ERROR
+
+    # ------------------------------------------------------------------
+    # Wizard controls
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Configure the sensor and begin the wizard at step 0.
+
+        Raises
+        ------
+        RuntimeError
+            If the wizard was already started, or no valid sensors are
+            available for the requested component IDs.
+        Exception
+            Re-raises sensor communication errors encountered during
+            initial configuration.
+        """
+        if self._state != _WizardState.IDLE:
+            raise RuntimeError("Wizard already started. Create a new instance to restart.")
+
+        sensor    = self._sensor
+        all_accels: list[int] = sensor.valid_accels
+        all_mags:   list[int] = sensor.valid_mags
+
+        if self._requested_accels is not None:
+            self._selected_accels = [a for a in self._requested_accels if a in all_accels]
+        else:
+            self._selected_accels = list(all_accels)
+
+        if self._requested_mags is not None:
+            self._selected_mags = [m for m in self._requested_mags if m in all_mags]
+        else:
+            self._selected_mags = list(all_mags)
+
+        if not self._selected_accels and not self._selected_mags:
+            raise RuntimeError("No valid accelerometers or magnetometers to calibrate.")
+
+        # Cache current sensor state so it can be restored later
+        self._cached_axis_order  = sensor.readAxisOrder()
+        self._cached_axis_offset = sensor.readAxisOffsetEnabled()
+        for sid in self._selected_accels:
+            self._cached_accel_odrs[sid] = sensor.readOdrAccel(sid)
+        for sid in self._selected_mags:
+            self._cached_mag_odrs[sid] = sensor.readOdrMag(sid)
+        self._cached_streaming_config = sensor.read_settings(
+            "stream_slots", "stream_mode", "stream_hz", "stream_count"
+        )
+        self._sensor_configured = True
+
+        # Raise ODR on any slow components
+        for sid, odr in self._cached_accel_odrs.items():
+            if odr < MIN_ODR:
+                sensor.writeOdrAccel(sid, MIN_ODR)
+        for sid, odr in self._cached_mag_odrs.items():
+            if odr < MIN_ODR:
+                sensor.writeOdrMag(sid, MIN_ODR)
+
+        # Calibration math requires XYZ axis order with no offset applied
+        sensor.writeAxisOrder("xyz")
+        sensor.writeAxisOffsetEnabled(0)
+
+        # Configure streaming – use count-based mode to avoid BLE saturation issues
+        stream_slots = []
+        for sid in self._selected_accels:
+            stream_slots.append(f"{StreamableCommands.GetRawAccelVec.value}:{sid}")
+        for sid in self._selected_mags:
+            stream_slots.append(f"{StreamableCommands.GetRawMagVec.value}:{sid}")
+        sensor.write_settings(
+            stream_slots=','.join(stream_slots),
+            stream_hz=MIN_ODR,
+            stream_mode=1,           # count-based
+            stream_count=READINGS_PER_SAMPLE,
+        )
+
+        self._accel_samples = {a: [] for a in self._selected_accels}
+        self._mag_samples   = {m: [] for m in self._selected_mags}
+        self._orientations  = _build_orientations()
+        self._step  = 0
+        self._state = _WizardState.WAITING
+
+    def getRequiredOrientation(self) -> np.ndarray | None:
+        """Return the target quaternion the sensor should be held in for the
+        current step, or ``None`` if not in a WAITING state.
+
+        The returned array is a copy (modifying it does not affect the wizard).
+        """
+        if self._state == _WizardState.WAITING:
+            return self._orientations[self._step].copy()
+        return None
+
+    def print_header(self) -> None:
+        """Print the one-time introduction text and axis-reference key."""
+        print()
+        print("=" * 62)
+        print(f"  GRADIENT DESCENT CALIBRATION  —  {TOTAL_STEPS} Orientations")
+        print("=" * 62)
+        print("For each step, place the sensor in the described orientation,")
+        print("hold it still, then call next() (or press Enter in the CLI).")
+        print()
+        print(_AXIS_REFERENCE_TEXT)
+        print("=" * 62)
+
+    def print_instructions(self) -> None:
+        """Print human-readable guidance for the current wizard state."""
+        if self._state == _WizardState.IDLE:
+            print("Wizard not started. Call start() first.")
+        elif self._state == _WizardState.WAITING:
+            face_up, face_toward = _ORIENTATION_LABELS[self._step]
+            print(f"\nStep {self._step + 1:2d} / {TOTAL_STEPS}:  {face_up},  {face_toward}")
+        elif self._state == _WizardState.COLLECTING:
+            print(f"  Collecting {READINGS_PER_SAMPLE} readings for step {self._step + 1}...")
+        elif self._state == _WizardState.CALCULATING:
+            print("  Calculating calibration parameters...")
+        elif self._state == _WizardState.DONE:
+            print("Calibration complete.")
+        elif self._state == _WizardState.CANCELLED:
+            print("Calibration cancelled.")
+        elif self._state == _WizardState.ERROR:
+            print(f"Calibration error: {self._error}")
+
+    def next(self) -> bool:
+        """Capture a sample for the current step and advance.
+
+        Launches a background worker that collects sensor data.  On the
+        final step (24) the same worker also runs gradient descent so no
+        additional call is needed.  Poll :meth:`is_busy` to wait for
+        completion.
+
+        Returns ``True`` if the worker was launched, ``False`` when the
+        wizard is not in a WAITING state or is already busy.
+        """
+        if self._state != _WizardState.WAITING or self.is_busy():
+            return False
+
+        self._state  = _WizardState.COLLECTING
+        self._thread = threading.Thread(target=self._step_worker, daemon=True)
+        self._thread.start()
+        return True
+
+    def back(self) -> bool:
+        """Discard the last captured sample and return to that step.
+
+        Returns ``True`` if the step was decremented, ``False`` if at step 0,
+        busy, or not in a WAITING state.
+        """
+        if self._state != _WizardState.WAITING or self.is_busy() or self._step == 0:
+            return False
+
+        self._step -= 1
+        for samples in self._accel_samples.values():
+            if samples:
+                samples.pop()
+        for samples in self._mag_samples.values():
+            if samples:
+                samples.pop()
+        return True
+
+    def cancel(self) -> None:
+        """Cancel the wizard and restore the sensor to its previous settings."""
+        self._state = _WizardState.CANCELLED
+        self._restore_sensor()
+
+    def apply_result(self) -> bool:
+        """Write the calibration result to the sensor (does not commit).
+
+        Call ``sensor.commitSettings()`` afterwards to persist across
+        power cycles.
+
+        Returns ``True`` on success, ``False`` if no result is available or
+        a sensor error occurs (check :attr:`error` for details).
+        """
+        if self.result is None:
+            return False
+        try:
+            current_order = self._sensor.readAxisOrder()
+            self._sensor.writeAxisOrder("xyz")
+
+            for sid_str, calib in self.result["mags"].items():
+                sid = int(sid_str)
+                self._sensor.writeCalibMatMag(sid, calib["matrix"])
+                self._sensor.writeCalibBiasMag(sid, calib["bias"])
+
+            for sid_str, calib in self.result["accels"].items():
+                sid = int(sid_str)
+                self._sensor.writeCalibMatAccel(sid, calib["matrix"])
+                self._sensor.writeCalibBiasAccel(sid, calib["bias"])
+
+            self._sensor.writeAxisOrder(current_order)
+            return True
+        except Exception as exc:
+            self._error = str(exc)
+            return False
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _step_worker(self) -> None:
+        """Background worker: collect one sample; on the last step also
+        restores the sensor and runs gradient descent."""
+        try:
+            accel_avg, mag_avg = _gather_sample(
+                self._sensor, self._selected_accels, self._selected_mags
+            )
+            for sid in self._selected_accels:
+                self._accel_samples[sid].append(accel_avg[sid])
+            for sid in self._selected_mags:
+                self._mag_samples[sid].append(mag_avg[sid])
+
+            self._step += 1
+
+            if self._step >= TOTAL_STEPS:
+                self._state = _WizardState.CALCULATING
+                self._restore_sensor()
+                self._run_gradient_descent()
+            else:
+                self._state = _WizardState.WAITING
+
+        except Exception as exc:
+            self._error = str(exc)
+            self._state = _WizardState.ERROR
+
+    def _run_gradient_descent(self) -> None:
+        """Run gradient descent for every selected sensor component.
+        Called from inside the worker thread after the last sample."""
+        try:
+            gradient    = ThreespaceGradientDescentCalibration(self._orientations)
+            calc_result: dict[str, dict] = {"accels": {}, "mags": {}}
+
+            for sid in self._selected_mags:
+                samples    = self._mag_samples[sid]
+                bias_guess = sum(samples) / len(samples)
+                centered   = [s - bias_guess for s in samples]
+                params     = gradient.calculate(centered, centered[0], verbose=self._verbose).tolist()
+                p          = np.array(params)
+                p[9:] += -bias_guess  # Gradient descent uses opposite sign convention
+                calc_result["mags"][str(sid)] = {
+                    "matrix": p[:9].tolist(),
+                    "bias":   p[9:].tolist(),
+                }
+
+            for sid in self._selected_accels:
+                params = gradient.calculate(
+                    self._accel_samples[sid],
+                    np.array([0.0, 1.0, 0.0]),
+                    verbose=self._verbose,
+                ).tolist()
+                p = np.array(params)
+                calc_result["accels"][str(sid)] = {
+                    "matrix": p[:9].tolist(),
+                    "bias":   p[9:].tolist(),
+                }
+
+            self.result = calc_result
+            self._state = _WizardState.DONE
+
+        except Exception as exc:
+            self._error = str(exc)
+            self._state = _WizardState.ERROR
+
+    def _restore_sensor(self) -> None:
+        """Restore cached sensor settings.  Safe to call more than once."""
+        if not self._sensor_configured:
+            return
+        self._sensor_configured = False
+        try:
+            if self._cached_axis_order is not None:
+                self._sensor.writeAxisOrder(self._cached_axis_order)
+            if self._cached_axis_offset is not None:
+                self._sensor.writeAxisOffsetEnabled(self._cached_axis_offset)
+            for sid, odr in self._cached_accel_odrs.items():
+                if odr < MIN_ODR:
+                    self._sensor.writeOdrAccel(sid, odr)
+            for sid, odr in self._cached_mag_odrs.items():
+                if odr < MIN_ODR:
+                    self._sensor.writeOdrMag(sid, odr)
+            if self._cached_streaming_config:
+                self._sensor.write_settings(**self._cached_streaming_config)
+        except Exception as exc:
+            print(f"Warning: failed to restore sensor settings: {exc}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
-# Wizard
+# CLI runner (uses ThreespaceCalibrationWizard internally)
 # ---------------------------------------------------------------------------
 
 def _run_wizard(args: argparse.Namespace) -> int:
@@ -179,246 +630,88 @@ def _run_wizard(args: argparse.Namespace) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    # Determine which components to calibrate
-    all_accels: list[int] = sensor.valid_accels
-    all_mags:   list[int] = sensor.valid_mags
+    accels = [int(x) for x in args.accels.split(",")] if args.accels is not None else None
+    mags   = [int(x) for x in args.mags.split(",")]   if args.mags   is not None else None
 
-    if args.accels is not None:
-        selected_accels = [a for a in (int(x) for x in args.accels.split(",")) if a in all_accels]
-    else:
-        selected_accels = list(all_accels)
-
-    if args.mags is not None:
-        selected_mags = [m for m in (int(x) for x in args.mags.split(",")) if m in all_mags]
-    else:
-        selected_mags = list(all_mags)
-
-    if not selected_accels and not selected_mags:
-        print("Error: no valid accelerometers or magnetometers to calibrate.", file=sys.stderr)
-        return 1
-
-    print(f"  Accelerometers: {selected_accels or 'none'}")
-    print(f"  Magnetometers:  {selected_mags or 'none'}")
-
-    # --- Cache current sensor state ---
-    cached_axis_order:  str | None = None
-    cached_axis_offset: int | None = None
-    cached_accel_odrs: dict[int, int] = {}
-    cached_mag_odrs:   dict[int, int] = {}
-    cached_streaming_config: dict[str,Any] = {}
-
-    def restore_sensor() -> None:
-        try:
-            if cached_axis_order is not None:
-                sensor.writeAxisOrder(cached_axis_order)
-            if cached_axis_offset is not None:
-                sensor.writeAxisOffsetEnabled(cached_axis_offset)
-            for sid, odr in cached_accel_odrs.items():
-                if odr < MIN_ODR:
-                    sensor.writeOdrAccel(sid, odr)
-            for sid, odr in cached_mag_odrs.items():
-                if odr < MIN_ODR:
-                    sensor.writeOdrMag(sid, odr)
-            if cached_streaming_config:
-                sensor.write_settings(**cached_streaming_config)
-        except Exception as exc:
-            print(f"Warning: failed to restore sensor settings: {exc}", file=sys.stderr)
+    wizard = ThreespaceCalibrationWizard(sensor, accels=accels, mags=mags, verbose=args.verbose)
 
     try:
-        cached_axis_order  = sensor.readAxisOrder()
-        cached_axis_offset = sensor.readAxisOffsetEnabled()
-        for sid in selected_accels:
-            cached_accel_odrs[sid] = sensor.readOdrAccel(sid)
-        for sid in selected_mags:
-            cached_mag_odrs[sid] = sensor.readOdrMag(sid)
-        cached_streaming_config = sensor.read_settings("stream_slots", "stream_mode", "stream_hz", "stream_count")
-
-        # Raise ODR if below minimum
-        for sid, odr in cached_accel_odrs.items():
-            if odr < MIN_ODR:
-                sensor.writeOdrAccel(sid, MIN_ODR)
-        for sid, odr in cached_mag_odrs.items():
-            if odr < MIN_ODR:
-                sensor.writeOdrMag(sid, MIN_ODR)
-
-        # Calibration math requires XYZ axis order with no offset applied
-        sensor.writeAxisOrder("xyz")
-        sensor.writeAxisOffsetEnabled(0)
-
-        #Configure streaming to get the samples to avoid long delays from polling each sample individually (especially over BLE)
-        #Also using streaming mode count to avoid potential issues getting streaming to stop over BLE if using a device with a low
-        #interval causing the BLE stack to be saturated.
-        stream_slots = []
-        for sid in selected_accels:
-            stream_slots.append(f"{StreamableCommands.GetRawAccelVec.value}:{sid}")
-        for sid in selected_mags:
-            stream_slots.append(f"{StreamableCommands.GetRawMagVec.value}:{sid}")
-        stream_slots = ','.join(stream_slots)
-        #I could use the streaming manager, but just going to use streaming directly
-        #and know the slots were set in the order of accels/mags, so they can be read back in the same order.
-        sensor.write_settings(
-            stream_slots=stream_slots,
-            stream_hz=MIN_ODR,
-            stream_mode=1, #Count based
-            stream_count=READINGS_PER_SAMPLE
-        )
+        wizard.start()
     except Exception as e:
-        print(f"Error: failed to configure sensor: {e}", file=sys.stderr)
-        restore_sensor()
+        print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    # --- Print instructions ---
-    print()
-    print("=" * 62)
-    print("  GRADIENT DESCENT CALIBRATION  —  24 Orientations")
-    print("=" * 62)
-    print("For each step, place the sensor in the described orientation,")
-    print("hold it still, then press Enter to capture the sample.")
-    print()
+    print(f"  Accelerometers: {wizard.selected_accels or 'none'}")
+    print(f"  Magnetometers:  {wizard.selected_mags or 'none'}")
+
+    wizard.print_header()
     print("  Enter      →  capture sample and advance")
     print("  b + Enter  →  redo the previous step")
     print("  q + Enter  →  cancel and quit")
-    print()
-    print("Axis reference: check the labels printed on your sensor PCB.")
-    print("  'up'           = face pointing away from ground (against gravity)")
-    print("  'down'         = face pointing towards the ground (with gravity)")
-    print("  'forward'      = face pointing opposite your body (away from your eyes)")
-    print("  'backwards'    = face pointing in towards your body (towards your eyes)")
-    print("  'left'         = face pointing to your left side")
-    print("  'right'        = face pointing to your right side")
     print("=" * 62)
 
-    orientations = _build_orientations()
-    accel_samples: dict[int, list[np.ndarray]] = {a: [] for a in selected_accels}
-    mag_samples:   dict[int, list[np.ndarray]] = {m: [] for m in selected_mags}
-
-    step = 0
-    while step < 24:
-        face_up, face_toward = _ORIENTATION_LABELS[step]
-        print(f"\nStep {step + 1:2d} / 24:  {face_up},  {face_toward}")
+    while not wizard.is_done() and not wizard.is_cancelled() and not wizard.is_error():
+        wizard.print_instructions()
         raw = input("  > ").strip().lower()
 
         if raw == "q":
-            print("Calibration cancelled.")
-            restore_sensor()
-            return 1
+            wizard.cancel()
+            break
 
         if raw == "b":
-            if step == 0:
+            if not wizard.back():
                 print("  Already at step 1.")
-                continue
-            step -= 1
-            for samples in accel_samples.values():
-                if samples:
-                    samples.pop()
-            for samples in mag_samples.values():
-                if samples:
-                    samples.pop()
-            print(f"  Moved back to step {step + 1}.")
+            else:
+                print(f"  Moved back to step {wizard.step + 1}.")
+            continue
+
+        is_last_step = wizard.step == TOTAL_STEPS - 1
+        if not wizard.next():
             continue
 
         print(f"  Collecting {READINGS_PER_SAMPLE} readings...", end="", flush=True)
-        try:
-            accel_avg, mag_avg = _gather_sample(sensor, selected_accels, selected_mags)
-        except Exception as e:
-            print(f"\n  Error reading sensor: {e}", file=sys.stderr)
-            restore_sensor()
+        while wizard.is_busy():
+            time.sleep(0.1)
+
+        if wizard.is_error():
+            print(f"\nError: {wizard.error}", file=sys.stderr)
             return 1
 
-        for sid in selected_accels:
-            accel_samples[sid].append(accel_avg[sid])
-        for sid in selected_mags:
-            mag_samples[sid].append(mag_avg[sid])
+        if is_last_step and wizard.is_done():
+            print("  Calculating calibration parameters... done.")
 
-        print(" done.")
-        step += 1
+    if wizard.is_cancelled():
+        print("Calibration cancelled.")
+        return 1
 
-    # Restore sensor state before the (potentially long) calculation
-    restore_sensor()
+    if wizard.is_error():
+        print(f"\nError: {wizard.error}", file=sys.stderr)
+        return 1
 
-    # --- Gradient descent ---
-    print("\nCalculating calibration parameters...")
-    gradient = ThreespaceGradientDescentCalibration(orientations)
-    result: dict[str, dict] = {"accels": {}, "mags": {}}
-
-    for sid in selected_mags:
-        print(f"  mag{sid}...", end="", flush=True)
-        samples = mag_samples[sid]
-        bias_guess = sum(samples) / len(samples)
-        centered   = [s - bias_guess for s in samples]
-
-        params: list[float] = []
-        t = threading.Thread(
-            target=_run_gradient_thread,
-            args=(gradient, centered, centered[0], params),
-            kwargs={"verbose": args.verbose},
-            daemon=True,
-        )
-        t.start()
-        t.join()
-
-        p = np.array(params)
-        p[9:] += -bias_guess  #Gradient descent and this use opposite signs, so swap it
-        result["mags"][str(sid)] = {"matrix": p[:9].tolist(), "bias": p[9:].tolist()}
-        print(" done.")
-
-    for sid in selected_accels:
-        print(f"  accel{sid}...", end="", flush=True)
-        params: list[float] = []
-        t = threading.Thread(
-            target=_run_gradient_thread,
-            args=(gradient, accel_samples[sid], np.array([0.0, 1.0, 0.0]), params),
-            kwargs={"verbose": args.verbose},
-            daemon=True,
-        )
-        t.start()
-        t.join()
-
-        p = np.array(params)
-        result["accels"][str(sid)] = {"matrix": p[:9].tolist(), "bias": p[9:].tolist()}
-        print(" done.")
-
-    # --- Save ---
-    results = json.dumps(result, indent=2)
+    # --- Print / optionally save ---
+    results_json = json.dumps(wizard.result, indent=2)
     print("\nCalibration results:")
-    print(results)
+    print(results_json)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
-            f.write(results)
+            f.write(results_json)
         print(f"\nResults saved to {args.output}")
 
-    # --- Apply ---
+    # --- Optionally apply ---
     if not args.no_apply:
         print("\nApplying calibration to sensor...")
-        try:
-            current_order = sensor.readAxisOrder()
-            sensor.writeAxisOrder("xyz")
-
-            for sid_str, calib in result["mags"].items():
-                sid = int(sid_str)
-                sensor.writeCalibMatMag(sid, calib["matrix"])
-                sensor.writeCalibBiasMag(sid, calib["bias"])
-                print(f"  mag{sid} applied.")
-
-            for sid_str, calib in result["accels"].items():
-                sid = int(sid_str)
-                sensor.writeCalibMatAccel(sid, calib["matrix"])
-                sensor.writeCalibBiasAccel(sid, calib["bias"])
-                print(f"  accel{sid} applied.")
-
-            sensor.writeAxisOrder(current_order)
-        except Exception as e:
-            print(f"Error: failed to apply calibration: {e}", file=sys.stderr)
+        if not wizard.apply_result():
+            print(f"Error: failed to apply calibration: {wizard.error}", file=sys.stderr)
             return 1
+        print("Calibration applied.")
+        print("Call sensor.commitSettings() to persist across power cycles.")
 
-        print("Calibration applied. Use 'commit settings' to persist across power cycles.")
         response = ""
         while response.lower() not in ("y", "n"):
             response = input("Would you like to commit the settings now? (y/n) > ")
             if response.lower() not in ("y", "n"):
                 print("Please enter 'y' or 'n'.")
                 continue
-
             if response.lower() == "y":
                 try:
                     sensor.commitSettings()
@@ -442,16 +735,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--port", default=None,
-        help="Serial port of the sensor (e.g. COM3, /dev/ttyUSB0) or BLE Name (e.g. BLE-MyName). If not specified, will auto detect a USB device.",
+        help="Serial port (e.g. COM3, /dev/ttyUSB0) or BLE name (e.g. BLE-MyName). "
+             "If omitted, auto-detects a USB device.",
     )
     parser.add_argument(
-        "--accels", default=None,
-        metavar="IDS",
+        "--accels", default=None, metavar="IDS",
         help="Comma-separated accelerometer IDs to calibrate (default: all available)",
     )
     parser.add_argument(
-        "--mags", default=None,
-        metavar="IDS",
+        "--mags", default=None, metavar="IDS",
         help="Comma-separated magnetometer IDs to calibrate (default: all available)",
     )
     parser.add_argument(
@@ -459,8 +751,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Compute calibration but do not write it back to the sensor",
     )
     parser.add_argument(
-        "--output", "-o", default=None,
-        metavar="FILE",
+        "--output", "-o", default=None, metavar="FILE",
         help="Save calibration results to this JSON file",
     )
     parser.add_argument(
@@ -475,3 +766,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
