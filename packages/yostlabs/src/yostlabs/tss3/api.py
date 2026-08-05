@@ -457,7 +457,7 @@ class ThreespaceSensor:
 
     def __read_settings_single(self, keystr: str):
         if len(keystr) > THREESPACE_MAX_CMD_LEN-2: #-2 for room for null terminator and checksum if using binary format
-            raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystring)))
+            raise ValueError("Too many settings in one read_settings call. Max str length is " + str(THREESPACE_MAX_CMD_LEN-2) + " but got " + str(len(keystr)))
         checksum = sum(ord(v) for v in keystr) % 256
         
         #StartByte, Message+Null Terminator, Checksum
@@ -473,7 +473,7 @@ class ThreespaceSensor:
         min_response_len += (1 + THREESPACE_BINARY_SETTINGS_ID_SIZE) #Null terminator and header size
 
         if self.__await_read_settings_response(min_response_len) != THREESPACE_AWAIT_COMMAND_FOUND:
-            raise ResponseTimeoutError("Failed to get read_settings response")
+            raise ResponseTimeoutError(f"Failed to get read_settings response for keystring: {keystr}")
         
         #Read the setting header id
         self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the Header ID
