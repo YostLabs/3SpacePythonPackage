@@ -233,6 +233,8 @@ class ThreespaceCalibrationWizard:
         sensor: ThreespaceSensor,
         accels: list[int] | None = None,
         mags: list[int] | None = None,
+        orientations: list[np.ndarray] = None,
+        orientation_labels: list[tuple[str, str]] = None,
         verbose: bool = False,
     ) -> None:
         """
@@ -246,6 +248,14 @@ class ThreespaceCalibrationWizard:
         mags:
             Magnetometer component IDs to calibrate.  ``None`` calibrates
             all valid magnetometers reported by the sensor.
+        orientations:
+            Optional list of 24 quaternions (as numpy arrays) to use for
+            calibration.  If omitted, the default 24 orientations are used.
+        orientation_labels:
+            Optional list of 24 (Z axis, Y axis) tuples describing the
+            orientations in human-readable terms.  If omitted, the default
+            labels are used, unless ``orientations`` is provided, in which case
+            the description strings are left blank.
         verbose:
             Pass ``True`` to print gradient-descent progress during
             calculation.
@@ -258,7 +268,11 @@ class ThreespaceCalibrationWizard:
         # Populated in start()
         self._selected_accels: list[int]      = []
         self._selected_mags:   list[int]      = []
-        self._orientations:    list[np.ndarray] = []
+        self._orientation_labels = _ORIENTATION_LABELS
+        self._orientations:    list[np.ndarray] = orientations
+        if orientations:
+            self._orientation_labels: list[tuple[str, str]] = orientation_labels
+        
 
         # Cached sensor settings restored after collection / on cancel
         self._cached_axis_order:       str | None       = None
@@ -407,7 +421,9 @@ class ThreespaceCalibrationWizard:
 
         self._accel_samples = {a: [] for a in self._selected_accels}
         self._mag_samples   = {m: [] for m in self._selected_mags}
-        self._orientations  = _build_orientations()
+        if not self._orientations:
+            self._orientations  = _build_orientations()
+            self._orientation_labels = _ORIENTATION_LABELS
         self._step  = 0
         self._state = _WizardState.WAITING
 
@@ -438,8 +454,11 @@ class ThreespaceCalibrationWizard:
         if self._state == _WizardState.IDLE:
             print("Wizard not started. Call start() first.")
         elif self._state == _WizardState.WAITING:
-            face_up, face_toward = _ORIENTATION_LABELS[self._step]
-            print(f"\nStep {self._step + 1:2d} / {TOTAL_STEPS}:  {face_up},  {face_toward}")
+            if self._orientation_labels:
+                face_up, face_toward = self._orientation_labels[self._step]
+                print(f"\nStep {self._step + 1:2d} / {TOTAL_STEPS}:  {face_up},  {face_toward}")
+            else:
+                print(f"\nStep {self._step + 1:2d} / {TOTAL_STEPS}:  (orientation description not available)")
         elif self._state == _WizardState.COLLECTING:
             print(f"  Collecting {READINGS_PER_SAMPLE} readings for step {self._step + 1}...")
         elif self._state == _WizardState.CALCULATING:
