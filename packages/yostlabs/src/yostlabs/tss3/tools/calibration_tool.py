@@ -1,8 +1,8 @@
 """
 Gradient Descent Calibration Tool for 3Space sensors.
 
-Provides a programmatic wizard class (ThreespaceCalibrationWizard) and a CLI
-entry point that wraps it.
+Provides a generic base class (CalibrationWizard), a 3Space-specific
+implementing class (ThreespaceCalibrationWizard), and a CLI entry point.
 
 Usage (CLI)::
 
@@ -132,7 +132,7 @@ _AXIS_REFERENCE_TEXT = (
     "  'up'        = face pointing away from ground (against gravity)\n"
     "  'down'      = face pointing towards the ground (with gravity)\n"
     "  'forward'   = face pointing opposite your body (away from your eyes)\n"
-    "  'backwards' = face pointing in towards your body (towards your eyes)\n"
+    "  'backward'  = face pointing in towards your body (towards your eyes)\n"
     "  'left'      = face pointing to your left side\n"
     "  'right'     = face pointing to your right side"
 )
@@ -153,63 +153,40 @@ class _WizardState(Enum):
 
 
 # ---------------------------------------------------------------------------
-# Sensor I/O helper
+# CalibrationWizard – sensor-agnostic base class
 # ---------------------------------------------------------------------------
 
-def _gather_sample(
-    sensor: ThreespaceSensor,
-    accels: list[int],
-    mags: list[int],
-) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
-    """Poll READINGS_PER_SAMPLE readings and return per-sensor averages."""
-    accel_totals = {i: np.zeros(3, dtype=np.float64) for i in accels}
-    mag_totals   = {i: np.zeros(3, dtype=np.float64) for i in mags}
+class CalibrationWizard:
+    """Sensor-agnostic gradient descent calibration wizard base class.
 
-    last_packet_time = time.perf_counter()
-    samples_gathered = 0
-    sensor.clearStreamingPackets()
-    sensor.startStreaming()
+    Subclasses must implement:
+      - :meth:`start` - configure the sensor (save settings, etc.), then call
+        ``super().start()`` to finish common initialisation.
+      - :meth:`gather_sample` - collect one averaged sample from the hardware
+        and append it to ``self.samples``.
+      - :meth:`restore_sensor` - restore hardware to its pre-calibration state.
+      - :meth:`apply_result` - write ``self.result`` back to the hardware.
 
-    # Check for a timeout in case the sensor is not responding or streaming is not working
-    while samples_gathered < READINGS_PER_SAMPLE and time.perf_counter() - last_packet_time < 1.0:
-        sensor.updateStreaming()
-        packet = sensor.getOldestStreamingPacket()
-        while packet is not None:
-            i = 0
-            for sid in accels:
-                accel_totals[sid] += np.array(packet.data[i], dtype=np.float64)
-                i += 1
-            for sid in mags:
-                mag_totals[sid] += np.array(packet.data[i], dtype=np.float64)
-                i += 1
+    The ``result`` dict produced by :meth:`_run_gradient_descent` uses the
+    structure::
 
-            last_packet_time = time.perf_counter() 
-            samples_gathered += 1
-            if samples_gathered >= READINGS_PER_SAMPLE:
-                break
+        {
+            "accel": { "<key>": {"matrix": [...], "bias": [...]} },
+            "mag":   { "<key>": {"matrix": [...], "bias": [...]} },
+        }
 
-            packet = sensor.getOldestStreamingPacket()
-    sensor.stopStreaming()
+    Subclasses populate ``self.samples`` as a dict keyed by sensor-component
+    key with lists of ``np.ndarray`` vectors, grouped under ``"accel"`` and
+    ``"mag"`` top-level keys::
 
-    accel_avg = {i: accel_totals[i] / READINGS_PER_SAMPLE for i in accels}
-    mag_avg   = {i: mag_totals[i]   / READINGS_PER_SAMPLE for i in mags}
-    return accel_avg, mag_avg
-
-
-# ---------------------------------------------------------------------------
-# ThreespaceCalibrationWizard
-# ---------------------------------------------------------------------------
-
-class ThreespaceCalibrationWizard:
-    """Programmatic gradient descent calibration wizard for 3Space sensors.
-
-    The wizard walks through 24 orientations, collects raw accel/mag data,
-    runs gradient descent, and produces a calibration result that can then
-    be applied to the sensor.
+        self.samples = {
+            "accel": { 0: [], 1: [] },
+            "mag":   { 0: [] },
+        }
 
     Typical usage::
 
-        wizard = ThreespaceCalibrationWizard(sensor)
+        wizard = MyCalibrationWizard(...)
         wizard.start()
         wizard.print_header()
         while not wizard.is_done() and not wizard.is_cancelled() and not wizard.is_error():
@@ -225,76 +202,47 @@ class ThreespaceCalibrationWizard:
                     pass
         if wizard.result:
             wizard.apply_result()
-            sensor.commitSettings()
     """
 
     def __init__(
         self,
-        sensor: ThreespaceSensor,
-        accels: list[int] | None = None,
-        mags: list[int] | None = None,
-        orientations: list[np.ndarray] = None,
-        orientation_labels: list[tuple[str, str]] = None,
+        orientations: list[np.ndarray] | None = None,
+        orientation_labels: list[tuple[str, str]] | None = None,
         verbose: bool = False,
     ) -> None:
         """
         Parameters
         ----------
-        sensor:
-            Connected ThreespaceSensor instance.
-        accels:
-            Accelerometer component IDs to calibrate.  ``None`` calibrates
-            all valid accelerometers reported by the sensor.
-        mags:
-            Magnetometer component IDs to calibrate.  ``None`` calibrates
-            all valid magnetometers reported by the sensor.
         orientations:
             Optional list of 24 quaternions (as numpy arrays) to use for
             calibration.  If omitted, the default 24 orientations are used.
         orientation_labels:
             Optional list of 24 (Z axis, Y axis) tuples describing the
             orientations in human-readable terms.  If omitted, the default
-            labels are used, unless ``orientations`` is provided, in which case
-            the description strings are left blank.
+            labels are used unless ``orientations`` is also provided, in which
+            case descriptions are left blank.
         verbose:
             Pass ``True`` to print gradient-descent progress during
             calculation.
         """
-        self._sensor           = sensor
-        self._requested_accels = accels
-        self._requested_mags   = mags
-        self._verbose          = verbose
+        self._verbose = verbose
 
-        # Populated in start()
-        self._selected_accels: list[int]      = []
-        self._selected_mags:   list[int]      = []
-        self._orientation_labels = _ORIENTATION_LABELS
-        self._orientations:    list[np.ndarray] = orientations
-        if orientations:
-            self._orientation_labels: list[tuple[str, str]] = orientation_labels
-        
+        self._orientations:      list[np.ndarray]          = orientations
+        self._orientation_labels: list[tuple[str, str]] | None = (
+            orientation_labels if orientations is not None else _ORIENTATION_LABELS
+        )
 
-        # Cached sensor settings restored after collection / on cancel
-        self._cached_axis_order:       str | None       = None
-        self._cached_axis_offset:      int | None       = None
-        self._cached_accel_odrs:       dict[int, int]   = {}
-        self._cached_mag_odrs:         dict[int, int]   = {}
-        self._cached_streaming_config: dict[str, Any]   = {}
-        self._sensor_configured:       bool             = False
-
-        # Collected samples keyed by component ID
-        self._accel_samples: dict[int, list[np.ndarray]] = {}
-        self._mag_samples:   dict[int, list[np.ndarray]] = {}
+        # Collected samples: {"accel": {key: [np.ndarray, ...]}, "mag": {...}}
+        # Populated in start(); individual entries appended by gather_sample().
+        self.samples: dict[str, dict] = {"accel": {}, "mag": {}}
 
         # Internal state
-        self._state:  _WizardState       = _WizardState.IDLE
-        self._step:   int                = 0
+        self._state:  _WizardState            = _WizardState.IDLE
+        self._step:   int                     = 0
         self._thread: threading.Thread | None = None
-        self._error:  str | None         = None
+        self._error:  str | None              = None
 
         # Public result dict; None until the wizard reaches DONE state.
-        # Keys: "accels" and "mags", each mapping component-ID strings to
-        # {"matrix": [...], "bias": [...]} dicts.
         self.result: dict | None = None
 
     # ------------------------------------------------------------------
@@ -303,23 +251,13 @@ class ThreespaceCalibrationWizard:
 
     @property
     def step(self) -> int:
-        """Current 0-based step index (0 – TOTAL_STEPS-1)."""
+        """Current 0-based step index (0 - TOTAL_STEPS-1)."""
         return self._step
 
     @property
     def total_steps(self) -> int:
         """Total number of orientation steps (always 24)."""
         return TOTAL_STEPS
-
-    @property
-    def selected_accels(self) -> list[int]:
-        """Accelerometer IDs selected for calibration (populated after start())."""
-        return list(self._selected_accels)
-
-    @property
-    def selected_mags(self) -> list[int]:
-        """Magnetometer IDs selected for calibration (populated after start())."""
-        return list(self._selected_mags)
 
     @property
     def error(self) -> str | None:
@@ -351,79 +289,24 @@ class ThreespaceCalibrationWizard:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Configure the sensor and begin the wizard at step 0.
+        """Initialise shared wizard state and transition to WAITING.
+
+        Subclasses should perform sensor-specific setup *before* calling
+        ``super().start()``, and must populate ``self.samples`` with the
+        appropriate keys so that :meth:`gather_sample` can append to them.
 
         Raises
         ------
         RuntimeError
-            If the wizard was already started, or no valid sensors are
-            available for the requested component IDs.
-        Exception
-            Re-raises sensor communication errors encountered during
-            initial configuration.
+            If the wizard was already started.
         """
         if self._state != _WizardState.IDLE:
             raise RuntimeError("Wizard already started. Create a new instance to restart.")
 
-        sensor    = self._sensor
-        all_accels: list[int] = sensor.valid_accels
-        all_mags:   list[int] = sensor.valid_mags
-
-        if self._requested_accels is not None:
-            self._selected_accels = [a for a in self._requested_accels if a in all_accels]
-        else:
-            self._selected_accels = list(all_accels)
-
-        if self._requested_mags is not None:
-            self._selected_mags = [m for m in self._requested_mags if m in all_mags]
-        else:
-            self._selected_mags = list(all_mags)
-
-        if not self._selected_accels and not self._selected_mags:
-            raise RuntimeError("No valid accelerometers or magnetometers to calibrate.")
-
-        # Cache current sensor state so it can be restored later
-        self._cached_axis_order  = sensor.readAxisOrder()
-        self._cached_axis_offset = sensor.readAxisOffsetEnabled()
-        for sid in self._selected_accels:
-            self._cached_accel_odrs[sid] = sensor.readOdrAccel(sid)
-        for sid in self._selected_mags:
-            self._cached_mag_odrs[sid] = sensor.readOdrMag(sid)
-        self._cached_streaming_config = sensor.read_settings(
-            "stream_slots", "stream_mode", "stream_hz", "stream_count"
-        )
-        self._sensor_configured = True
-
-        # Raise ODR on any slow components
-        for sid, odr in self._cached_accel_odrs.items():
-            if odr < MIN_ODR:
-                sensor.writeOdrAccel(sid, MIN_ODR)
-        for sid, odr in self._cached_mag_odrs.items():
-            if odr < MIN_ODR:
-                sensor.writeOdrMag(sid, MIN_ODR)
-
-        # Calibration math requires XYZ axis order with no offset applied
-        sensor.writeAxisOrder("xyz")
-        sensor.writeAxisOffsetEnabled(0)
-
-        # Configure streaming – use count-based mode to avoid BLE saturation issues
-        stream_slots = []
-        for sid in self._selected_accels:
-            stream_slots.append(f"{StreamableCommands.GetRawAccelVec.value}:{sid}")
-        for sid in self._selected_mags:
-            stream_slots.append(f"{StreamableCommands.GetRawMagVec.value}:{sid}")
-        sensor.write_settings(
-            stream_slots=','.join(stream_slots),
-            stream_hz=MIN_ODR,
-            stream_mode=1,           # count-based
-            stream_count=READINGS_PER_SAMPLE,
-        )
-
-        self._accel_samples = {a: [] for a in self._selected_accels}
-        self._mag_samples   = {m: [] for m in self._selected_mags}
         if not self._orientations:
-            self._orientations  = _build_orientations()
+            self._orientations       = _build_orientations()
             self._orientation_labels = _ORIENTATION_LABELS
+
         self._step  = 0
         self._state = _WizardState.WAITING
 
@@ -460,7 +343,7 @@ class ThreespaceCalibrationWizard:
             else:
                 print(f"\nStep {self._step + 1:2d} / {TOTAL_STEPS}:  (orientation description not available)")
         elif self._state == _WizardState.COLLECTING:
-            print(f"  Collecting {READINGS_PER_SAMPLE} readings for step {self._step + 1}...")
+            print(f"  Collecting readings for step {self._step + 1}...")
         elif self._state == _WizardState.CALCULATING:
             print("  Calculating calibration parameters...")
         elif self._state == _WizardState.DONE:
@@ -473,10 +356,9 @@ class ThreespaceCalibrationWizard:
     def next(self) -> bool:
         """Capture a sample for the current step and advance.
 
-        Launches a background worker that collects sensor data.  On the
-        final step (24) the same worker also runs gradient descent so no
-        additional call is needed.  Poll :meth:`is_busy` to wait for
-        completion.
+        Launches a background worker that calls :meth:`gather_sample`.  On the
+        final step the same worker also calls :meth:`restore_sensor` and runs
+        gradient descent.  Poll :meth:`is_busy` to wait for completion.
 
         Returns ``True`` if the worker was launched, ``False`` when the
         wizard is not in a WAITING state or is already busy.
@@ -499,49 +381,52 @@ class ThreespaceCalibrationWizard:
             return False
 
         self._step -= 1
-        for samples in self._accel_samples.values():
-            if samples:
-                samples.pop()
-        for samples in self._mag_samples.values():
-            if samples:
-                samples.pop()
+        for group in self.samples.values():
+            for samples in group.values():
+                if samples:
+                    samples.pop()
         return True
 
     def cancel(self) -> None:
         """Cancel the wizard and restore the sensor to its previous settings."""
         self._state = _WizardState.CANCELLED
-        self._restore_sensor()
+        self.restore_sensor()
+
+    # ------------------------------------------------------------------
+    # Abstract-style overridable methods
+    # ------------------------------------------------------------------
+
+    def gather_sample(self) -> tuple[dict, dict]:
+        """Collect one averaged sample from the hardware.
+
+        Returns
+        -------
+        tuple[dict, dict]
+            ``(accel_avg, mag_avg)`` dicts mapping component keys to
+            ``np.ndarray`` vectors.
+
+        Raises
+        ------
+        NotImplementedError
+            Must be overridden by subclasses.
+        """
+        raise NotImplementedError("Subclasses must implement gather_sample().")
+
+    def restore_sensor(self) -> None:
+        """Restore the hardware to its pre-calibration state.
+
+        Called after the last sample is collected and on :meth:`cancel`.
+        Override in subclasses; the default implementation is a no-op.
+        """
 
     def apply_result(self) -> bool:
-        """Write the calibration result to the sensor (does not commit).
-
-        Call ``sensor.commitSettings()`` afterwards to persist across
-        power cycles.
+        """Write ``self.result`` to the hardware.
 
         Returns ``True`` on success, ``False`` if no result is available or
-        a sensor error occurs (check :attr:`error` for details).
+        an error occurs.  Override in subclasses; the default raises
+        ``NotImplementedError``.
         """
-        if self.result is None:
-            return False
-        try:
-            current_order = self._sensor.readAxisOrder()
-            self._sensor.writeAxisOrder("xyz")
-
-            for sid_str, calib in self.result["mags"].items():
-                sid = int(sid_str)
-                self._sensor.writeCalibMatMag(sid, calib["matrix"])
-                self._sensor.writeCalibBiasMag(sid, calib["bias"])
-
-            for sid_str, calib in self.result["accels"].items():
-                sid = int(sid_str)
-                self._sensor.writeCalibMatAccel(sid, calib["matrix"])
-                self._sensor.writeCalibBiasAccel(sid, calib["bias"])
-
-            self._sensor.writeAxisOrder(current_order)
-            return True
-        except Exception as exc:
-            self._error = str(exc)
-            return False
+        raise NotImplementedError("Subclasses must implement apply_result().")
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -551,19 +436,18 @@ class ThreespaceCalibrationWizard:
         """Background worker: collect one sample; on the last step also
         restores the sensor and runs gradient descent."""
         try:
-            accel_avg, mag_avg = _gather_sample(
-                self._sensor, self._selected_accels, self._selected_mags
-            )
-            for sid in self._selected_accels:
-                self._accel_samples[sid].append(accel_avg[sid])
-            for sid in self._selected_mags:
-                self._mag_samples[sid].append(mag_avg[sid])
+            accel_avg, mag_avg = self.gather_sample()
+
+            for key in accel_avg:
+                self.samples["accel"][key].append(accel_avg[key])
+            for key in mag_avg:
+                self.samples["mag"][key].append(mag_avg[key])
 
             self._step += 1
 
             if self._step >= TOTAL_STEPS:
                 self._state = _WizardState.CALCULATING
-                self._restore_sensor()
+                self.restore_sensor()
                 self._run_gradient_descent()
             else:
                 self._state = _WizardState.WAITING
@@ -577,28 +461,27 @@ class ThreespaceCalibrationWizard:
         Called from inside the worker thread after the last sample."""
         try:
             gradient    = ThreespaceGradientDescentCalibration(self._orientations)
-            calc_result: dict[str, dict] = {"accels": {}, "mags": {}}
+            calc_result: dict[str, dict] = {"accel": {}, "mag": {}}
 
-            for sid in self._selected_mags:
-                samples    = self._mag_samples[sid]
+            for key, samples in self.samples["mag"].items():
                 bias_guess = sum(samples) / len(samples)
                 centered   = [s - bias_guess for s in samples]
                 params     = gradient.calculate(centered, centered[0], verbose=self._verbose).tolist()
                 p          = np.array(params)
                 p[9:] += -bias_guess  # Gradient descent uses opposite sign convention
-                calc_result["mags"][str(sid)] = {
+                calc_result["mag"][str(key)] = {
                     "matrix": p[:9].tolist(),
                     "bias":   p[9:].tolist(),
                 }
 
-            for sid in self._selected_accels:
+            for key, samples in self.samples["accel"].items():
                 params = gradient.calculate(
-                    self._accel_samples[sid],
+                    samples,
                     np.array([0.0, 1.0, 0.0]),
                     verbose=self._verbose,
                 ).tolist()
                 p = np.array(params)
-                calc_result["accels"][str(sid)] = {
+                calc_result["accel"][str(key)] = {
                     "matrix": p[:9].tolist(),
                     "bias":   p[9:].tolist(),
                 }
@@ -610,26 +493,271 @@ class ThreespaceCalibrationWizard:
             self._error = str(exc)
             self._state = _WizardState.ERROR
 
-    def _restore_sensor(self) -> None:
-        """Restore cached sensor settings.  Safe to call more than once."""
+
+# ---------------------------------------------------------------------------
+# ThreespaceCalibrationWizard – 3Space sensor implementation
+# ---------------------------------------------------------------------------
+
+class ThreespaceCalibrationWizard(CalibrationWizard):
+    """Gradient descent calibration wizard for 3Space sensors.
+
+    Extends :class:`CalibrationWizard` with 3Space-specific sensor I/O:
+    reading/restoring ODR and streaming settings, gathering raw accel/mag
+    samples via the streaming API, and writing calibration matrices back to
+    the sensor.
+
+    Typical usage::
+
+        wizard = ThreespaceCalibrationWizard(sensor)
+        wizard.start()
+        wizard.print_header()
+        while not wizard.is_done() and not wizard.is_cancelled() and not wizard.is_error():
+            wizard.print_instructions()
+            user_input = input("> ").strip().lower()
+            if user_input == "q":
+                wizard.cancel()
+            elif user_input == "b":
+                wizard.back()
+            else:
+                wizard.next()
+                while wizard.is_busy():
+                    pass
+        if wizard.result:
+            wizard.apply_result()
+            sensor.commitSettings()
+    """
+
+    def __init__(
+        self,
+        sensor: ThreespaceSensor,
+        accels: list[int] | None = None,
+        mags: list[int] | None = None,
+        readings_per_sample: int = READINGS_PER_SAMPLE,
+        orientations: list[np.ndarray] | None = None,
+        orientation_labels: list[tuple[str, str]] | None = None,
+        verbose: bool = False,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        sensor:
+            Connected ThreespaceSensor instance.
+        accels:
+            Accelerometer component IDs to calibrate.  ``None`` calibrates
+            all valid accelerometers reported by the sensor.
+        mags:
+            Magnetometer component IDs to calibrate.  ``None`` calibrates
+            all valid magnetometers reported by the sensor.
+        readings_per_sample:
+            Number of readings to average for each orientation step.
+        orientations:
+            Optional list of 24 quaternions (as numpy arrays) to use for
+            calibration.  If omitted, the default 24 orientations are used.
+        orientation_labels:
+            Optional list of 24 (Z axis, Y axis) tuples describing the
+            orientations in human-readable terms.  If omitted, the default
+            labels are used, unless ``orientations`` is provided, in which
+            case the description strings are left blank.
+        verbose:
+            Pass ``True`` to print gradient-descent progress during
+            calculation.
+        """
+        super().__init__(
+            orientations=orientations,
+            orientation_labels=orientation_labels,
+            verbose=verbose,
+        )
+
+        self.sensor           = sensor
+        self._requested_accels = accels
+        self._requested_mags   = mags
+        self.readings_per_sample = readings_per_sample
+
+        # Populated in start() for convenience
+        self.selected_accels: list[int] = []
+        self.selected_mags:   list[int] = []
+
+        # Cached sensor settings restored after collection / on cancel
+        self._cached_axis_order:       str | None     = None
+        self._cached_axis_offset:      int | None     = None
+        self._cached_accel_odrs:       dict[int, int] = {}
+        self._cached_mag_odrs:         dict[int, int] = {}
+        self._cached_streaming_config: dict[str, Any] = {}
+        self._sensor_configured:       bool           = False
+
+    # ------------------------------------------------------------------
+    # Overrides
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Configure the 3Space sensor then delegate to the base wizard.
+
+        Saves current sensor settings, raises ODR on slow components,
+        forces XYZ axis order, and configures streaming before handing
+        control to :meth:`CalibrationWizard.start`.
+
+        Raises
+        ------
+        RuntimeError
+            If the wizard was already started, or no valid sensors are
+            available for the requested component IDs.
+        Exception
+            Re-raises sensor communication errors encountered during
+            initial configuration.
+        """
+        if self._state != _WizardState.IDLE:
+            raise RuntimeError("Wizard already started. Create a new instance to restart.")
+
+        all_accels: list[int] = self.sensor.valid_accels
+        all_mags:   list[int] = self.sensor.valid_mags
+
+        if self._requested_accels is not None:
+            self.selected_accels = [a for a in self._requested_accels if a in all_accels]
+        else:
+            self.selected_accels = list(all_accels)
+
+        if self._requested_mags is not None:
+            self.selected_mags = [m for m in self._requested_mags if m in all_mags]
+        else:
+            self.selected_mags = list(all_mags)
+
+        if not self.selected_accels and not self.selected_mags:
+            raise RuntimeError("No valid accelerometers or magnetometers to calibrate.")
+
+        # Cache current sensor state so it can be restored later
+        self._cached_axis_order  = self.sensor.readAxisOrder()
+        self._cached_axis_offset = self.sensor.readAxisOffsetEnabled()
+        for sid in self.selected_accels:
+            self._cached_accel_odrs[sid] = self.sensor.readOdrAccel(sid)
+        for sid in self.selected_mags:
+            self._cached_mag_odrs[sid] = self.sensor.readOdrMag(sid)
+        self._cached_streaming_config = self.sensor.read_settings(
+            "stream_slots", "stream_mode", "stream_hz", "stream_count"
+        )
+        self._sensor_configured = True
+
+        # Raise ODR on any slow components
+        for sid, odr in self._cached_accel_odrs.items():
+            if odr < MIN_ODR:
+                self.sensor.writeOdrAccel(sid, MIN_ODR)
+        for sid, odr in self._cached_mag_odrs.items():
+            if odr < MIN_ODR:
+                self.sensor.writeOdrMag(sid, MIN_ODR)
+
+        # Calibration math requires XYZ axis order with no offset applied
+        self.sensor.writeAxisOrder("xyz")
+        self.sensor.writeAxisOffsetEnabled(0)
+
+        # Configure streaming – use count-based mode to avoid BLE saturation issues
+        stream_slots = []
+        for sid in self.selected_accels:
+            stream_slots.append(f"{StreamableCommands.GetRawAccelVec.value}:{sid}")
+        for sid in self.selected_mags:
+            stream_slots.append(f"{StreamableCommands.GetRawMagVec.value}:{sid}")
+        self.sensor.write_settings(
+            stream_slots=','.join(stream_slots),
+            stream_hz=MIN_ODR,
+            stream_mode=1,           # count-based
+            stream_count=self.readings_per_sample,
+        )
+
+        # Initialise sample storage keyed by component ID
+        self.samples = {
+            "accel": {a: [] for a in self.selected_accels},
+            "mag":   {m: [] for m in self.selected_mags},
+        }
+
+        super().start()
+
+    def gather_sample(self) -> tuple[dict, dict]:
+        """Poll self.readings_per_sample readings and return per-sensor averages."""
+        accels = self.selected_accels
+        mags  = self.selected_mags
+
+        accel_totals = {i: np.zeros(3, dtype=np.float64) for i in accels}
+        mag_totals   = {i: np.zeros(3, dtype=np.float64) for i in mags}
+
+        last_packet_time = time.perf_counter()
+        samples_gathered = 0
+        self.sensor.clearStreamingPackets()
+        self.sensor.startStreaming()
+
+        # Check for a timeout in case the sensor is not responding or streaming is not working
+        while samples_gathered < self.readings_per_sample and time.perf_counter() - last_packet_time < 1.0:
+            self.sensor.updateStreaming()
+            packet = self.sensor.getOldestStreamingPacket()
+            while packet is not None:
+                i = 0
+                for sid in accels:
+                    accel_totals[sid] += np.array(packet.data[i], dtype=np.float64)
+                    i += 1
+                for sid in mags:
+                    mag_totals[sid] += np.array(packet.data[i], dtype=np.float64)
+                    i += 1
+
+                last_packet_time = time.perf_counter() 
+                samples_gathered += 1
+                if samples_gathered >= self.readings_per_sample:
+                    break
+
+                packet = self.sensor.getOldestStreamingPacket()
+        self.sensor.stopStreaming()
+
+        accel_avg = {i: accel_totals[i] / self.readings_per_sample for i in accels}
+        mag_avg   = {i: mag_totals[i]   / self.readings_per_sample for i in mags}
+        return accel_avg, mag_avg
+
+    def restore_sensor(self) -> None:
+        """Restore cached 3Space sensor settings.  Safe to call more than once."""
         if not self._sensor_configured:
             return
         self._sensor_configured = False
         try:
             if self._cached_axis_order is not None:
-                self._sensor.writeAxisOrder(self._cached_axis_order)
+                self.sensor.writeAxisOrder(self._cached_axis_order)
             if self._cached_axis_offset is not None:
-                self._sensor.writeAxisOffsetEnabled(self._cached_axis_offset)
+                self.sensor.writeAxisOffsetEnabled(self._cached_axis_offset)
             for sid, odr in self._cached_accel_odrs.items():
                 if odr < MIN_ODR:
-                    self._sensor.writeOdrAccel(sid, odr)
+                    self.sensor.writeOdrAccel(sid, odr)
             for sid, odr in self._cached_mag_odrs.items():
                 if odr < MIN_ODR:
-                    self._sensor.writeOdrMag(sid, odr)
+                    self.sensor.writeOdrMag(sid, odr)
             if self._cached_streaming_config:
-                self._sensor.write_settings(**self._cached_streaming_config)
+                self.sensor.write_settings(**self._cached_streaming_config)
         except Exception as exc:
             print(f"Warning: failed to restore sensor settings: {exc}", file=sys.stderr)
+
+    def apply_result(self) -> bool:
+        """Write the calibration result to the 3Space sensor (does not commit).
+
+        Call ``sensor.commitSettings()`` afterwards to persist across
+        power cycles.
+
+        Returns ``True`` on success, ``False`` if no result is available or
+        a sensor error occurs (check :attr:`error` for details).
+        """
+        if self.result is None:
+            return False
+        try:
+            current_order = self.sensor.readAxisOrder()
+            self.sensor.writeAxisOrder("xyz")
+
+            for sid_str, calib in self.result["mag"].items():
+                sid = int(sid_str)
+                self.sensor.writeCalibMatMag(sid, calib["matrix"])
+                self.sensor.writeCalibBiasMag(sid, calib["bias"])
+
+            for sid_str, calib in self.result["accel"].items():
+                sid = int(sid_str)
+                self.sensor.writeCalibMatAccel(sid, calib["matrix"])
+                self.sensor.writeCalibBiasAccel(sid, calib["bias"])
+
+            self.sensor.writeAxisOrder(current_order)
+            return True
+        except Exception as exc:
+            self._error = str(exc)
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +816,7 @@ def _run_wizard(args: argparse.Namespace) -> int:
         if not wizard.next():
             continue
 
-        print(f"  Collecting {READINGS_PER_SAMPLE} readings...", end="", flush=True)
+        print(f"  Collecting {wizard.readings_per_sample} readings...", end="", flush=True)
         while wizard.is_busy():
             time.sleep(0.1)
 
