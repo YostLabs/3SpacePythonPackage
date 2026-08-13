@@ -703,8 +703,8 @@ class ThreespaceCalibrationWizard(CalibrationWizard):
                 packet = self.sensor.getOldestStreamingPacket()
         self.sensor.stopStreaming()
 
-        accel_avg = {i: accel_totals[i] / self.readings_per_sample for i in accels}
-        mag_avg   = {i: mag_totals[i]   / self.readings_per_sample for i in mags}
+        accel_avg = {i: accel_totals[i] / samples_gathered for i in accels}
+        mag_avg   = {i: mag_totals[i]   / samples_gathered for i in mags}
         return accel_avg, mag_avg
 
     def restore_sensor(self) -> None:
