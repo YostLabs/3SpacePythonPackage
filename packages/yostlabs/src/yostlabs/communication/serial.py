@@ -14,13 +14,15 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     PID_DL = 0x3050
     PID_LX = 0x3090
     PID_USB = 0x3010
+    PID_WT = 0x3180
 
     PID_TO_STR_DICT = {
         PID_EMBED: "EM",
         PID_DL: "DL",
         PID_BOOTLOADER: "BOOT",
         PID_LX: "LX",
-        PID_USB: "USB"
+        PID_USB: "USB",
+        PID_WT: "WT"
     }
 
 
