@@ -2,8 +2,11 @@ import enum
 import time
 import datetime
 
-from yostlabs.tss3.utils.tests.base import SensorTestBase
+from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
 from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 class RTCTestState(enum.Enum):
@@ -47,29 +50,11 @@ class RTCTest(SensorTestBase):
 
         self._settings_cache: dict = {}
 
-        self.result = {
-            "valid_components": {
-                "success": None,
-                "components": None,
-            },
-            "rtc_source": {
-                "checked": False,
-                "success": None,
-                "error": None,
-            },
-            "time_change": {
-                "success": None,
-                "start_time": None,
-                "end_time": None,
-                "expected_change": None
-            },
-            "reset": {
-                "success": None,
-                "method": None,
-                "pre_reset_datetime": None,
-                "post_reset_datetime": None,
-                "expected_elapsed": None,
-            },
+        self.result: dict[str, TestResult] = {
+            "valid_components": TestResult("rtc", "valid_components"),
+            "rtc_source": TestResult("rtc", "rtc_source"),
+            "time_change": TestResult("rtc", "time_change"),
+            "reset": TestResult("rtc", "reset"),
         }
 
         self._time_before_wait: list[int] | None = None
@@ -115,28 +100,30 @@ class RTCTest(SensorTestBase):
 
     def __update_checking_components(self):
         components = self.sensor.readValidComponents()
-        self.result["valid_components"]["components"] = components
+        result = self.result["valid_components"]
+        result.measurements["components"] = components
         component_list = [c.strip() for c in components.split(',')]
         has_rtc = any(c.startswith("RTC") for c in component_list)
-        self.result["valid_components"]["success"] = has_rtc
         if not has_rtc:
-            self.__fail()
+            self.__fail(result, "Sensor does not report an RTC component.")
         else:
+            result.set_status(TestStatus.PASS)
             self.__go_next_state()
 
     def __update_setting_rtc_source(self):
+        result = self.result["rtc_source"]
         if not self.sensor.has_setting("rtc_source"):
+            result.set_status(TestStatus.NA)
             self.__go_next_state()
             return
 
-        self.result["rtc_source"]["checked"] = True
         self._settings_cache["rtc_source"] = self.sensor.readRtcSource()
         err = self.sensor.writeRtcSource(3)
-        self.result["rtc_source"]["success"] = (err == 0)
         if err != 0:
-            self.__fail()
+            self.__fail(result, f"Failed to write rtc_source: error {err}.")
             return
 
+        result.set_status(TestStatus.PASS)
         self.__go_next_state()
 
     def __update_setting_time(self):
@@ -148,7 +135,7 @@ class RTCTest(SensorTestBase):
         self.sensor.setDateTime(now.year, now.month, now.day,
                                 now.hour, now.minute, now.second)
         self._time_before_wait = self.sensor.getDateTime().data
-        self.result["time_change"]["start_time"] = self._time_before_wait
+        self.result["time_change"].measurements["start_time"] = self._time_before_wait
         self._wait_start = time.perf_counter()
         self.__go_next_state()
 
@@ -157,17 +144,20 @@ class RTCTest(SensorTestBase):
             return
 
         after_time = self.sensor.getDateTime().data
-        self.result["time_change"]["end_time"] = after_time
         elapsed_seconds = time.perf_counter() - self._wait_start
         before_total = self.__datetime_to_seconds(self._time_before_wait)
         after_total = self.__datetime_to_seconds(after_time)
         delta = abs(after_total - before_total)
 
-        self.result["time_change"]["expected_change"] = elapsed_seconds
-        self.result["time_change"]["success"] = RTCTest.TIME_CHANGE_TEST_DURATION <= delta <= (elapsed_seconds + 1)  # Allow some tolerance based on actual elapsed time
-        if not self.result["time_change"]["success"]:
-            self.__fail()
+        result = self.result["time_change"]
+        result.measurements["end_time"] = after_time
+        result.measurements["delta_s"] = delta
+        result.add_criteria("expected_change_s", elapsed_seconds)
+        success = RTCTest.TIME_CHANGE_TEST_DURATION <= delta <= (elapsed_seconds + 1)  # Allow some tolerance based on actual elapsed time
+        if not success:
+            self.__fail(result, f"Sensor time changed by {delta:.2f}s, expected ~{elapsed_seconds:.2f}s.")
         else:
+            result.set_status(TestStatus.PASS)
             self.__go_next_state()
 
     def __update_performing_reset(self):
@@ -177,15 +167,16 @@ class RTCTest(SensorTestBase):
         try:
             self.sensor.hardReset(timeout=5)
         except InvalidKeyError:
-            self.result["reset"]["method"] = "power_cycle"
+            self.result["reset"].measurements["method"] = "power_cycle"
             self.state = RTCTestState.AwaitingPowerCycle
             self.update()
             return
-        except Exception:
-            self.__fail()
+        except Exception as e:
+            logger.exception("Exception occurred performing RTC reset.")
+            self.__fail(self.result["reset"], str(e))
             return
 
-        self.result["reset"]["method"] = "hard_reset"
+        self.result["reset"].measurements["method"] = "hard_reset"
         self.__go_next_state()
 
     def __update_awaiting_power_cycle(self):
@@ -209,23 +200,26 @@ class RTCTest(SensorTestBase):
         after_total = self.__datetime_to_seconds(after_datetime)
         time_diff = after_total - pre_total
 
-        self.result["reset"]["pre_reset_datetime"] = self._pre_reset_datetime
-        self.result["reset"]["post_reset_datetime"] = after_datetime
-        self.result["reset"]["expected_elapsed"] = elapsed
-        self.result["reset"]["success"] = (0 <= time_diff <= (elapsed + 1))
+        result = self.result["reset"]
+        result.measurements["pre_reset_datetime"] = self._pre_reset_datetime
+        result.measurements["post_reset_datetime"] = after_datetime
+        result.measurements["time_diff_s"] = time_diff
+        result.add_criteria("expected_elapsed_s", elapsed)
 
-        if not self.result["reset"]["success"]:
-            self.__fail()
+        success = (0 <= time_diff <= (elapsed + 1))
+        if not success:
+            self.__fail(result, f"Sensor time after reset differed by {time_diff:.2f}s, expected ~{elapsed:.2f}s.")
             return
         
+        result.set_status(TestStatus.PASS)
         self.__go_next_state()
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def __fail(self):
-        self.overall_success = False
+    def __fail(self, result: TestResult, message: str | None = None):
+        result.failed(message)
         self.state = RTCTestState.Finished
         self.__cleanup()
 
@@ -287,16 +281,17 @@ def run_test(sensor: ThreespaceSensor):
     except KeyboardInterrupt:
         test.cancel()
         print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result
+        return (False if not test.overall_success else None), test.result_flat
 
-    return test.overall_success, test.result
+    return test.overall_success, test.result_flat
 
 def auto_run_test():
     sensor = ThreespaceSensor()
     overall_success, results = run_test(sensor)
     sensor.cleanup()
-    print(f"Results: {results}")
-    print(f"Overall success: {overall_success}")
+    for test in results:
+        print(test)
+    print("Overall success:", overall_success)
     return overall_success, results
 
 if __name__ == "__main__":
