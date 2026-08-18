@@ -1,9 +1,12 @@
-from yostlabs.tss3.utils.tests.base import SensorTestBase
+from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
 from yostlabs.tss3.api import ThreespaceSensor
 from yostlabs.tss3.consts import *
 
 import enum
 import time
+
+import logging
+logger = logging.getLogger(__name__)
 
 class GPSTestState(enum.Enum):
     Inactive = 0
@@ -21,15 +24,9 @@ class GPSTest(SensorTestBase):
         super().__init__(sensor)
         self.gps_settings_cache = None
 
-        self.result = {
-            "gps_active": {
-                "success": False,
-                "message": None
-            },
-            "gps_standby": {
-                "success": False,
-                "message": None
-            }
+        self.result: dict[str, TestResult] = {
+            "active": TestResult("gps", "active"),
+            "standby": TestResult("gps", "standby"),
         }
     
         self.state_start_time = None
@@ -91,9 +88,8 @@ class GPSTest(SensorTestBase):
         for _ in range(num_messages):
             message = self.sensor.getOldestDebugMessage().data
             if "$GPGGA" in message or "$GNGGA" in message:
-                self.result["gps_active"]["success"] = True
-                self.result["gps_active"]["message"] = message
-
+                self.result["active"].set_status(TestStatus.PASS)
+                self.result["active"].add_measurement("message", message)
                 #Transition to AwaitingNoMessage state
                 self.sensor.writeGpsStandby(1)
                 self.__clear_messages()
@@ -103,7 +99,8 @@ class GPSTest(SensorTestBase):
 
         
         if elapsed_time > self.EXPECTED_MESSAGE_INTERVAL + self.MESSAGE_PADDING:
-            self.overall_success = False
+            logger.warning("GPS test timed out waiting for a GPS message.")
+            self.result["active"].failed(f"Timed out waiting for GPS message: {elapsed_time:.2f}s elapsed.")
             self.state = GPSTestState.Finished
 
     def __update_await_no_message(self):
@@ -111,15 +108,16 @@ class GPSTest(SensorTestBase):
         num_messages = self.sensor.getNumDebugMessages().data
         for _ in range(num_messages):
             message = self.sensor.getOldestDebugMessage().data
-            if "$GPGGA" in message:
-                self.overall_success = False
+            if "$GPGGA" in message or "$GNGGA" in message:
+                logger.warning("GPS test received a message while in standby.")
+                self.result["standby"].failed(message)
+                self.result["standby"].add_measurement("message", message)
                 self.state = GPSTestState.Finished
-                self.result["gps_standby"]["message"] = message
                 return
         
         #Success is going the whole interval without receiving a GPS message
         if elapsed_time > self.EXPECTED_MESSAGE_INTERVAL + self.MESSAGE_PADDING:
-            self.result["gps_standby"]["success"] = True
+            self.result["standby"].set_status(TestStatus.PASS)
             self.state = GPSTestState.Finished
 
     def __cleanup(self):
@@ -137,16 +135,17 @@ def run_test(sensor: ThreespaceSensor):
     except KeyboardInterrupt:
         test.cancel()
         print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result
+        return (False if not test.overall_success else None), test.result_flat
 
-    return test.overall_success, test.result
+    return test.overall_success, test.result_flat
 
 def auto_run_test():
     sensor = ThreespaceSensor()
     overall_success, results = run_test(sensor)
     sensor.cleanup()
-    print(f"Results: {results}")
-    print(f"Overall Success: {overall_success}")
+    for test in results:
+        print(test)
+    print("Overall success:", overall_success)
     return overall_success, results
 
 if __name__ == "__main__":
