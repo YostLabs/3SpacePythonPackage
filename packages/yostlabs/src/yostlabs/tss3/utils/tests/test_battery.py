@@ -1,9 +1,11 @@
-from yostlabs.tss3.utils.tests.base import SensorTestBase
+from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
 from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError, ResponseTimeoutError
 from yostlabs.tss3.consts import *
 import enum
 import time
 
+import logging
+logger = logging.getLogger(__name__)
 
 class BatteryTestState(enum.Enum):
     Inactive = 0
@@ -28,20 +30,11 @@ class BatteryTest(SensorTestBase):
     def __init__(self, sensor: ThreespaceSensor):
         super().__init__(sensor)
         self.state = BatteryTestState.Inactive
+
         self.result = {
-            "self_test": {
-                "success": None,
-                "errors": []
-            },
-            "status": {
-                "success": None,
-                "status": None
-            },
-            "reconnect": {
-                "success": None,
-                "disconnect_time": None,
-                "connect_time": None
-            },
+            "self_test":    TestResult("battery", "self_test"),
+            "status":       TestResult("battery", "status"),
+            "reconnect":    TestResult("battery", "reconnect",)
         }
 
         self.settings_cache = None
@@ -104,26 +97,29 @@ class BatteryTest(SensorTestBase):
         self.sensor.selfTest()
         num_debug_messages = self.sensor.getNumDebugMessages().data
         if num_debug_messages > 0:
-            self.result["self_test"]["success"] = False
+            errors = []
+            self.result["self_test"].set_status(TestStatus.FAIL)
             for _ in range(num_debug_messages):
                 message = self.sensor.getOldestDebugMessage()
-                self.result["self_test"]["errors"].append(message.data.strip())
-            
-            self.overall_success = False
+                errors.append(message.data.strip())
+            self.result["self_test"].measurements["errors"] = errors
             self.state = BatteryTestState.Finished
         else:
-            self.result["self_test"]["success"] = True
+            self.result["self_test"].set_status(TestStatus.PASS)
             self.__go_next_state()
 
     def __update_checking_status(self):
-        self.result["status"]["status"] = self.sensor.getBatteryStatus().data
-        self.result["status"]["success"] = (self.result["status"]["status"] & ~128 ) in (1, 2) # 1 = Charged, 2 = Charging
-        if not self.result["status"]["success"]:
-            self.overall_success = False
+        status = self.sensor.getBatteryStatus().data
+        self.result["status"].measurements["status"] = status
+        success = (status & ~128 ) in (1, 2) # 1 = Charged, 2 = Charging
+        if not success:
+            self.result["status"].set_status(TestStatus.FAIL)
             self.state = BatteryTestState.Finished
-        else:
-            self.__go_next_state()
+            return
 
+        self.result["status"].set_status(TestStatus.PASS)
+        self.__go_next_state()
+            
     def __start_awaiting_disconnect(self):
         self.state = BatteryTestState.AwaitingDisconnect
         if not self.manual_power_hold_state:
@@ -135,7 +131,7 @@ class BatteryTest(SensorTestBase):
             self.last_read_attempt_time = time.perf_counter()
             self.last_time = self.sensor.getTimestamp().data
         except (OSError, ResponseTimeoutError) as e:
-            self.result["reconnect"]["disconnect_time"] = self.last_time
+            self.result["reconnect"].measurements["disconnect_time"] = self.last_time
             self.last_time = self.last_read_attempt_time
             self.__go_next_state()
 
@@ -143,28 +139,32 @@ class BatteryTest(SensorTestBase):
         try:
             success = self.sensor.attempt_reconnect()
             if success:
+                expected_elapsed_time = time.perf_counter() - self.last_time
                 cur_time = self.sensor.getTimestamp().data
-                disconnect_time = self.result["reconnect"]["disconnect_time"]
-                self.result["reconnect"]["connect_time"] = cur_time
-    
+
+                result = self.result["reconnect"]
+                result.measurements["connect_time"] = cur_time
+                disconnect_time = result.measurements["disconnect_time"]
+                elapsed_time = (cur_time - disconnect_time) / 1_000_000  # Convert microseconds to seconds
+                result.measurements["elapsed_time_s"] = elapsed_time
+
+                TIME_TOLERANCE_S = 1.0  # 1 second tolerance
+                result.criteria["expected_elapsed_time_s"] = expected_elapsed_time
+                result.criteria["time_tolerance_s"] = TIME_TOLERANCE_S  # 1 second tolerance
                 if cur_time < disconnect_time:
-                    self.result["reconnect"]["success"] = False
-                    self.overall_success = False
+                    result.set_status(TestStatus.FAIL)
                 else:
-                    expected_elapsed_time = time.perf_counter() - self.last_time
-                    elapsed_time = (cur_time - disconnect_time) / 1_000_000  # Convert microseconds to seconds
-                    if abs(elapsed_time - expected_elapsed_time) > 1:  # Allow some tolerance
-                        self.result["reconnect"]["success"] = False
-                        self.overall_success = False
+                    if abs(elapsed_time - expected_elapsed_time) > TIME_TOLERANCE_S:  # Allow some tolerance
+                        result.set_status(TestStatus.FAIL)
                     else:
-                        self.result["reconnect"]["success"] = True
+                        result.set_status(TestStatus.PASS)
                 
                 self.__go_next_state()
         except Exception as e:
-            print("Exception occurred in BatteryTest:", e)
-            self.overall_success = False
+            logger.exception("Exception occurred in BatteryTest")
+            self.result["reconnect"].set_status(TestStatus.ERROR)
+            self.result["reconnect"].message = str(e)
             self.state = BatteryTestState.Finished
-    
 
     def __cleanup(self):
         if self.settings_cache is not None:
@@ -210,15 +210,16 @@ def run_test(sensor: ThreespaceSensor):
     except KeyboardInterrupt:
         test.cancel()
         print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result
+        return (False if not test.overall_success else None), test.result_flat
 
-    return test.overall_success, test.result
+    return test.overall_success, test.result_flat
 
 def auto_run_test():
     sensor = ThreespaceSensor()
     overall_success, results = run_test(sensor)
     sensor.cleanup()
-    print(results)
+    for test in results:
+        print(test)
     print("Overall success:", overall_success)
     return overall_success, results
 
