@@ -1,6 +1,9 @@
-from yostlabs.tss3.utils.tests.base import SensorTestBase
+from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
 from yostlabs.tss3.api import ThreespaceSensor
 import enum
+
+import logging
+logger = logging.getLogger(__name__)
 
 class LEDTestState(enum.Enum):
     Inactive = 0
@@ -28,7 +31,9 @@ class LEDTest(SensorTestBase):
 
         self.expected_color_name = None
 
-        self.result = { color: False for color in LEDTest.COLORS_TO_TEST.keys() }
+        self.result: dict[str, TestResult] = {
+            color: TestResult("led", color) for color in LEDTest.COLORS_TO_TEST.keys()
+        }
     
     def start(self):
         if self.state != LEDTestState.Inactive:
@@ -47,8 +52,8 @@ class LEDTest(SensorTestBase):
 
     def verify_match(self, matches: bool):
         if not matches:
-            self.overall_success = False
-        self.result[self.expected_color_name] = matches
+            logger.warning("LED color %s did not match user expectation.", self.expected_color_name)
+        self.result[self.expected_color_name].set_status(TestStatus.PASS if matches else TestStatus.FAIL)
         self.__go_next_state()
 
         if self.state == LEDTestState.Finished:
@@ -98,15 +103,16 @@ def run_test(sensor: ThreespaceSensor):
     except KeyboardInterrupt:
         test.cancel()
         print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result
-    return test.overall_success, test.result
+        return (False if not test.overall_success else None), test.result_flat
+    return test.overall_success, test.result_flat
 
 def auto_run_test():
     sensor = ThreespaceSensor()
     overall_success, results = run_test(sensor)
     sensor.cleanup()
-    print(f"Results: {results}")
-    print(f"Overall success: {overall_success}")
+    for test in results:
+        print(test)
+    print("Overall success:", overall_success)
     return overall_success, results
 
 if __name__ == "__main__":
