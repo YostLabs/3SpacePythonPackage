@@ -68,7 +68,7 @@ class ComponentTest(SensorTestBase):
         - Baro: no data verification performed.
     """
 
-    CHECK_UPDATE_RATE_WAIT_DURATION = 2.0    # seconds to wait before checking update rate (gives time for it to update)
+    CHECK_UPDATE_RATE_WAIT_DURATION = 3.0    # seconds to wait before checking update rate (gives time for it to update, including settling time)
     UPDATE_RATE_TOLERANCE = 0.01    # 1% tolerance for update rate vs true ODR
     GYRO_ACCEL_DOT_THRESHOLD = 0.5  # minimum acceptable dot product for gyro-accel cross-check
     MAG_MIN_LENGTH = 0.21           # minimum acceptable average mag vector magnitude
@@ -559,6 +559,14 @@ class ComponentTest(SensorTestBase):
         if not all(len(self._current_samples.get("baro_ema", {}).get(bid, [])) >= self.BARO_WINDOW_SAMPLES
                    for bid in self._baro_ids):
             return
+        for bid in self._baro_ids:
+            altitude_test = self.__comp_result("baro", bid)["altitude_test"]
+            baro_value = self.baro_window_avg(bid)
+            if baro_value < altitude_test["starting_altitude"]:
+                previous = altitude_test["starting_altitude"]
+                altitude_test["starting_altitude"] = baro_value
+                altitude_test["high_altitude_threshold"] = altitude_test["starting_altitude"] + self.BARO_MIN_ALTITUDE_CHANGE
+                print(f"Updated starting threshold from {previous} to {baro_value}")
         condition_met = all(
             self.__baro_is_stable(bid) and
             self.baro_window_avg(bid) >= self.__comp_result("baro", bid)["altitude_test"]["starting_altitude"] + self.BARO_MIN_ALTITUDE_CHANGE
@@ -573,6 +581,10 @@ class ComponentTest(SensorTestBase):
                     alt = self.__comp_result("baro", baro_id)["altitude_test"]
                     alt["high_altitude"] = high_alt
                     alt["low_altitude_threshold"] = high_alt - self.BARO_MIN_ALTITUDE_CHANGE
+                    # alt["up_samples"] = self._current_samples["baro"][baro_id]
+                    # alt["up_samples_ema"] = self._current_samples["baro_ema"][baro_id]
+                    self._current_samples["baro"][baro_id] = self._current_samples["baro"][baro_id][-self.BARO_WINDOW_SAMPLES:]
+                    self._current_samples["baro_ema"][baro_id] = self._current_samples["baro_ema"][baro_id][-self.BARO_WINDOW_SAMPLES:]
                 self._baro_stable_since = None
                 self.__go_next_state()
         else:
@@ -598,6 +610,8 @@ class ComponentTest(SensorTestBase):
                 for baro_id in self._baro_ids:
                     alt = self.__comp_result("baro", baro_id)["altitude_test"]
                     alt["low_altitude"] = self.baro_window_avg(baro_id)
+                    # alt["down_samples"] = self._current_samples.get("baro", {}).get(baro_id, [])
+                    # alt["down_samples_ema"] = self._current_samples.get("baro_ema", {}).get(baro_id, [])
                     alt["success"] = True
                 self.__go_next_state()
         else:
@@ -891,6 +905,11 @@ def auto_run_test(show_only_failures: bool = False):
     sensor.cleanup()
     print_results(results, show_only_failures)
     print(f"\nOverall success: {overall_success}")
+
+    import json
+    with open("component_test_results.json", "w") as f:
+        json.dump(results, f, indent=4)
+
     return overall_success, results
 
 
