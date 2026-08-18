@@ -54,7 +54,7 @@ class TestResult:
     # ---- status helpers ----
     @property
     def success(self) -> bool:
-        return self.status == TestStatus.PASS.value
+        return self.status in [TestStatus.PASS.value, TestStatus.NA.value, TestStatus.INFO.value]
 
     def set_status(self, status: TestStatus | str) -> "TestResult":
         self.status = status.value if isinstance(status, TestStatus) else status

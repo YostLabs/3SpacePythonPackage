@@ -17,12 +17,16 @@ import enum
 import math
 import time
 import threading
+from typing import Any
 
-from yostlabs.tss3.utils.tests.base import SensorTestBase
+from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 from yostlabs.math.vector import vec_len, vec_dot, vec_normalize
 from yostlabs.math.quaternion import quat_mul, quat_from_axis_angle, quat_rotate_vec
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 class ComponentTestState(enum.Enum):
@@ -79,6 +83,9 @@ class ComponentTest(SensorTestBase):
     BARO_STABLE_DURATION  = 0.5        # seconds the stability condition must hold continuously
     BARO_WINDOW_SAMPLES   = 25         # ~0.5 s at 50 Hz
 
+    # Per-component checks created for every detected accel/gyro/mag/baro. Baro additionally gets "altitude".
+    COMPONENT_CHECKS = ("set_odr_1000", "update_rate_1000", "static_check", "set_odr_50", "update_rate_50", "flip")
+
     def __init__(self, sensor: ThreespaceSensor, expected_components: list[str] | None = None):
         super().__init__(sensor)
         self.state = ComponentTestState.Inactive
@@ -103,15 +110,13 @@ class ComponentTest(SensorTestBase):
         self._baro_ema_state: dict[int, float | None] = {}
         self._baro_stable_since: float | None = None
 
-        self.result = {
-            "valid_components": {
-                "success": None,
-                "detected": None,
-                "expected": expected_components,
-            },
-            # "accel", "gyro", "mag", "baro" keys are populated in CheckingComponents.
-            # Structure: result[ctype][cid][test_name] = {success, ...}
-            "gyro_accel_check": {},  # gyro_id -> accel_id -> {success, dot_product}
+        # Keys used in self.result:
+        # - "valid_components" -> TestResult
+        # - (ctype, cid, check_name) -> TestResult, populated in CheckingComponents for every detected component.
+        #   check_name is one of COMPONENT_CHECKS, plus "altitude" for baro.
+        # - ("gyro_accel_check", gyro_id, accel_id) -> TestResult, populated during flip analysis.
+        self.result: dict[Any, TestResult] = {
+            "valid_components": TestResult("component", "valid_components"),
         }
 
     # ------------------------------------------------------------------
@@ -189,7 +194,8 @@ class ComponentTest(SensorTestBase):
 
     def __update_checking_components(self):
         detected_str = self.sensor.readValidComponents()
-        self.result["valid_components"]["detected"] = detected_str
+        result = self.result["valid_components"]
+        result.measurements["detected"] = detected_str
 
         self._accel_ids = list(self.sensor.valid_accels)
         self._gyro_ids = list(self.sensor.valid_gyros)
@@ -199,8 +205,8 @@ class ComponentTest(SensorTestBase):
         # Initialise per-component result entries now that IDs are known
         for ctype, ids in [("accel", self._accel_ids), ("gyro", self._gyro_ids),
                            ("mag", self._mag_ids), ("baro", self._baro_ids)]:
-            if ids:
-                self.result[ctype] = {cid: self.__make_component_entry(ctype) for cid in ids}
+            for cid in ids:
+                self.__make_component_entries(ctype, cid)
 
         # Cache current ODRs and stream settings for restoration on cleanup
         for accel_id in self._accel_ids:
@@ -216,17 +222,16 @@ class ComponentTest(SensorTestBase):
 
         if self._expected_components is not None:
             detected_list = [c.strip().lower() for c in detected_str.split(',') if c.strip()]
-            self.result["valid_components"]["success"] = (
-                set(detected_list) == set(c.lower() for c in self._expected_components)
-            )
-            if not self.result["valid_components"]["success"]:
-                self.overall_success = False
+            result.add_criteria("expected", list(self._expected_components))
+            matches = set(detected_list) == set(c.lower() for c in self._expected_components)
+            result.set_status(TestStatus.PASS if matches else TestStatus.FAIL)
+        else:
+            result.set_status(TestStatus.INFO)
+            result.message = "No expected components supplied; detected components recorded for reference only."
 
         self.__go_next_state()
 
-    def __update_setting_odr(self, target_odr: int, result_key: str):
-        all_ok = True
-
+    def __update_setting_odr(self, target_odr: int, check_name: str):
         odr_methods = {
             "accel": (self._accel_ids, self.sensor.writeOdrAccel, self.sensor.readOdrAccel),
             "gyro":  (self._gyro_ids,  self.sensor.writeOdrGyro,  self.sensor.readOdrGyro),
@@ -236,15 +241,14 @@ class ComponentTest(SensorTestBase):
 
         for ctype, (ids, write_fn, read_fn) in odr_methods.items():
             for cid in ids:
+                result = self.__comp_result(ctype, cid, check_name)
                 err = write_fn(cid, target_odr)
                 if err != 0:
-                    self.__comp_result(ctype, cid)[result_key] = {"success": False, "error": err, "true_odr": None}
-                    all_ok = False
+                    result.add_measurement("error", err)
+                    result.set_status(TestStatus.FAIL)
                 else:
-                    self.__comp_result(ctype, cid)[result_key] = {"success": True, "error": None, "true_odr": read_fn(cid)}
-
-        if not all_ok:
-            self.overall_success = False
+                    result.measurements["true_odr"] = read_fn(cid)
+                    result.set_status(TestStatus.PASS)
 
         self._odr_set_time = time.perf_counter()
         self.__go_next_state()
@@ -276,22 +280,21 @@ class ComponentTest(SensorTestBase):
         if time.perf_counter() - self._odr_set_time >= self.CHECK_UPDATE_RATE_WAIT_DURATION:
             self.__go_next_state()
 
-    def __update_reading_update_rate(self, odr_result_key: str, rate_result_key: str):
-        all_pass = True
-
+    def __update_reading_update_rate(self, odr_check_name: str, rate_check_name: str):
         def _check(ctype, cid, measured_rate):
-            nonlocal all_pass
-            comp = self.__comp_result(ctype, cid)
-            if not comp[odr_result_key]["success"]:
+            odr_result = self.__comp_result(ctype, cid, odr_check_name)
+            rate_result = self.__comp_result(ctype, cid, rate_check_name)
+            rate_result.measurements["actual"] = measured_rate
+            if not odr_result.success:
                 # ODR was not set successfully; skip rate check for this component
-                comp[rate_result_key] = {"success": None, "expected": None, "actual": measured_rate}
+                rate_result.skipped("ODR was not set successfully; rate check skipped.")
                 return
-            true_odr = comp[odr_result_key]["true_odr"]
+            true_odr = odr_result.measurements["true_odr"]
             tolerance = true_odr * self.UPDATE_RATE_TOLERANCE
+            rate_result.add_criteria("expected", true_odr)
+            rate_result.add_criteria("tolerance", tolerance)
             passed = abs(measured_rate - true_odr) <= tolerance
-            comp[rate_result_key] = {"success": passed, "expected": true_odr, "actual": measured_rate}
-            if not passed:
-                all_pass = False
+            rate_result.set_status(TestStatus.PASS if passed else TestStatus.FAIL)
 
         for accel_id in self._accel_ids:
             _check("accel", accel_id, self.sensor.readUpdateRateAccel(accel_id))
@@ -302,99 +305,79 @@ class ComponentTest(SensorTestBase):
         for baro_id in self._baro_ids:
             _check("baro", baro_id, self.sensor.readUpdateRateBaro(baro_id))
 
-        if not all_pass:
-            self.overall_success = False
-
         self.__go_next_state()
 
     def __update_analyzing_flip_data(self):
         self.__analyze_accel_flip()
         self.__analyze_gyro_flip()
         self.__analyze_mag_flip()
-        for baro_id in self._baro_ids:
-            self.__comp_result("baro", baro_id)["flip"] = {
-                "success": None,
-                "note": "No data verification performed for barometer.",
-            }
         self.__go_next_state()
 
     # ------------------------------------------------------------------
     # Result helpers
     # ------------------------------------------------------------------
 
-    def __comp_result(self, ctype: str, cid: int) -> dict:
-        """Returns the result sub-dict for a specific component."""
-        return self.result[ctype][cid]
+    def __comp_result(self, ctype: str, cid: int, check_name: str) -> TestResult:
+        """Returns the TestResult for a specific component's check."""
+        return self.result[(ctype, cid, check_name)]
 
-    @staticmethod
-    def __make_component_entry(ctype: str) -> dict:
-        """Returns a fresh per-component result template."""
-        entry = {
-            "set_odr_1000": {"success": None, "error": None, "true_odr": None},
-            "update_rate_1000": {"success": None, "expected": None, "actual": None},
-            "static_check": {"success": None, "static_error": None },
-            "set_odr_50": {"success": None, "error": None, "true_odr": None},
-            "update_rate_50": {"success": None, "expected": None, "actual": None},
-            "flip": {"success": None },
-        }
+    def __make_component_entries(self, ctype: str, cid: int):
+        """Creates a fresh TestResult for every check of a specific component."""
+        component_label = f"{ctype}:{cid}"
+        for check_name in self.COMPONENT_CHECKS:
+            if ctype == "baro" and check_name == "flip":
+                continue  # baro does not have a flip check
+            self.result[(ctype, cid, check_name)] = TestResult(
+                "component", f"{ctype}.{check_name}", components=[component_label]
+            )
         if ctype == "baro":
-            entry["altitude_test"] = {
-                "success": None,
-                "starting_altitude": None,
-                "high_altitude_threshold": None,
-                "high_altitude": None,
-                "low_altitude_threshold": None,
-                "low_altitude": None,
-            }
-        return entry
+            self.result[(ctype, cid, "altitude")] = TestResult(
+                "component", f"{ctype}.altitude", components=[component_label]
+            )
 
     # ------------------------------------------------------------------
     # Static data analysis
     # ------------------------------------------------------------------
 
     def __analyze_static_data(self):
-        all_pass = True
-
         for accel_id in self._accel_ids:
             is_static, error = self.__check_static_vector(self._static_samples, "accel", accel_id)
-            self.__comp_result("accel", accel_id)["static_check"] = {
-                "success": not is_static, "static_error": error
-            }
+            result = self.__comp_result("accel", accel_id, "static_check")
             if is_static:
-                all_pass = False
+                result.failed(error)
+            else:
+                result.set_status(TestStatus.PASS)
 
         for gyro_id in self._gyro_ids:
             is_static, error = self.__check_static_vector(self._static_samples, "gyro", gyro_id)
-            self.__comp_result("gyro", gyro_id)["static_check"] = {
-                "success": not is_static, "static_error": error
-            }
+            result = self.__comp_result("gyro", gyro_id, "static_check")
             if is_static:
-                all_pass = False
+                result.failed(error)
+            else:
+                result.set_status(TestStatus.PASS)
 
         for mag_id in self._mag_ids:
             is_static, error = self.__check_static_vector(self._static_samples, "mag", mag_id)
             mag_vecs = self._static_samples.get("mag", {}).get(mag_id, [])
             mag_len = sum(vec_len(v) for v in mag_vecs) / len(mag_vecs) if mag_vecs else 0.0
             length_ok = mag_len >= self.MAG_MIN_LENGTH
-            self.__comp_result("mag", mag_id)["static_check"] = {
-                "success": not is_static and length_ok,
-                "static_error": error,
-                "avg_length": mag_len,
-                "length_ok": length_ok,
-            }
-            if is_static or not length_ok:
-                all_pass = False
+            result = self.__comp_result("mag", mag_id, "static_check")
+            result.measurements["avg_length"] = mag_len
+            result.add_criteria("min_length", self.MAG_MIN_LENGTH)
+            if is_static:
+                result.failed(error)
+            elif not length_ok:
+                result.failed(f"Average magnitude {mag_len} below minimum {self.MAG_MIN_LENGTH}.")
+            else:
+                result.set_status(TestStatus.PASS)
 
         for baro_id in self._baro_ids:
             is_static, error = self.__check_static_scalar(self._static_samples, "baro", baro_id)
-            self.__comp_result("baro", baro_id)["static_check"] = {
-                "success": not is_static, "static_error": error
-            }
+            result = self.__comp_result("baro", baro_id, "static_check")
             if is_static:
-                all_pass = False
-
-        if not all_pass:
-            self.overall_success = False
+                result.failed(error)
+            else:
+                result.set_status(TestStatus.PASS)
 
     def __check_static_vector(self, samples: dict, ctype: str, cid: int) -> tuple[bool, str]:
         """Returns (is_static, extra). is_static=True means no variation was detected."""
@@ -423,42 +406,30 @@ class ComponentTest(SensorTestBase):
     def __analyze_accel_flip(self):
         for accel_id in self._accel_ids:
             values = self._flip_samples.get("accel", {}).get(accel_id, [])
+            result = self.__comp_result("accel", accel_id, "flip")
             if len(values) < 2:
-                self.__comp_result("accel", accel_id)["flip"] = {
-                    "success": False,
-                    "error": "insufficient samples",
-                }
-                self.overall_success = False
+                result.failed("insufficient samples")
                 continue
             dot = vec_dot(vec_normalize(values[0]), vec_normalize(values[-1]))
             direction_changed = dot < 0.0
-            self.__comp_result("accel", accel_id)["flip"] = {
-                "success": direction_changed,
-                "dot_product": dot,
-                "direction_changed": direction_changed,
-            }
-            if not direction_changed:
-                self.overall_success = False
+            result.measurements["dot_product"] = dot
+            result.measurements["direction_changed"] = direction_changed
+            if direction_changed:
+                result.set_status(TestStatus.PASS)
 
     def __analyze_mag_flip(self):
         for mag_id in self._mag_ids:
             values = self._flip_samples.get("mag", {}).get(mag_id, [])
+            result = self.__comp_result("mag", mag_id, "flip")
             if len(values) < 2:
-                self.__comp_result("mag", mag_id)["flip"] = {
-                    "success": False,
-                    "reason": "insufficient samples",
-                }
-                self.overall_success = False
+                result.failed("insufficient samples")
                 continue
             dot = vec_dot(vec_normalize(values[0]), vec_normalize(values[-1]))
             direction_changed = dot < 0.0
-            self.__comp_result("mag", mag_id)["flip"] = {
-                "success": direction_changed,
-                "dot_product": dot,
-                "direction_changed": direction_changed,
-            }
-            if not direction_changed:
-                self.overall_success = False
+            result.measurements["dot_product"] = dot
+            result.measurements["direction_changed"] = direction_changed
+            if direction_changed:
+                result.set_status(TestStatus.PASS)
 
     def __analyze_gyro_flip(self):
         principal_axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
@@ -467,13 +438,9 @@ class ComponentTest(SensorTestBase):
             times = self._flip_samples.get("time", [])
             gyro_values = self._flip_samples.get("gyro", {}).get(gyro_id, [])
             timed_values = [(t, g) for t, g in zip(times, gyro_values) if g is not None]
+            result = self.__comp_result("gyro", gyro_id, "flip")
             if len(timed_values) < 2:
-                self.__comp_result("gyro", gyro_id)["flip"] = {
-                    "success": False,
-                    "reason": "insufficient samples for integration",
-                    "max_rotation_deg": None,
-                }
-                self.overall_success = False
+                result.failed("insufficient samples for integration")
                 continue
 
             # Integrate angular velocity (rad/s) into a cumulative rotation quaternion
@@ -502,18 +469,17 @@ class ComponentTest(SensorTestBase):
 
             passed = max_deg >= self.GYRO_FLIP_MIN_DEGREES
 
-            flip_result = {
-                "success": passed,
-                "max_rotation_deg": max_deg,
-                "best_axis": best_axis,
-            }
+            result.measurements["max_rotation_deg"] = max_deg
+            result.measurements["best_axis"] = best_axis
+            result.add_criteria("min_rotation_deg", self.GYRO_FLIP_MIN_DEGREES)
+            result.set_status(TestStatus.PASS if passed else TestStatus.FAIL)
 
             # Cross-check against every accel that passed its own flip test:
             # rotate the initial accel vector by q and verify it aligns with
             # the observed final accel vector (dot >= self.GYRO_ACCEL_DOT_THRESHOLD).
             for accel_id in self._accel_ids:
-                accel_flip = self.result.get("accel", {}).get(accel_id, {}).get("flip", {})
-                if not accel_flip.get("success"):
+                accel_result = self.__comp_result("accel", accel_id, "flip")
+                if not accel_result.success:
                     continue
                 accel_vals = self._flip_samples.get("accel", {}).get(accel_id, [])
                 if len(accel_vals) < 2:
@@ -521,18 +487,15 @@ class ComponentTest(SensorTestBase):
                 predicted = quat_rotate_vec(q, accel_vals[0])
                 dot = vec_dot(vec_normalize(predicted), vec_normalize(accel_vals[-1]))
                 check_passed = dot >= self.GYRO_ACCEL_DOT_THRESHOLD
-                if gyro_id not in self.result["gyro_accel_check"]:
-                    self.result["gyro_accel_check"][gyro_id] = {}
-                self.result["gyro_accel_check"][gyro_id][accel_id] = {
-                    "success": check_passed,
-                    "dot_product": dot,
-                }
-                if not check_passed:
-                    self.overall_success = False
 
-            self.__comp_result("gyro", gyro_id)["flip"] = flip_result
-            if not passed:
-                self.overall_success = False
+                cross_check = TestResult(
+                    "component", "gyro_accel_check",
+                    components=[f"gyro:{gyro_id}", f"accel:{accel_id}"]
+                )
+                cross_check.measurements["dot_product"] = dot
+                cross_check.add_criteria("min_dot_product", self.GYRO_ACCEL_DOT_THRESHOLD)
+                cross_check.set_status(TestStatus.PASS if check_passed else TestStatus.FAIL)
+                self.result[("gyro_accel_check", gyro_id, accel_id)] = cross_check
 
     # ------------------------------------------------------------------
     # Barometer altitude test
@@ -546,9 +509,11 @@ class ComponentTest(SensorTestBase):
         if all(len(self._current_samples.get("baro", {}).get(bid, [])) >= self.BARO_WINDOW_SAMPLES
                for bid in self._baro_ids):
             for baro_id in self._baro_ids:
-                alt = self.__comp_result("baro", baro_id)["altitude_test"]
-                alt["starting_altitude"] = self.baro_window_avg(baro_id)
-                alt["high_altitude_threshold"] = alt["starting_altitude"] + self.BARO_MIN_ALTITUDE_CHANGE
+                result = self.__comp_result("baro", baro_id, "altitude")
+                starting_altitude = self.baro_window_avg(baro_id)
+                result.measurements["starting_altitude"] = starting_altitude
+                result.add_criteria("min_altitude_change_m", self.BARO_MIN_ALTITUDE_CHANGE)
+                result.add_criteria("high_altitude_threshold", starting_altitude + self.BARO_MIN_ALTITUDE_CHANGE)
             self.__go_next_state()
 
     def __update_baro_awaiting_raise(self):
@@ -560,16 +525,16 @@ class ComponentTest(SensorTestBase):
                    for bid in self._baro_ids):
             return
         for bid in self._baro_ids:
-            altitude_test = self.__comp_result("baro", bid)["altitude_test"]
+            result = self.__comp_result("baro", bid, "altitude")
             baro_value = self.baro_window_avg(bid)
-            if baro_value < altitude_test["starting_altitude"]:
-                previous = altitude_test["starting_altitude"]
-                altitude_test["starting_altitude"] = baro_value
-                altitude_test["high_altitude_threshold"] = altitude_test["starting_altitude"] + self.BARO_MIN_ALTITUDE_CHANGE
-                print(f"Updated starting threshold from {previous} to {baro_value}")
+            if baro_value < result.measurements["starting_altitude"]:
+                previous = result.measurements["starting_altitude"]
+                result.measurements["starting_altitude"] = baro_value
+                result.criteria["high_altitude_threshold"] = baro_value + self.BARO_MIN_ALTITUDE_CHANGE
+                logger.info("Updated starting altitude threshold from %s to %s", previous, baro_value)
         condition_met = all(
             self.__baro_is_stable(bid) and
-            self.baro_window_avg(bid) >= self.__comp_result("baro", bid)["altitude_test"]["starting_altitude"] + self.BARO_MIN_ALTITUDE_CHANGE
+            self.baro_window_avg(bid) >= self.__comp_result("baro", bid, "altitude").criteria["high_altitude_threshold"]
             for bid in self._baro_ids
         )
         if condition_met:
@@ -578,11 +543,9 @@ class ComponentTest(SensorTestBase):
             elif time.perf_counter() - self._baro_stable_since >= self.BARO_STABLE_DURATION:
                 for baro_id in self._baro_ids:
                     high_alt = self.baro_window_avg(baro_id)
-                    alt = self.__comp_result("baro", baro_id)["altitude_test"]
-                    alt["high_altitude"] = high_alt
-                    alt["low_altitude_threshold"] = high_alt - self.BARO_MIN_ALTITUDE_CHANGE
-                    # alt["up_samples"] = self._current_samples["baro"][baro_id]
-                    # alt["up_samples_ema"] = self._current_samples["baro_ema"][baro_id]
+                    result = self.__comp_result("baro", baro_id, "altitude")
+                    result.measurements["high_altitude"] = high_alt
+                    result.add_criteria("low_altitude_threshold", high_alt - self.BARO_MIN_ALTITUDE_CHANGE)
                     self._current_samples["baro"][baro_id] = self._current_samples["baro"][baro_id][-self.BARO_WINDOW_SAMPLES:]
                     self._current_samples["baro_ema"][baro_id] = self._current_samples["baro_ema"][baro_id][-self.BARO_WINDOW_SAMPLES:]
                 self._baro_stable_since = None
@@ -600,7 +563,7 @@ class ComponentTest(SensorTestBase):
             return
         condition_met = all(
             self.__baro_is_stable(bid) and
-            self.baro_window_avg(bid) <= self.__comp_result("baro", bid)["altitude_test"]["high_altitude"] - self.BARO_MIN_ALTITUDE_CHANGE
+            self.baro_window_avg(bid) <= self.__comp_result("baro", bid, "altitude").measurements["high_altitude"] - self.BARO_MIN_ALTITUDE_CHANGE
             for bid in self._baro_ids
         )
         if condition_met:
@@ -608,11 +571,9 @@ class ComponentTest(SensorTestBase):
                 self._baro_stable_since = time.perf_counter()
             elif time.perf_counter() - self._baro_stable_since >= self.BARO_STABLE_DURATION:
                 for baro_id in self._baro_ids:
-                    alt = self.__comp_result("baro", baro_id)["altitude_test"]
-                    alt["low_altitude"] = self.baro_window_avg(baro_id)
-                    # alt["down_samples"] = self._current_samples.get("baro", {}).get(baro_id, [])
-                    # alt["down_samples_ema"] = self._current_samples.get("baro_ema", {}).get(baro_id, [])
-                    alt["success"] = True
+                    result = self.__comp_result("baro", baro_id, "altitude")
+                    result.measurements["low_altitude"] = self.baro_window_avg(baro_id)
+                    result.set_status(TestStatus.PASS)
                 self.__go_next_state()
         else:
             self._baro_stable_since = None
@@ -620,7 +581,7 @@ class ComponentTest(SensorTestBase):
     def __enter_baro_test(self):
         """Check whether any baro passed static check and, if so, initialise the baro altitude test."""
         any_baro_ok = any(
-            self.result.get("baro", {}).get(bid, {}).get("static_check", {}).get("success")
+            self.__comp_result("baro", bid, "static_check").success
             for bid in self._baro_ids
         )
         if not any_baro_ok:
@@ -634,8 +595,7 @@ class ComponentTest(SensorTestBase):
 
     def __fail_baro_test(self):
         for baro_id in self._baro_ids:
-            self.__comp_result("baro", baro_id)["altitude_test"]["success"] = False
-        self.overall_success = False
+            self.__comp_result("baro", baro_id, "altitude").failed()
         self.state = ComponentTestState.Finished
         self.__cleanup()
 
@@ -767,75 +727,38 @@ def _print_baro_status(test: ComponentTest) -> None:
         return
     
     if test.state == ComponentTestState.BaroAwaitingRaise:
-        if any(test.baro_window_avg(bid) < test.result["baro"][bid]["altitude_test"]["high_altitude_threshold"] for bid in bids):
+        if any(test.baro_window_avg(bid) < test.result[("baro", bid, "altitude")].criteria["high_altitude_threshold"] for bid in bids):
             print("RAISE      \r", end="", flush=True)
         else:
             print("HOLD       \r", end="", flush=True)
     elif test.state == ComponentTestState.BaroAwaitingLower:
-        if any(test.baro_window_avg(bid) > test.result["baro"][bid]["altitude_test"]["low_altitude_threshold"] for bid in bids):
+        if any(test.baro_window_avg(bid) > test.result[("baro", bid, "altitude")].criteria["low_altitude_threshold"] for bid in bids):
             print("LOWER      \r", end="", flush=True)
         else:
             print("HOLD       \r", end="", flush=True)
 
 
-def print_results(result: dict, show_only_failures: bool = False):
+def print_results(results: list[TestResult], show_only_failures: bool = False):
     """Print component test results in a human-readable indented format.
 
     Parameters
     ----------
-    result:
-        The ``ComponentTest.result`` dict.
+    results:
+        The ``ComponentTest.result_flat`` list.
     show_only_failures:
-        When True, only entries whose ``success`` field is ``False`` are shown.
+        When True, only entries that did not pass are shown.
     """
-    def _fmt(data: dict) -> str:
-        return ", ".join(f"{k}={v}" for k, v in data.items() if v is not None)
-
-    # valid_components block
-    vc = result.get("valid_components", {})
-    if not show_only_failures or vc.get("success") is False:
-        print("Valid Components")
-        for k, v in vc.items():
-            if v is not None:
-                print(f"  {k}: {v}")
-
-    # Per-component-type blocks
-    for ctype in ("accel", "gyro", "mag", "baro"):
-        if ctype not in result:
+    for result in results:
+        if show_only_failures and result.success:
             continue
-        printed_type_header = False
-        for cid, tests in result[ctype].items():
-            printed_id_header = False
-            for test_name, test_data in tests.items():
-                if not isinstance(test_data, dict):
-                    continue
-                success = test_data.get("success")
-                if show_only_failures and success is not False:
-                    continue
-                if not printed_type_header:
-                    print(ctype.capitalize())
-                    printed_type_header = True
-                if not printed_id_header:
-                    print(f"  {cid}")
-                    printed_id_header = True
-                print(f"    {test_name}: {_fmt(test_data)}")
-
-    # Gyro-accel cross-check block
-    gyro_accel = result.get("gyro_accel_check", {})
-    if gyro_accel:
-        printed_header = False
-        for gyro_id, accel_checks in gyro_accel.items():
-            for accel_id, check_data in accel_checks.items():
-                success = check_data.get("success")
-                if show_only_failures and success is not False:
-                    continue
-                if not printed_header:
-                    print("Gyro-Accel Cross-Check")
-                    printed_header = True
-                print(f"  gyro={gyro_id}, accel={accel_id}: {_fmt(check_data)}")
+        components = f" [{', '.join(result.components)}]" if result.components else ""
+        message = f" - {result.message}" if result.message else ""
+        print(f"{result.check}{components}: {result.status}{message}")
+        for name, value in result.measurements.items():
+            print(f"    {name}: {value}")
 
 
-def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False, expected_components: list[str] | None = None) -> tuple[bool | None, dict]:
+def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False, expected_components: list[str] | None = None) -> tuple[bool | None, list[TestResult]]:
     test = ComponentTest(sensor, expected_components=expected_components)
 
     _enter_event = threading.Event()
@@ -895,8 +818,8 @@ def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False, expecte
             else:
                 test.cancel()
                 print("\nTest cancelled by user.")
-                return (False if not test.overall_success else None), test.result
-    return test.overall_success, test.result
+                return (False if not test.overall_success else None), test.result_flat
+    return test.overall_success, test.result_flat
 
 
 def auto_run_test(show_only_failures: bool = False):
@@ -908,7 +831,7 @@ def auto_run_test(show_only_failures: bool = False):
 
     import json
     with open("component_test_results.json", "w") as f:
-        json.dump(results, f, indent=4)
+        json.dump([r.to_dict() for r in results], f, indent=4)
 
     return overall_success, results
 
