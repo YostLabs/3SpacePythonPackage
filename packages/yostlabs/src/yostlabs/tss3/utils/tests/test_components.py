@@ -414,8 +414,7 @@ class ComponentTest(SensorTestBase):
             direction_changed = dot < 0.0
             result.measurements["dot_product"] = dot
             result.measurements["direction_changed"] = direction_changed
-            if direction_changed:
-                result.set_status(TestStatus.PASS)
+            result.set_status(TestStatus.PASS if direction_changed else TestStatus.FAIL)
 
     def __analyze_mag_flip(self):
         for mag_id in self._mag_ids:
@@ -428,8 +427,7 @@ class ComponentTest(SensorTestBase):
             direction_changed = dot < 0.0
             result.measurements["dot_product"] = dot
             result.measurements["direction_changed"] = direction_changed
-            if direction_changed:
-                result.set_status(TestStatus.PASS)
+            result.set_status(TestStatus.PASS if direction_changed else TestStatus.FAIL)
 
     def __analyze_gyro_flip(self):
         principal_axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
