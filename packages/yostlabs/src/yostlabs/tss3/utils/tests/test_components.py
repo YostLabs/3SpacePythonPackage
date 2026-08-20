@@ -86,7 +86,9 @@ class ComponentTest(SensorTestBase):
     # Per-component checks created for every detected accel/gyro/mag/baro. Baro additionally gets "altitude".
     COMPONENT_CHECKS = ("set_odr_1000", "update_rate_1000", "static_check", "set_odr_50", "update_rate_50", "flip")
 
-    def __init__(self, sensor: ThreespaceSensor, expected_components: list[str] | None = None):
+    def __init__(self, sensor: ThreespaceSensor, 
+                 expected_components: list[str] | None = None,
+                 streaming_manager: ThreespaceStreamingManager = None):
         super().__init__(sensor)
         self.state = ComponentTestState.Inactive
 
@@ -98,7 +100,7 @@ class ComponentTest(SensorTestBase):
         self._mag_ids: list[int] = []
         self._baro_ids: list[int] = []
 
-        self._manager: ThreespaceStreamingManager | None = None
+        self._manager: ThreespaceStreamingManager | None = streaming_manager
         self._current_samples: dict = {}
         self._static_samples: dict = {}
         self._flip_samples: dict = {}
@@ -180,13 +182,43 @@ class ComponentTest(SensorTestBase):
             return
         self._flip_done_flag = True
 
-    def notify_baro_fail(self):
+    def fail_baro(self):
         """Manually fail the barometer altitude test (e.g. if stable position is never reached)."""
         if self.state not in (ComponentTestState.BaroBaseline,
                               ComponentTestState.BaroAwaitingRaise,
                               ComponentTestState.BaroAwaitingLower):
             return
         self._baro_fail_flag = True
+
+    def confirm_baro(self):
+        """
+        Manually force the current stage of the barometer altitude test to pass
+        and advance to the next stage (e.g. if the automatic altitude-change
+        detection is not triggering as expected).
+        """
+        if self.state not in (ComponentTestState.BaroAwaitingRaise,
+                              ComponentTestState.BaroAwaitingLower):
+            return
+
+        if self.state == ComponentTestState.BaroAwaitingRaise:
+            for baro_id in self._baro_ids:
+                result = self.__comp_result("baro", baro_id, "altitude")
+                default_high = result.measurements.get("starting_altitude", 0.0) + self.BARO_MIN_ALTITUDE_CHANGE
+                high_altitude = self.__safe_baro_window_avg(baro_id, default=default_high)
+                result.measurements["high_altitude"] = high_altitude
+                result.measurements["force_passed_high"] = True
+                result.add_criteria("low_altitude_threshold", high_altitude - self.BARO_MIN_ALTITUDE_CHANGE)
+        elif self.state == ComponentTestState.BaroAwaitingLower:
+            for baro_id in self._baro_ids:
+                result = self.__comp_result("baro", baro_id, "altitude")
+                default_low = result.measurements.get("high_altitude", 0.0) - self.BARO_MIN_ALTITUDE_CHANGE
+                low_altitude = self.__safe_baro_window_avg(baro_id, default=default_low)
+                result.measurements["low_altitude"] = low_altitude
+                result.measurements["force_passed_low"] = True
+                result.set_status(TestStatus.PASS)
+
+        self._baro_stable_since = None
+        self.__go_next_state()
 
     # ------------------------------------------------------------------
     # Private state handlers
@@ -196,6 +228,10 @@ class ComponentTest(SensorTestBase):
         detected_str = self.sensor.readValidComponents()
         result = self.result["valid_components"]
         result.measurements["detected"] = detected_str
+        detected_list = []
+        if detected_str:
+            detected_list = [c.strip().lower() for c in detected_str.split(',')]
+        result.measurements["detected_modified"] = [c.split("_")[0].lower() for c in detected_list]
 
         self._accel_ids = list(self.sensor.valid_accels)
         self._gyro_ids = list(self.sensor.valid_gyros)
@@ -221,9 +257,12 @@ class ComponentTest(SensorTestBase):
         self._settings_cache["stream_interval"] = self.sensor.readStreamInterval()
 
         if self._expected_components is not None:
-            detected_list = [c.strip().lower() for c in detected_str.split(',') if c.strip()]
-            result.add_criteria("expected", list(self._expected_components))
-            matches = set(detected_list) == set(c.lower() for c in self._expected_components)
+            expected = list(self._expected_components)
+            expected_modified = [c.split("_")[0].lower() for c in expected]  # split into type and ID
+            result.add_criteria("expected", expected)
+            result.add_criteria("expected_modified", expected_modified)
+
+            matches = set(result.measurements["detected_modified"]) == set(expected_modified)
             result.set_status(TestStatus.PASS if matches else TestStatus.FAIL)
         else:
             result.set_status(TestStatus.INFO)
@@ -600,6 +639,11 @@ class ComponentTest(SensorTestBase):
     def baro_window_avg(self, baro_id: int) -> float:
         return self._current_samples["baro_ema"][baro_id][-1]
 
+    def __safe_baro_window_avg(self, baro_id: int, default: float = 0.0) -> float:
+        """Like baro_window_avg(), but falls back to default if no samples have been collected yet."""
+        values = self._current_samples.get("baro_ema", {}).get(baro_id, [])
+        return values[-1] if values else default
+
     def __baro_is_stable(self, baro_id: int) -> bool:
         window = self._current_samples["baro_ema"][baro_id][-self.BARO_WINDOW_SAMPLES:]
         return max(window) - min(window) < self.BARO_STABLE_THRESHOLD
@@ -792,10 +836,12 @@ def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False, expecte
                         awaiting_enter = True
                     elif test.state == ComponentTestState.BaroAwaitingRaise:
                         print(f"Raise the sensor at least 1 ft ({ComponentTest.BARO_MIN_ALTITUDE_CHANGE:.3f} m) "
-                            f"above its starting position and hold still. Call test.notify_baro_fail() to skip.")
+                            f"above its starting position and hold still. Call test.confirm_baro() to force-pass "
+                            f"this stage, or test.fail_baro() to skip.")
                     elif test.state == ComponentTestState.BaroAwaitingLower:
                         print(f"Lower the sensor at least 1 ft ({ComponentTest.BARO_MIN_ALTITUDE_CHANGE:.3f} m) "
-                            f"below its starting position and hold still. Call test.notify_baro_fail() to skip.")
+                            f"below its starting position and hold still. Call test.confirm_baro() to force-pass "
+                            f"this stage, or test.fail_baro() to skip.")
                     last_state = test.state
 
                 if awaiting_enter and _enter_event.is_set():
@@ -811,7 +857,7 @@ def run_test(sensor: ThreespaceSensor, show_only_failures: bool = False, expecte
         except KeyboardInterrupt:
             if test.state in (ComponentTestState.BaroAwaitingRaise, ComponentTestState.BaroAwaitingLower):
                 print("\nBarometer test interrupted by user. Marking barometer test as failed.")
-                test.notify_baro_fail()
+                test.fail_baro()
                 # outer while re-enters the inner loop to finish the test
             else:
                 test.cancel()
