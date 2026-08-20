@@ -37,17 +37,15 @@ FAMILY_TO_TESTS = {
     },
 }
 
-
-def run_test(sensor: ThreespaceSensor, 
-             test_table: dict[str, Callable[[ThreespaceSensor], tuple[bool,list[TestResult]]] | dict]):
+def overall_test_initialize_results(sensor: ThreespaceSensor, operator=None, context=None, test_suite_version="0.0.1"):
     results = {
         "sensor_id": None,
-        "operator": None,
+        "operator": operator,
         "start_time": None,
         "end_time": None,
         "suite_version": None,
         "firmware_version": None,
-        "context": {}, #Any additional context information that may be useful for debugging to add later, such as operating system
+        "context": context or {}, #Any additional context information that may be useful for debugging to add later, such as operating system
         "overall_success": None,
         "fatal_tests": [],
         "failed_checks": [],
@@ -56,10 +54,36 @@ def run_test(sensor: ThreespaceSensor,
 
     results["sensor_id"] = f"0x{sensor.serial_number:016X}"
     results["start_time"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    results["suite_version"] = "0.0.1" #TODO: Update this to the actual version of the test suite
+    results["suite_version"] = test_suite_version
     results["firmware_version"] = sensor.firmware_version
 
+    return results
+
+def overall_test_finalize_results(results: dict, test_checks: list[TestResult]):
     overall_success = True
+    for check in test_checks:
+        results["checks"].append(check.to_dict())
+        if not check.success:
+            results["failed_checks"].append((check.test, check.check, check.components))
+            overall_success = False
+    results["end_time"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    results["overall_success"] = overall_success and len(results["fatal_tests"]) == 0
+    return results
+
+def overall_test_add_error(results: dict, test_name: str, error: str):
+    results["fatal_tests"].append({
+        "test_name": test_name,
+        "error": error
+    })
+    return results
+
+def run_test(sensor: ThreespaceSensor, 
+             test_table: dict[str, Callable[[ThreespaceSensor], tuple[bool,list[TestResult]]] | dict],
+             operator=None, context=None, test_suite_version="0.0.1"):
+    results = overall_test_initialize_results(sensor, operator=operator, context=context, test_suite_version=test_suite_version)
+
+    test_checks = []
+
     for test_name, test in test_table.items():
         try:
             if isinstance(test, dict):
@@ -68,25 +92,14 @@ def run_test(sensor: ThreespaceSensor,
                 test_success, test_results = func(sensor, **kwargs)
             else:
                 test_success, test_results = test(sensor)
-
-            if not test_success:
-                overall_success = False
-
-            for check in test_results:
-                results["checks"].append(check.to_dict())
-                if not check.success:
-                    results["failed_checks"].append((check.test, check.check, check.components))
+            test_checks.extend(test_results)
         except UnsupportedTestError as e:
             logger.warning(f"Unsupported test: {test_name}")
         except Exception as e:
-            overall_success = False
-            results["fatal_tests"].append({
-                "test_name": test_name,
-                "error": str(e)
-            })
+            overall_test_add_error(results, test_name, str(e))
             break
-    results["end_time"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    results["overall_success"] = overall_success
+    results = overall_test_finalize_results(results, test_checks)
+    overall_success = results["overall_success"]
     return overall_success, results
 
 def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True):
