@@ -101,9 +101,13 @@ class ComponentTest(SensorTestBase):
         self._baro_ids: list[int] = []
 
         self._manager: ThreespaceStreamingManager | None = streaming_manager
+        if self._manager is None:
+            self._manager = ThreespaceStreamingManager(sensor)
         self._current_samples: dict = {}
         self._static_samples: dict = {}
         self._flip_samples: dict = {}
+
+        self._static_streaming_initialized = False
 
         self._flip_done_flag: bool = False
         self._odr_set_time: float | None = None
@@ -128,6 +132,7 @@ class ComponentTest(SensorTestBase):
     def start(self):
         if self.state != ComponentTestState.Inactive:
             raise Exception("Component test already started.")
+        self._static_streaming_initialized = False
         self.__go_next_state()
 
     def cancel(self):
@@ -294,9 +299,10 @@ class ComponentTest(SensorTestBase):
 
     def __update_streaming_static(self):
         # First entry: set up streaming and return; subsequent calls check elapsed time.
-        if self._manager is None:
+        if not self._static_streaming_initialized:
             self._setup_manager(hz=50)
             self._current_samples = self._make_samples_dict()
+            self._static_streaming_initialized = True
 
         self._manager.update()
 
@@ -667,7 +673,6 @@ class ComponentTest(SensorTestBase):
         return d
 
     def _setup_manager(self, hz: int):
-        self._manager = ThreespaceStreamingManager(self.sensor)
         self._manager.register_command(self, StreamableCommands.GetTimestamp, immediate_update=False)
         for accel_id in self._accel_ids:
             self._manager.register_command(self, StreamableCommands.GetRawAccelVec, param=accel_id, immediate_update=False)
@@ -681,12 +686,9 @@ class ComponentTest(SensorTestBase):
         self._manager.enable()
 
     def _stop_manager(self):
-        if self._manager is None:
-            return
         self._manager.unregister_all_commands_from_owner(self)
         self._manager.unregister_callback(self._on_streaming_data)
         self._manager.disable()
-        self._manager = None
 
     def _on_streaming_data(self, status: ThreespaceStreamingStatus, user_data=None):
         # Collect one sample per packet so gyro integration captures every update
