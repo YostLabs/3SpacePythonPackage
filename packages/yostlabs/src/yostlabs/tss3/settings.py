@@ -61,6 +61,8 @@ THREESPACE_SETTINGS_LIST: list[ThreespaceSetting] = [
     ThreespaceReadWriteSetting("header_serial", "b"),
     ThreespaceReadWriteSetting("header_length", "b"),
     ThreespaceReadSetting("valid_commands", "S"),
+    ThreespaceReadWriteSetting("timesync_accel_threshold", "f"),
+    ThreespaceReadWriteSetting("timesync_startup_mode", "b"),
     ThreespaceReadWriteSetting("cpu_speed", "u"),
     ThreespaceReadSetting("cpu_speed_cur", "u"),
     ThreespaceWriteSetting("pm_mode", "b"),

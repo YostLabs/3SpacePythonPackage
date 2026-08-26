@@ -369,6 +369,7 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
     ThreespaceCommand("getOldestDebugMessage", 127, "", "S"),
     ThreespaceCommand("selfTest", 128, "", "u"),
 
+    ThreespaceCommand("setTimesyncMode", 164, "b", ""),
     ThreespaceCommand("beginPassiveAutoCalibration", 165, "b", ""),
     ThreespaceCommand("getActivePassiveAutoCalibration", 166, "", "b"),
     ThreespaceCommand("beginActiveAutoCalibration", 167, "", ""),

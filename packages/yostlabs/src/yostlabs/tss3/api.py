@@ -1615,6 +1615,7 @@ class ThreespaceSensor:
     def getOldestDebugMessage(self) -> ThreespaceCmdResult[str]: ...
     def selfTest(self) -> ThreespaceCmdResult[int]: ...
 
+    def setTimesyncMode(self, mode: int) -> ThreespaceCmdResult[None]: ...
     def beginPassiveAutoCalibration(self, enabled_bitfield: int) -> ThreespaceCmdResult[None]: ...
     def getActivePassiveAutoCalibration(self) -> ThreespaceCmdResult[int]: ...
     def beginActiveAutoCalibration(self) -> ThreespaceCmdResult[None]: ...
@@ -1759,6 +1760,18 @@ class ThreespaceSensor:
 
     def readValidCommands(self) -> str:
         return self.read_settings("valid_commands")["valid_commands"]
+
+    def writeTimesyncAccelThreshold(self, value: float) -> int:
+        return self.write_settings(timesync_accel_threshold=value)[0]
+
+    def readTimesyncAccelThreshold(self) -> float:
+        return self.read_settings("timesync_accel_threshold")["timesync_accel_threshold"]
+
+    def writeTimesyncStartupMode(self, value: int) -> int:
+        return self.write_settings(timesync_startup_mode=value)[0]
+
+    def readTimesyncStartupMode(self) -> int:
+        return self.read_settings("timesync_startup_mode")["timesync_startup_mode"]
 
     def writeCpuSpeed(self, value: int) -> int:
         return self.write_settings(cpu_speed=value)[0]
