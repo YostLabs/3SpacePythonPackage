@@ -352,7 +352,7 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
     ThreespaceCommand("eeptsAutoOffset", 74, "", ""),
 
     ThreespaceCommand("getStreamingLabel", 83, "b", "S"),
-    ThreespaceCommand("getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
+    ThreespaceCommand("generateStreamingPacket", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
     ThreespaceCommand("startStreaming", THREESPACE_START_STREAMING_COMMAND_NUM, "", ""),
     ThreespaceCommand("stopStreaming", THREESPACE_STOP_STREAMING_COMMAND_NUM, "", ""),
     ThreespaceCommand("pauseLogStreaming", 87, "b", ""),
