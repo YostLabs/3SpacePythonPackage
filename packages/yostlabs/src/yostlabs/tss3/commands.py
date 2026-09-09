@@ -316,6 +316,9 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
 
     ThreespaceCommand("getMotionlessConfidenceFactor", 45, "", "f"),
 
+    ThreespaceCommand("getTemperatureCelsiusById", 46, "b", "f"),
+    ThreespaceCommand("getTemperatureFahrenheitById", 47, "b", "f"),
+
     ThreespaceCommand("correctRawGyroData", 48, "fffb", "fff"),
     ThreespaceCommand("correctRawAccelData", 49, "fffb", "fff"),
     ThreespaceCommand("correctRawMagData", 50, "fffb", "fff"),
@@ -456,6 +459,8 @@ class StreamableCommands(Enum):
     GetTemperatureCelsius = 43
     GetTemperatureFahrenheit = 44
     GetMotionlessConfidenceFactor = 45
+    GetTemperatureCelsiusById = 46
+    GetTemperatureFahrenheitById = 47
 
     GetNormalizedGyroRate = 51
     GetNormalizedAccelVec = 52
