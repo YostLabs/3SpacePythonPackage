@@ -1,252 +1,120 @@
-from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
-from yostlabs.tss3.api import ThreespaceSensor
-from yostlabs.tss3.errors import InvalidKeyError, UnsupportedTestError
-from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus, StreamableCommands, threespace_command_get
+from collections import deque
 from typing import Any
 import time
+
+from yostlabs.tss3.utils.tests.base import SensorTest, Busy, step
+from yostlabs.tss3.utils.tests.cli import run_cli, main
+from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.errors import UnsupportedTestError
+from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus, StreamableCommands, threespace_command_get
 
 import logging
 logger = logging.getLogger(__name__)
 
-class ButtonTestState:
-    Inactive = 0
-    AwaitingButtonHeld = 1
 
-    AwaitingButtonRelease = 2
-    Finished = 3
+class ButtonTest(SensorTest):
+    """
+    To pass this test, the operator must hold the button down for 2 seconds, and then release it for 2 seconds.
+    Each stage fails if 10 seconds elapse without it finishing.
+    The button state is streamed, so very quick blips in the button state are not missed.
+    """
 
-class ButtonTest(SensorTestBase):
-    """
-    To pass this test, the user must hold the button down for 2 seconds,
-    and then release it for 2 seconds. The test will fail if 10 seconds elapse
-    without the process finishing. Alternatively, the test can be fail()ed early
-    """
+    id = "button"
+    name = "Button"
+    stop_on_failure = True
 
     HOLD_TIME = 2.0
     RELEASE_TIME = 2.0
     TIMEOUT = 10.0
 
     def __init__(self, sensor: ThreespaceSensor, streaming_manager: ThreespaceStreamingManager = None):
-        super().__init__(sensor)
-        self.cache = {}
-        self.was_streaming_enabled = False
+        super().__init__(sensor, streaming_manager)
+        self._samples: deque[tuple[float, bool]] = deque()   # (sensor time in seconds, pressed), oldest first
+        self._time_offset: float = None
+        self._pressed = False                                 # Treat the button as initially not pressed
+        self._streaming_reset = False
 
-        #Streaming to lessen the chance of very quick blips in button state being missed.
-        self.streaming_manager = streaming_manager
-        if self.streaming_manager is None:
-            self.streaming_manager = ThreespaceStreamingManager(sensor)
-        
-        self.state = ButtonTestState.Inactive
-        self.previous_button_state = False #Treat button as initially not pressed
-
-        self.result: dict[str, TestResult] = {
-            "held": TestResult("button", "held"),
-            "released": TestResult("button", "released"),
-        }
-
-        self.button_state_changed_time = None
-        self.start_time = None
-        self.time_offset = None
-        self.last_time = None
-
-
-    def start(self):
+    @step("Hold the button")
+    def held(self):
         if not self.sensor.has_command(threespace_command_get(StreamableCommands.GetButtonState.value)):
             raise UnsupportedTestError("Sensor does not support button state command.")
-        
-        #This is done so that the button readings can be verified 
-        #without the button triggering any other actions on the sensor.
-        self.__disable_button_interactions()
-        
-        self.streaming_manager.register_command(self, StreamableCommands.GetButtonState, immediate_update=False)
-        self.streaming_manager.register_command(self, StreamableCommands.GetTimestamp)
-        self.streaming_manager.register_callback(self.__streaming_callback, hz=100)
 
-        self.was_streaming_enabled = self.streaming_manager.enabled
-        if not self.was_streaming_enabled:
-            self.streaming_manager.enable()
+        self._disable_button_actions()
+        self.start_streaming([(StreamableCommands.GetButtonState, None), (StreamableCommands.GetTimestamp, None)],
+                             self._on_streaming_data, hz=100)
+        self.check().add_criteria("hold_time_s", self.HOLD_TIME)
+        yield from self._await_button(True, self.HOLD_TIME, "Hold the button down for 2 seconds.")
 
-        self.state = ButtonTestState.AwaitingButtonHeld
-        self.result["held"].add_criteria("hold_time_s", self.HOLD_TIME)
-        self.start_time = time.perf_counter()
-    
-    def update(self):
-        if self.state == ButtonTestState.Inactive or self.state == ButtonTestState.Finished:
-            return
-        self.streaming_manager.update()
-        if not self.state == ButtonTestState.Finished and time.perf_counter() - self.start_time > self.TIMEOUT:
-            logger.warning("Button test timed out after %.1f seconds.", self.TIMEOUT)
-            self.fail("Timed out waiting for button input.")
+    @step("Release the button")
+    def released(self):
+        self.check().add_criteria("release_time_s", self.RELEASE_TIME)
+        yield from self._await_button(False, self.RELEASE_TIME, "Release the button for 2 seconds.")
 
-    def fail(self, message: str = "Test failed."):
-        if self.state in [ButtonTestState.Inactive, ButtonTestState.Finished]:
-            raise Exception("Button test not active.")
-        if self.state == ButtonTestState.AwaitingButtonHeld:
-            self.result["held"].failed(message)
-        elif self.state == ButtonTestState.AwaitingButtonRelease:
-            self.result["released"].failed(message)
-        self.state = ButtonTestState.Finished
-        self.__cleanup()
+    def _await_button(self, pressed: bool, duration: float, text: str):
+        """Passes the active check once the button stays in the pressed state for duration seconds."""
+        result = self.check()
+        deadline = time.perf_counter() + self.TIMEOUT
+        since = None        # Sensor time the button entered the wanted state
+        elapsed = 0.0
+        while True:
+            self.streaming_manager.update()
+            if self._streaming_reset:
+                logger.warning("Streaming reset occurred during button test.")
+                result.failed("Streaming reset occurred.")
+                return
 
-    def cancel(self):
-        self.state = ButtonTestState.Inactive
-        self.__cleanup()
-    
-    @property
-    def button_state(self) -> bool:
-        return self.previous_button_state
-    
-    @property
-    def button_match_time(self) -> float:
-        if self.button_state_changed_time is None:
-            return 0.0
-        return self.last_time - self.button_state_changed_time
+            # Samples left over when the check passes belong to the next stage
+            while self._samples:
+                sample_time, state = self._samples.popleft()
+                if state != self._pressed:
+                    if state:
+                        self.check("held").measurements.setdefault("press_times", []).append(sample_time)
+                    else:
+                        self.check("released").measurements.setdefault("release_times", []).append(sample_time)
+                    self._pressed = state
 
-    @property
-    def desired_button_state(self) -> bool:
-        match self.state:
-            case ButtonTestState.AwaitingButtonHeld:
-                return True
-            case ButtonTestState.AwaitingButtonRelease:
-                return False
-            case _:
-                return None
+                if state != pressed:
+                    since = None
+                    continue
+                if since is None:
+                    since = sample_time
+                elapsed = sample_time - since
+                result.add_measurement("elapsed_time_s", elapsed)
+                if elapsed > duration:
+                    result.passed()
+                    return
 
-    def __streaming_callback(self, status: ThreespaceStreamingStatus, user_data: Any):
+            if time.perf_counter() > deadline:
+                logger.warning("Button test timed out after %.1f seconds.", self.TIMEOUT)
+                result.failed("Timed out waiting for button input.")
+                return
+            yield Busy(text, f"Button {'pressed' if self._pressed else 'released'}, {elapsed:.2f} / {duration:.2f} s")
+
+    def _on_streaming_data(self, status: ThreespaceStreamingStatus, user_data: Any):
         match status:
             case ThreespaceStreamingStatus.Data:
-                time = self.streaming_manager.get_value(StreamableCommands.GetTimestamp)
-                time = time / 1_000_000 #Convert to seconds
-                if self.time_offset is None:
-                    self.time_offset = time
-                time = time - self.time_offset
-                button_state = bool(self.streaming_manager.get_value(StreamableCommands.GetButtonState))
-                self.__update_state(time, button_state)
-                self.previous_button_state = button_state
-                self.last_time = time
+                sample_time = self.streaming_manager.get_value(StreamableCommands.GetTimestamp) / 1_000_000
+                if self._time_offset is None:
+                    self._time_offset = sample_time
+                pressed = bool(self.streaming_manager.get_value(StreamableCommands.GetButtonState))
+                self._samples.append((sample_time - self._time_offset, pressed))
             case ThreespaceStreamingStatus.Reset:
-                self.streaming_manager.unregister_command(self, StreamableCommands.GetButtonState)
-                self.streaming_manager.unregister_command(self, StreamableCommands.GetTimestamp)
-                self.streaming_manager.unregister_callback(self.__streaming_callback)
-                logger.warning("Streaming reset occurred during button test.")
-                self.fail("Streaming reset occurred.")
+                self.stop_streaming()
+                self._streaming_reset = True
 
-    def __update_state(self, time: float, button_state: bool):
-        #Record changes in the button state
-        if button_state != self.previous_button_state:
-            if button_state:
-                self.result["held"].measurements.setdefault("press_times", []).append(time)
-            else:
-                self.result["released"].measurements.setdefault("release_times", []).append(time)
-        
-        match self.state:
-            case ButtonTestState.AwaitingButtonHeld:
-                self.__hold_button_state_update(time, button_state)
-            case ButtonTestState.AwaitingButtonRelease:
-                self.__release_button_state_update(time, button_state)
-            case _:
-                pass
+    def _disable_button_actions(self):
+        """So the button can be tested without it triggering any other actions on the sensor"""
+        if self.sensor.has_setting("power_hold_time"):
+            self.change_settings(power_hold_time=-1)
+        if self.sensor.has_setting("log_start_event"):
+            events = [int(event) for event in self.sensor.readLogStartEvent().strip().split(',')]
+            if 0 in events:   # 0 is the button event
+                self.change_settings(log_start_event="2")   # Command only
 
-    def __hold_button_state_update(self, time_s: float, button_state: bool):
-        if button_state:
-            if self.previous_button_state == False:
-                self.button_state_changed_time = time_s
-            elapsed_time = time_s - self.button_state_changed_time
-            self.result["held"].measurements["elapsed_time_s"] = elapsed_time
-            if elapsed_time > self.HOLD_TIME:
-                self.result["held"].set_status(TestStatus.PASS)
-                self.state = ButtonTestState.AwaitingButtonRelease
-                self.result["released"].add_criteria("release_time_s", self.RELEASE_TIME)
-                self.button_state_changed_time = None
-                self.start_time = time.perf_counter() #Reset the start time for the release test
-        else:
-            self.button_state_changed_time = None
-
-    def __release_button_state_update(self, time: float, button_state: bool):
-        if not button_state:
-            if self.previous_button_state == True:
-                self.button_state_changed_time = time
-            elapsed_time = time - self.button_state_changed_time
-            self.result["released"].measurements["elapsed_time_s"] = elapsed_time
-            if elapsed_time > self.RELEASE_TIME:
-                self.result["released"].set_status(TestStatus.PASS)
-                self.state = ButtonTestState.Finished
-                self.__cleanup()
-        else:
-            self.button_state_changed_time = None
-
-    def __cleanup(self):
-        if self.state == ButtonTestState.Inactive:
-            return
-        
-        if not self.was_streaming_enabled:
-            self.streaming_manager.disable()
-
-        self.streaming_manager.unregister_callback(self.__streaming_callback)
-        self.streaming_manager.unregister_command(self, StreamableCommands.GetButtonState, immediate_update=False)
-        self.streaming_manager.unregister_command(self, StreamableCommands.GetTimestamp)
-        if len(self.cache) > 0:
-            self.sensor.write_settings(**self.cache)
-        
-
-    def __cache_button_interactions(self):
-        self.cache = {}
-        try:
-            hold_time = self.sensor.readPowerHoldTime()
-            self.cache["power_hold_time"] = hold_time
-        except InvalidKeyError:
-            pass
-
-        try:
-            start_events = self.sensor.readLogStartEvent()
-            parsed_events = start_events.strip().split(',')
-            parsed_events = [int(event) for event in parsed_events]
-            if 0 in parsed_events: #0 is the button event
-                self.cache["log_start_event"] = start_events
-        except InvalidKeyError:
-            pass
-
-    def __disable_button_interactions(self):
-        self.__cache_button_interactions()
-        if "power_hold_time" in self.cache:
-            self.sensor.writePowerHoldTime(-1)
-        if "log_start_event" in self.cache:
-            self.sensor.writeLogStartEvent("2") #Command only
 
 def run_test(sensor: ThreespaceSensor):
-    test = ButtonTest(sensor)
-
-    last_state = test.state
-
-    test.start()
-    print("\033[?25l", end="", flush=True) #Hide the cursor in the terminal
-    try:
-        while not test.state == ButtonTestState.Finished:
-            if last_state != test.state:
-                last_state = test.state
-                match test.state:
-                    case ButtonTestState.AwaitingButtonHeld:
-                        print("\nPlease hold the button down for 2 seconds.")
-                    case ButtonTestState.AwaitingButtonRelease:
-                        print("\nPlease release the button for 2 seconds.")
-            print(f"Desired State: {test.desired_button_state}, Button State: {test.button_state}, Match Time: {test.button_match_time:.02f}".ljust(80), end="\r", flush=True)
-            test.update()
-    except KeyboardInterrupt:
-        print("\nTest failed by user.")
-        test.fail("Failed by user.")
-    finally:
-        print("\033[?25h", end="", flush=True) #Show the cursor in the terminal
-        print("\nCompleted button test.")
+    test = run_cli(ButtonTest(sensor))
     return test.overall_success, test.result_flat
 
-def auto_run_test():
-    sensor = ThreespaceSensor()
-    overall_success, results = run_test(sensor)
-    sensor.cleanup()
-    for test in results:
-        print(test)
-    print("Overall success:", overall_success)
-    return overall_success, results
-
 if __name__ == "__main__":
-    auto_run_test()
+    main(ButtonTest)

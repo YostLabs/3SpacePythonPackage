@@ -3,6 +3,8 @@ Runs a SensorTest in the terminal. Each Request is shown as a prompt, the same r
 """
 import sys
 import time
+import queue
+import threading
 
 from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.tss3.utils.tests.base import SensorTest, TestResult, StepState, Request, Message, Confirm, Choice, Busy
@@ -10,10 +12,65 @@ from yostlabs.tss3.utils.tests.base import SensorTest, TestResult, StepState, Re
 import logging
 
 
+class _LineReader:
+    """
+    Reads terminal lines on a background thread, so a Busy request's actions can be picked while the test keeps running.
+    All input goes through it: a second input() call would race the thread for the same lines.
+    """
+
+    def __init__(self):
+        self._lines: queue.Queue[str | None] = queue.Queue()   # None: input has ended
+        self._thread: threading.Thread = None
+
+    def _read_forever(self):
+        try:
+            while True:
+                self._lines.put(input())
+        except EOFError:
+            self._lines.put(None)
+
+    def _start(self):
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._read_forever, daemon=True)
+            self._thread.start()
+
+    def _get(self, timeout: float | None) -> str | None:
+        """A line, or None if none arrived within timeout (0: don't wait). Raises EOFError once input has ended."""
+        self._start()
+        try:
+            line = self._lines.get(timeout=timeout) if timeout else self._lines.get_nowait()
+        except queue.Empty:
+            return None
+        if line is None:
+            self._lines.put(None)   # Keep reporting the end to later reads
+            raise EOFError("Terminal input has ended")
+        return line
+
+    def read(self, prompt: str) -> str:
+        """Waits for a line. Ctrl+C still interrupts it."""
+        print(prompt, end="", flush=True)
+        while (line := self._get(timeout=0.1)) is None:
+            pass
+        return line
+
+    def poll(self) -> str | None:
+        """A line if one was entered, without waiting"""
+        return self._get(timeout=0)
+
+    def clear(self):
+        """Drops lines entered before the current prompt was shown"""
+        if self._thread is None:
+            return
+        while self.poll() is not None:
+            pass
+
+_reader = _LineReader()
+
+
 def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
     """Runs the test to the end, asking the operator in the terminal. Ctrl+C cancels it."""
     announced = set()       # Steps whose title has been printed
-    shown_text = None       # Text of the Busy request already printed
+    shown = None            # The Busy request whose text has been printed
     status_shown = False    # A status line is on screen and needs ending before printing anything else
 
     def end_status():
@@ -37,40 +94,65 @@ def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
             request = test.request
             if not isinstance(request, Busy):
                 end_status()
-                shown_text = None
+                shown = None
+                _reader.clear()
                 test.respond(_ask(request))
             else:
-                if request.text != shown_text:
+                if shown is None or (request.text, request.actions) != (shown.text, shown.actions):
                     end_status()
-                    print(request.text)
-                    shown_text = request.text
+                    print(request.text + _actions_hint(request.actions))
+                    _reader.clear()
+                shown = request
                 if request.status:
                     print(f"  {request.status}".ljust(60), end="\r", flush=True)
                     status_shown = True
-                time.sleep(poll_interval)
-                test.update()
+                action = _pick_action(request.actions, _reader.poll()) if request.actions else None
+                if action is not None:
+                    test.respond(action)
+                else:
+                    time.sleep(poll_interval)
+                    test.update()
             announce_steps()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError) as e:
         test.cancel()
-        print("\nTest cancelled.")
+        print(f"\nTest cancelled{': ' + str(e) if str(e) else ''}.")
     return test
+
+
+def _actions_hint(actions: tuple[str, ...]) -> str:
+    if not actions:
+        return ""
+    if len(actions) == 1:
+        return f" (Enter: {actions[0]})"
+    return " (" + ", ".join(f"{number}: {action}" for number, action in enumerate(actions, 1)) + ", then Enter)"
+
+
+def _pick_action(actions: tuple[str, ...], line: str | None) -> str | None:
+    if line is None:
+        return None
+    if len(actions) == 1:
+        return actions[0]
+    line = line.strip()
+    if line.isdigit() and 1 <= int(line) <= len(actions):
+        return actions[int(line) - 1]
+    return None
 
 
 def _ask(request: Request):
     match request:
         case Confirm():
-            while (answer := input(f"{request.text} (Y/n) ").strip().lower()) not in ("", "y", "n"):
+            while (answer := _reader.read(f"{request.text} (Y/n) ").strip().lower()) not in ("", "y", "n"):
                 pass
             return answer != "n"
         case Choice():
             for number, option in enumerate(request.options, 1):
                 print(f"  {number}. {option}")
             while True:
-                answer = input(f"{request.text} ").strip()
+                answer = _reader.read(f"{request.text} ").strip()
                 if answer.isdigit() and 1 <= int(answer) <= len(request.options):
                     return request.options[int(answer) - 1]
         case Message():
-            input(f"{request.text} (Enter to continue) ")
+            _reader.read(f"{request.text} (Enter to continue) ")
             return None
         case _:
             raise TypeError(f"No terminal prompt for {type(request).__name__}")

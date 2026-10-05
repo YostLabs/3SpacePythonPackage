@@ -1,298 +1,126 @@
-import enum
 import time
 import datetime
 
-from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
-from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError
+from yostlabs.tss3.utils.tests.base import SensorTest, TestStatus, Busy, step
+from yostlabs.tss3.utils.tests.cli import run_cli, main
+from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError, ResponseTimeoutError
+from yostlabs.tss3.errors import SettingError
 
 import logging
 logger = logging.getLogger(__name__)
 
 
-class RTCTestState(enum.Enum):
-    Inactive = 0
-    CheckingComponents = 1
-    SettingRtcSource = 2
-    SettingTime = 3
-    VerifyingTimeChange = 4
-    PerformingReset = 5
-    AwaitingPowerCycle = 6
-    AwaitingPowerCycleReconnect = 7
-    CheckingTimeAfterReset = 8
-    Finished = 9
-
-
-class RTCTest(SensorTestBase):
+class RTCTest(SensorTest):
     """
-    Tests the RTC (Real-Time Clock) functionality of the sensor.
+    Tests the RTC (Real-Time Clock) functionality of the sensor. Any failure stops the test.
 
-    Steps:
     1. Verify the sensor reports an RTC component via readValidComponents().
-    2. If rtc_source is available, cache it and set it to 3 (RTC). Fail if writing errors.
-    3. If utc_offset is available, cache it and set it to 0.
-    4. Set the sensor date/time to the current UTC time.
-    5. Wait 1 second and verify the sensor time advanced by ~1 second.
-    6. Record the current time then perform a hard reset (timeout=5).
-       If hard reset is unsupported (InvalidKeyError), the user is prompted to
-       power-cycle the sensor. The test waits for the sensor to disconnect and
-       reconnect.
-    7. After reconnect, verify the sensor datetime increased by approximately
+    2. If rtc_source is available, set it to 3 (RTC). Fail if writing errors.
+    3. Set utc_offset to 0 if available, and the sensor date/time to the current UTC time.
+       Wait 1 second and verify the sensor time advanced by ~1 second.
+    4. Hard reset the sensor. If hard reset is unsupported (InvalidKeyError), the operator
+       power cycles the sensor instead. Verify the sensor datetime increased by approximately
        the elapsed reset duration.
-
-    Any failure short-circuits all remaining steps.
     """
+
+    id = "rtc"
+    name = "Clock"
+    stop_on_failure = True
 
     TIME_CHANGE_TEST_DURATION = 1.0  # Seconds
 
-    def __init__(self, sensor: ThreespaceSensor):
-        super().__init__(sensor)
-        self.state = RTCTestState.Inactive
-
-        self._settings_cache: dict = {}
-
-        self.result: dict[str, TestResult] = {
-            "valid_components": TestResult("rtc", "valid_components"),
-            "rtc_source": TestResult("rtc", "rtc_source"),
-            "time_change": TestResult("rtc", "time_change"),
-            "reset": TestResult("rtc", "reset"),
-        }
-
-        self._time_before_wait: list[int] | None = None
-        self._wait_start: float | None = None
-        self._pre_reset_datetime: list[int] | None = None
-        self._reset_start_time: float | None = None
-
-    def start(self):
-        if self.state != RTCTestState.Inactive:
-            raise Exception("RTC test already started.")
-        self.__go_next_state()
-
-    def cancel(self):
-        if self.state == RTCTestState.Inactive:
-            return
-        self.state = RTCTestState.Inactive
-        self.__cleanup()
-
-    def update(self):
-        if self.state in (RTCTestState.Inactive, RTCTestState.Finished):
-            return
-        match self.state:
-            case RTCTestState.CheckingComponents:
-                self.__update_checking_components()
-            case RTCTestState.SettingRtcSource:
-                self.__update_setting_rtc_source()
-            case RTCTestState.SettingTime:
-                self.__update_setting_time()
-            case RTCTestState.VerifyingTimeChange:
-                self.__update_verifying_time_change()
-            case RTCTestState.PerformingReset:
-                self.__update_performing_reset()
-            case RTCTestState.AwaitingPowerCycle:
-                self.__update_awaiting_power_cycle()
-            case RTCTestState.AwaitingPowerCycleReconnect:
-                self.__update_awaiting_power_cycle_reconnect()
-            case RTCTestState.CheckingTimeAfterReset:
-                self.__update_checking_time_after_reset()
-
-    # ------------------------------------------------------------------
-    # Private state handlers
-    # ------------------------------------------------------------------
-
-    def __update_checking_components(self):
+    @step("Check for an RTC")
+    def valid_components(self):
         components = self.sensor.readValidComponents()
-        result = self.result["valid_components"]
-        result.measurements["components"] = components
-        component_list = [c.strip() for c in components.split(',')]
-        has_rtc = any(c.startswith("RTC") for c in component_list)
-        if not has_rtc:
-            self.__fail(result, "Sensor does not report an RTC component.")
+        self.check().add_measurement("components", components)
+        if any(c.strip().startswith("RTC") for c in components.split(',')):
+            self.check().passed()
         else:
-            result.set_status(TestStatus.PASS)
-            self.__go_next_state()
+            self.check().failed("Sensor does not report an RTC component.")
 
-    def __update_setting_rtc_source(self):
-        result = self.result["rtc_source"]
+    @step("Use the RTC as the time source")
+    def rtc_source(self):
         if not self.sensor.has_setting("rtc_source"):
-            result.set_status(TestStatus.NA)
-            self.__go_next_state()
+            self.check().set_status(TestStatus.NA)
             return
-
-        self._settings_cache["rtc_source"] = self.sensor.readRtcSource()
-        err = self.sensor.writeRtcSource(3)
-        if err != 0:
-            self.__fail(result, f"Failed to write rtc_source: error {err}.")
+        try:
+            self.change_settings(rtc_source=3)
+        except SettingError as e:
+            self.check().failed(f"Failed to write rtc_source: {e}")
             return
+        self.check().passed()
 
-        result.set_status(TestStatus.PASS)
-        self.__go_next_state()
-
-    def __update_setting_time(self):
+    @step("Check the clock advances")
+    def time_change(self):
         if self.sensor.has_setting("utc_offset"):
-            self._settings_cache["utc_offset"] = self.sensor.readUtcOffset()
-            self.sensor.writeUtcOffset(0)
-        
+            self.change_settings(utc_offset=0)
         now = datetime.datetime.now(datetime.timezone.utc)
-        self.sensor.setDateTime(now.year, now.month, now.day,
-                                now.hour, now.minute, now.second)
-        self._time_before_wait = self.sensor.getDateTime().data
-        self.result["time_change"].measurements["start_time"] = self._time_before_wait
-        self._wait_start = time.perf_counter()
-        self.__go_next_state()
+        self.sensor.setDateTime(now.year, now.month, now.day, now.hour, now.minute, now.second)
+        start = self.sensor.getDateTime().data
+        wait_start = time.perf_counter()
+        yield from self.wait(self.TIME_CHANGE_TEST_DURATION, "Letting the clock run.")
 
-    def __update_verifying_time_change(self):
-        if time.perf_counter() - self._wait_start < RTCTest.TIME_CHANGE_TEST_DURATION:
-            return
+        end = self.sensor.getDateTime().data
+        elapsed = time.perf_counter() - wait_start
+        delta = abs(_datetime_to_seconds(end) - _datetime_to_seconds(start))
 
-        after_time = self.sensor.getDateTime().data
-        elapsed_seconds = time.perf_counter() - self._wait_start
-        before_total = self.__datetime_to_seconds(self._time_before_wait)
-        after_total = self.__datetime_to_seconds(after_time)
-        delta = abs(after_total - before_total)
-
-        result = self.result["time_change"]
-        result.measurements["end_time"] = after_time
-        result.measurements["delta_s"] = delta
-        result.add_criteria("expected_change_s", elapsed_seconds)
-        success = RTCTest.TIME_CHANGE_TEST_DURATION <= delta <= (elapsed_seconds + 1)  # Allow some tolerance based on actual elapsed time
-        if not success:
-            self.__fail(result, f"Sensor time changed by {delta:.2f}s, expected ~{elapsed_seconds:.2f}s.")
+        result = self.check()
+        result.add_measurement("start_time", start)
+        result.add_measurement("end_time", end)
+        result.add_measurement("delta_s", delta)
+        result.add_criteria("expected_change_s", elapsed)
+        if self.TIME_CHANGE_TEST_DURATION <= delta <= elapsed + 1:   # Whole seconds, so allow 1 s of rounding
+            result.passed()
         else:
-            result.set_status(TestStatus.PASS)
-            self.__go_next_state()
+            result.failed(f"Sensor time changed by {delta:.2f}s, expected ~{elapsed:.2f}s.")
 
-    def __update_performing_reset(self):
-        self._pre_reset_datetime = self.sensor.getDateTime().data
-        self._reset_start_time = time.perf_counter()
+    @step("Check the clock keeps time through a reset")
+    def reset(self):
+        result = self.check()
+        before = self.sensor.getDateTime().data
+        reset_start = time.perf_counter()
 
         try:
             self.sensor.hardReset(timeout=5)
+            result.add_measurement("method", "hard_reset")
         except InvalidKeyError:
-            self.result["reset"].measurements["method"] = "power_cycle"
-            self.state = RTCTestState.AwaitingPowerCycle
-            self.update()
-            return
-        except Exception as e:
-            logger.exception("Exception occurred performing RTC reset.")
-            self.__fail(self.result["reset"], str(e))
-            return
+            result.add_measurement("method", "power_cycle")
+            yield from self._power_cycle()
 
-        self.result["reset"].measurements["method"] = "hard_reset"
-        self.__go_next_state()
+        elapsed = time.perf_counter() - reset_start
+        after = self.sensor.getDateTime().data
+        time_diff = _datetime_to_seconds(after) - _datetime_to_seconds(before)
 
-    def __update_awaiting_power_cycle(self):
-        # Poll until the sensor disconnects (user unplugs it)
-        try:
-            self.sensor.getDateTime()
-        except OSError:
-            self.state = RTCTestState.AwaitingPowerCycleReconnect
-            self.update()
-
-    def __update_awaiting_power_cycle_reconnect(self):
-        success = self.sensor.attempt_reconnect(timeout=0)
-        if success:
-            self.__go_next_state()
-
-    def __update_checking_time_after_reset(self):
-        elapsed = time.perf_counter() - self._reset_start_time
-        after_datetime = self.sensor.getDateTime().data
-
-        pre_total = self.__datetime_to_seconds(self._pre_reset_datetime)
-        after_total = self.__datetime_to_seconds(after_datetime)
-        time_diff = after_total - pre_total
-
-        result = self.result["reset"]
-        result.measurements["pre_reset_datetime"] = self._pre_reset_datetime
-        result.measurements["post_reset_datetime"] = after_datetime
-        result.measurements["time_diff_s"] = time_diff
+        result.add_measurement("pre_reset_datetime", before)
+        result.add_measurement("post_reset_datetime", after)
+        result.add_measurement("time_diff_s", time_diff)
         result.add_criteria("expected_elapsed_s", elapsed)
+        if 0 <= time_diff <= elapsed + 1:
+            result.passed()
+        else:
+            result.failed(f"Sensor time after reset differed by {time_diff:.2f}s, expected ~{elapsed:.2f}s.")
 
-        success = (0 <= time_diff <= (elapsed + 1))
-        if not success:
-            self.__fail(result, f"Sensor time after reset differed by {time_diff:.2f}s, expected ~{elapsed:.2f}s.")
-            return
-        
-        result.set_status(TestStatus.PASS)
-        self.__go_next_state()
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def __fail(self, result: TestResult, message: str | None = None):
-        result.failed(message)
-        self.state = RTCTestState.Finished
-        self.__cleanup()
-
-    def __datetime_to_seconds(self, dt: list[int]) -> float:
-        """Convert a [year, month, day, hour, minute, second] list to a POSIX timestamp."""
-        year, month, day, hour, minute, second = dt
-        return datetime.datetime(year, month, day, hour, minute, second,
-                                 tzinfo=datetime.timezone.utc).timestamp()
-
-    def __go_next_state(self):
-        match self.state:
-            case RTCTestState.Inactive:
-                self.state = RTCTestState.CheckingComponents
-            case RTCTestState.CheckingComponents:
-                self.state = RTCTestState.SettingRtcSource
-            case RTCTestState.SettingRtcSource:
-                self.state = RTCTestState.SettingTime
-            case RTCTestState.SettingTime:
-                self.state = RTCTestState.VerifyingTimeChange
-            case RTCTestState.VerifyingTimeChange:
-                self.state = RTCTestState.PerformingReset
-            case RTCTestState.PerformingReset:
-                self.state = RTCTestState.CheckingTimeAfterReset
-            case RTCTestState.AwaitingPowerCycleReconnect:
-                self.state = RTCTestState.CheckingTimeAfterReset
-            case RTCTestState.CheckingTimeAfterReset:
-                self.state = RTCTestState.Finished
-                self.__cleanup()
-            case _:
-                raise Exception(f"Invalid state for __go_next_state: {self.state}")
-
-        self.update()
-
-    def __cleanup(self):
-        if self._settings_cache:
+    def _power_cycle(self):
+        """For sensors without hard reset: the operator unplugs the sensor and plugs it back in."""
+        while True:
             try:
-                self.sensor.write_settings(**self._settings_cache)
-            except Exception:
-                pass
+                self.sensor.getDateTime()
+            except (OSError, ResponseTimeoutError):
+                break
+            yield Busy("Hard reset is not supported on this sensor. Unplug the sensor to power cycle it.")
+        while not self.sensor.attempt_reconnect(timeout=0):
+            yield Busy("Plug the sensor back in.")
+
+
+def _datetime_to_seconds(dt: list[int]) -> float:
+    """Convert a [year, month, day, hour, minute, second] list to a POSIX timestamp."""
+    year, month, day, hour, minute, second = dt
+    return datetime.datetime(year, month, day, hour, minute, second, tzinfo=datetime.timezone.utc).timestamp()
 
 
 def run_test(sensor: ThreespaceSensor):
-    test = RTCTest(sensor)
-    test.start()
-
-    last_state = test.state
-    try:
-        while test.state != RTCTestState.Finished:
-            if test.state != last_state:
-                if test.state == RTCTestState.AwaitingPowerCycle:
-                    print("Hard reset is not supported on this sensor.")
-                    print("Please disconnect the sensor and plug it back in (power cycle it).")
-                elif test.state == RTCTestState.AwaitingPowerCycleReconnect:
-                    print("Sensor disconnected. Please reconnect the sensor to continue the test.")
-                last_state = test.state
-
-            test.update()
-            time.sleep(0.05)
-    except KeyboardInterrupt:
-        test.cancel()
-        print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result_flat
-
+    test = run_cli(RTCTest(sensor))
     return test.overall_success, test.result_flat
 
-def auto_run_test():
-    sensor = ThreespaceSensor()
-    overall_success, results = run_test(sensor)
-    sensor.cleanup()
-    for test in results:
-        print(test)
-    print("Overall success:", overall_success)
-    return overall_success, results
-
 if __name__ == "__main__":
-    auto_run_test()
+    main(RTCTest)

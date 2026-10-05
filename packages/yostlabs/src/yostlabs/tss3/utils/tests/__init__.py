@@ -5,6 +5,7 @@ from yostlabs.tss3.utils.tests import (
     test_gps,
     test_led,
     test_rtc,
+    test_sd,
     test_self,
     test_overall,
 )

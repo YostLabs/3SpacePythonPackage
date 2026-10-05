@@ -1,9 +1,7 @@
-import enum
 import time
 
-from yostlabs.tss3.utils.tests.base import SensorTestBase
-from yostlabs.tss3.utils.file_explorer import SensorFileExplorer
-from yostlabs.tss3.utils.mass_storage import find_removable_volumes
+from yostlabs.tss3.utils.tests.base import SensorTest, Busy, Confirm, step
+from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 
 # FatFs result codes returned in the response header status field
@@ -12,240 +10,79 @@ FR_WRITE_PROTECTED  = -10   # The physical drive is write protected
 FR_NOT_ENABLED      = -12   # The volume has no work area (SD not present / not mounted)
 
 
-class SdTestState(enum.Enum):
-    Inactive             = 0
-    CheckingSdPresent    = 1
-    AwaitingSdInsert     = 2
-    StartingDataLogging  = 3
-    AwaitingWriteUnlock  = 4
-    Logging              = 5
-    Finished             = 6
-
-
-class SdTest(SensorTestBase):
+class SdTest(SensorTest):
     """
-    Tests the SD card hardware on the sensor.
+    Tests the SD card hardware on the sensor. Any failure stops the test.
 
-    Steps:
-    1. Verify the SD card is present.
-       If absent, prompt the user to insert it and poll until detected.
-       Call fail_current_stage() to abort at any point.
-    2. Start a datalogging session.
-       - If header status is FR_WRITE_PROTECTED (-10): prompt user to eject the card
-         from the OS, then call notify_write_lock_removed() to retry.
-       - Any other non-zero status is recorded and the test fails.
+    1. Verify the SD card is present. If absent, the operator inserts it.
+    2. Start a datalogging session. If the card is write protected (FR_WRITE_PROTECTED), the operator
+       ejects it from the OS and retries, or gives up. Any other non-zero status fails the test.
     3. Allow logging to run for 2 seconds, then stop.
     """
 
+    id = "sd"
+    name = "SD Card"
+    stop_on_failure = True
+
     EXPECTED_LOG_DURATION = 2.0  # seconds
 
-    def __init__(self, sensor: ThreespaceSensor):
-        super().__init__(sensor)
-        self.state = SdTestState.Inactive
-        self.result = {
-            "sd_present": {
-                "success": None,
-            },
-            "start_logging": {
-                "success": None,
-                "status": None,
-            },
-            "stop_logging": {
-                "success": None,
-                "status": None
-            },
-        }
-        self.__settings_cache = {}
-        self.__log_start_time: float | None = None
+    def __init__(self, sensor: ThreespaceSensor, streaming_manager=None):
+        super().__init__(sensor, streaming_manager)
+        self._logging = False
 
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
+    @step("Check for an SD card")
+    def sd_present(self):
+        self.change_settings(header_status=1)   # The SD commands report their result in the header status
+        while not self._is_sd_present():
+            yield Busy("SD card not detected. Insert the SD card.")
+        self.check().passed()
 
-    def start(self):
-        if self.state != SdTestState.Inactive:
-            raise Exception("SD test already started.")
-        self.__settings_cache = self.sensor.read_settings("header_status", 
-                                                          "log_start_event", "log_stop_event", "log_stop_count",
-                                                          "log_slots", "log_rate",
-                                                          "log_style", "log_base_filename",
-                                                          "log_folder_mode", "log_data_mode", "log_output_settings")
+    @step("Start logging")
+    def start_logging(self):
+        # Command only, Count, Continuous, Session#, Ascii
+        self.change_settings(log_start_event=2, log_stop_event=4, log_stop_count=int(50 * self.EXPECTED_LOG_DURATION),
+                             log_slots=[StreamableCommands.GetTimestamp, StreamableCommands.GetUntaredOrientation],
+                             log_rate=100, log_style=0, log_base_filename="sd_test",
+                             log_folder_mode=0, log_data_mode=1, log_output_settings=1)
+        while True:
+            status = self.sensor.startDataLogging().header.status
+            self.check().add_measurement("status", status)
+            if status == FR_OK:
+                self._logging = True
+                self.check().passed()
+                return
+            if status != FR_WRITE_PROTECTED:
+                self.check().failed(f"Failed to start logging: status {status}.")
+                return
+            retry = yield Confirm("The SD card is write protected. Eject it from the computer to clear "
+                                  "the write protection, then retry. Retry?")
+            if not retry:
+                self.check().failed("SD card is write protected.")
+                return
 
-        self.sensor.writeHeaderStatusEnabled(True)
-        self.__go_next_state()
-
-    def cancel(self):
-        if self.state == SdTestState.Inactive:
-            return
-        self.state = SdTestState.Inactive
-        self.__cleanup()
-
-    def update(self):
-        if self.state in (SdTestState.Inactive, SdTestState.Finished):
-            return
-        match self.state:
-            case SdTestState.CheckingSdPresent:
-                self.__update_checking_sd_present()
-            case SdTestState.AwaitingSdInsert:
-                self.__update_awaiting_sd_insert()
-            case SdTestState.StartingDataLogging:
-                self.__update_starting_data_logging()
-            case SdTestState.AwaitingWriteUnlock:
-                pass  # Waiting for notify_write_lock_removed()
-            case SdTestState.Logging:
-                self.__update_logging()
-
-    def fail_current_stage(self):
-        """
-        Call at any time to immediately fail the current stage and finish the test.
-        Useful when a user-interaction step (e.g. inserting the SD card) cannot be
-        completed and the operator wants to abort gracefully.
-        """
-        if self.state in (SdTestState.Inactive, SdTestState.Finished):
-            return
-        match self.state:
-            case SdTestState.AwaitingSdInsert:
-                self.result["sd_present"]["success"] = False
-            case SdTestState.StartingDataLogging | SdTestState.AwaitingWriteUnlock:
-                self.result["start_logging"]["success"] = False
-            case SdTestState.Logging:
-                self.result["stop_logging"]["success"] = False
-        self.overall_success = False
-        self.state = SdTestState.Finished
-        self.__cleanup()
-
-    def notify_write_lock_removed(self):
-        """
-        Call after the user has ejected the SD card from the OS to clear its
-        write-protection state.  The test will then retry starting the
-        datalogging session.
-        """
-        if self.state != SdTestState.AwaitingWriteUnlock:
-            return
-        self.state = SdTestState.StartingDataLogging
-        self.update()
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def __is_sd_present(self) -> bool:
-        result = self.sensor.getNextDirectoryItem()
-        return result.header.status != FR_NOT_ENABLED
-
-    # ------------------------------------------------------------------
-    # Private state handlers
-    # ------------------------------------------------------------------
-
-    def __update_checking_sd_present(self):
-        if self.__is_sd_present():
-            self.result["sd_present"]["success"] = True
-            self.__go_next_state()
-        else:
-            # SD not present — move to the user-interaction wait state
-            self.state = SdTestState.AwaitingSdInsert
-
-    def __update_awaiting_sd_insert(self):
-        if self.__is_sd_present():
-            self.result["sd_present"]["success"] = True
-            self.__go_next_state()
-        # Otherwise keep polling; caller should call fail_current_stage() to abort.
-
-    def __update_starting_data_logging(self):
-        result = self.sensor.startDataLogging()
-        status = result.header.status
-
-        #Command Only, Count, Continous, Session#, Ascii
-        self.sensor.write_settings(log_start_event=2, log_stop_event=4, log_stop_count=int(50 * self.EXPECTED_LOG_DURATION), 
-                                   log_slots=[StreamableCommands.GetTimestamp, StreamableCommands.GetUntaredOrientation], 
-                                   log_rate=100, log_style=0, log_base_filename="sd_test",
-                                   log_folder_mode=0, log_data_mode=1, log_output_settings=1)
-
+    @step("Log for 2 seconds")
+    def stop_logging(self):
+        yield from self.wait(self.EXPECTED_LOG_DURATION, "Logging to the SD card.")
+        self.sensor.getLoggingStatus()
+        status = self.sensor.stopDataLogging().header.status
+        self._logging = False
+        self.check().add_measurement("status", status)
         if status == FR_OK:
-            self.result["start_logging"]["success"] = True
-            self.result["start_logging"]["status"] = status
-            self.__log_start_time = time.perf_counter()
-            self.__go_next_state()
-        elif status == FR_WRITE_PROTECTED:
-            # Card is write-protected — ask user to eject from OS and unlock it
-            self.result["start_logging"]["status"] = status
-            self.state = SdTestState.AwaitingWriteUnlock
+            self.check().passed()
         else:
-            # Any other error is a hard failure
-            self.result["start_logging"]["success"] = False
-            self.result["start_logging"]["status"] = status
-            self.overall_success = False
-            self.state = SdTestState.Finished
-            self.__cleanup()
+            self.check().failed(f"Failed to stop logging: status {status}.")
 
-    def __update_logging(self):
-        elapsed_time = time.perf_counter() - self.__log_start_time
+    def cleanup(self):
+        if self._logging:   # Ended while logging, Ex: cancelled
+            self.sensor.stopDataLogging()
 
-        if time.perf_counter() - self.__log_start_time >= self.LOG_DURATION:
-            self.sensor.getLoggingStatus()
-            result = self.sensor.stopDataLogging()
-            self.result["stop_logging"]["success"] = (result.header.status == 0)
-            self.result["stop_logging"]["status"] = result.header.status
-            self.__go_next_state()
-
-    # ------------------------------------------------------------------
-    # Cleanup & state transitions
-    # ------------------------------------------------------------------
-
-    def __cleanup(self):
-        if self.__settings_cache:
-            self.sensor.write_settings(**self.__settings_cache)
-
-    def __go_next_state(self):
-        match self.state:
-            case SdTestState.Inactive:
-                self.state = SdTestState.CheckingSdPresent
-            case SdTestState.CheckingSdPresent:
-                self.state = SdTestState.StartingDataLogging
-            case SdTestState.AwaitingSdInsert:
-                self.state = SdTestState.StartingDataLogging
-            case SdTestState.StartingDataLogging:
-                self.state = SdTestState.Logging
-            case SdTestState.Logging:
-                self.state = SdTestState.Finished
-                self.__cleanup()
-            case _:
-                raise Exception(f"Invalid state for going to next state: {self.state}")
-
-        self.update()
+    def _is_sd_present(self) -> bool:
+        return self.sensor.getNextDirectoryItem().header.status != FR_NOT_ENABLED
 
 
 def run_test(sensor: ThreespaceSensor):
-    test = SdTest(sensor)
-    last_state = test.state
-    test.start()
-    try:
-        while test.state != SdTestState.Finished:
-            if test.state != last_state:
-                if test.state == SdTestState.AwaitingSdInsert:
-                    print("SD card not detected. Please insert the SD card.")
-                elif test.state == SdTestState.AwaitingWriteUnlock:
-                    print("SD card is write-protected. Please eject the card from the OS to "
-                          "clear write protection, then call test.notify_write_lock_removed().")
-                last_state = test.state
-
-            test.update()
-    except KeyboardInterrupt:
-        test.cancel()
-        print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result
-
-    return test.overall_success, test.result
-
-
-def auto_run_test():
-    sensor = ThreespaceSensor()
-    overall_success, results = run_test(sensor)
-    sensor.cleanup()
-    print(results)
-    print(f"Overall success: {overall_success}")
-    return overall_success, results
-
+    test = run_cli(SdTest(sensor))
+    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
-    auto_run_test()
+    main(SdTest)

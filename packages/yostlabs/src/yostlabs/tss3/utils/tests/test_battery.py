@@ -35,9 +35,9 @@ class BatteryTest(SensorTest):
         self.change_settings(debug_mode=0,
                              debug_level=THREESPACE_DEBUG_LEVEL_ERR,
                              debug_module=THREESPACE_DEBUG_MODULE_BATTERY)
-        self._read_debug_messages()   # Discard old messages
+        self.read_debug_messages()   # Discard old messages
         self.sensor.selfTest()
-        errors = self._read_debug_messages()
+        errors = self.read_debug_messages()
         if errors:
             self.check().add_measurement("errors", errors).failed()
         else:
@@ -92,11 +92,7 @@ class BatteryTest(SensorTest):
             result.passed()
 
     def cleanup(self):
-        self._read_debug_messages()
-
-    def _read_debug_messages(self) -> list[str]:
-        count = self.sensor.getNumDebugMessages().data
-        return [self.sensor.getOldestDebugMessage().data.strip() for _ in range(count)]
+        self.read_debug_messages()   # Discard the messages produced by the test
 
 
 def run_test(sensor: ThreespaceSensor):

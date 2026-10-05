@@ -1,4 +1,5 @@
 import json
+import time
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
@@ -6,8 +7,8 @@ from enum import Enum
 from typing import Any, Callable, ClassVar, Generator
 
 from yostlabs.tss3 import ThreespaceSensor
-from yostlabs.tss3.errors import SettingError
-from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager
+from yostlabs.tss3.errors import SettingError, UnsupportedTestError
+from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, StreamableCommands
 
 import logging
 logger = logging.getLogger(__name__)
@@ -164,6 +165,11 @@ class Request:
     # Blocking requests wait for respond(). Non-blocking ones resume the step on every update().
     blocking: ClassVar[bool] = True
 
+    @property
+    def answerable(self) -> bool:
+        """Whether respond() may be called while this is the active request"""
+        return self.blocking
+
     def validate(self, answer: Any):
         """Raises ValueError if answer is not a valid answer to this request."""
         if answer is not None:
@@ -198,11 +204,21 @@ class Choice(Request):
 class Busy(Request):
     """
     The test is working, or waiting on something it detects itself (Ex: the sensor being unplugged).
-    Not answered. The step resumes on each update() and yields again to keep waiting.
+    The step resumes on each update() and yields again to keep waiting, so the yield gives None.
+    The operator may also pick one of the actions at any time. The yield then gives that action.
     """
-    status: str = ""    # Live detail, Ex: "Held 1.4 / 2.0 s"
+    status: str = ""                    # Live detail, Ex: "Held 1.4 / 2.0 s"
+    actions: tuple[str, ...] = ()       # Ex: ("Flipped",)
 
     blocking: ClassVar[bool] = False
+
+    @property
+    def answerable(self) -> bool:
+        return bool(self.actions)
+
+    def validate(self, answer: Any):
+        if answer not in self.actions:
+            raise ValueError(f"{answer!r} is not one of {self.actions}")
 
 
 # ----------------------------------------------------------------------
@@ -213,8 +229,12 @@ class StepState(str, Enum):
     PENDING = "pending"
     ACTIVE = "active"
     DONE = "done"
-    SKIPPED = "skipped"     # Never reached: an earlier step stopped the test, or it was cancelled
+    SKIPPED = "skipped"     # Not run: skipped by the test, an earlier step stopped the test, or it was cancelled
     ERROR = "error"         # Raised an exception
+
+
+class SkipStep(Exception):
+    """Raised by a step that does not apply, Ex: the barometer steps on a sensor without a barometer."""
 
 
 class Step:
@@ -227,20 +247,23 @@ class Step:
         self.func = func
         self.name = func.__name__
         self.title = title
-        self.check = check or self.name   # The check this step reports into
+        self.check = check   # The check this step reports into, None if it creates its own
 
     def __repr__(self):
         return f"Step({self.name!r})"
 
 
-def step(title: str, check: str | None = None):
+_METHOD_NAME = object()
+
+def step(title: str, check: str | None = _METHOD_NAME):
     """
     Declares a SensorTest method as a step.
     title: shown to the operator.
     check: the check (TestResult) this step reports into. Defaults to the method name.
            Several steps may share one, Ex: the battery test's disconnect and reconnect steps.
+           None: the step creates its own checks in test.results, Ex: one per detected component.
     """
-    return lambda func: Step(func, title, check)
+    return lambda func: Step(func, title, func.__name__ if check is _METHOD_NAME else check)
 
 
 # ----------------------------------------------------------------------
@@ -256,13 +279,14 @@ class SensorTest:
             if test.request.blocking:
                 test.respond(<the operator's answer to test.request>)
             else:
-                test.update()
+                test.update()   # Or test.respond(<action>) when the operator picks one of the Busy request's actions
 
     test.step is the active step, test.step_states the progress of every step.
     The test only talks to the sensor inside these calls.
 
-    However the test ends (finished, failed, raised or cancelled), every setting changed through
-    change_settings() is restored, then cleanup() is called.
+    However the test ends (finished, failed, raised or cancelled), streaming started through start_streaming()
+    is stopped, cleanup() is called, then every setting changed through change_settings() is restored.
+    A step raising UnsupportedTestError ends the test, marking every check not yet run as not applicable.
     """
 
     id: ClassVar[str]                           # Identifies the test in results, Ex: "led"
@@ -278,8 +302,9 @@ class SensorTest:
         self.sensor = sensor
         self._streaming_manager = streaming_manager
 
-        # One result per check, created up front so checks never reached still appear as not run
-        self.results: dict[str, TestResult] = {s.check: TestResult(self.id, s.check) for s in self.steps}
+        # One result per check, created up front so checks never reached still appear as not run.
+        # Steps without a check of their own add theirs as they go, keyed however suits them.
+        self.results: dict[Any, TestResult] = {s.check: TestResult(self.id, s.check) for s in self.steps if s.check is not None}
         self.step_states: dict[Step, StepState] = {s: StepState.PENDING for s in self.steps}
         self.step: Step | None = None           # The active step
         self.request: Request | None = None     # What the active step is waiting on
@@ -288,6 +313,8 @@ class SensorTest:
 
         self._settings_cache: dict[str, Any] = {}
         self._run: Generator | None = None
+        self._streaming_callback: Callable | None = None
+        self._enabled_streaming = False
 
     @property
     def streaming_manager(self) -> ThreespaceStreamingManager:
@@ -319,8 +346,8 @@ class SensorTest:
         self._resume(None)
 
     def respond(self, answer: Any = None):
-        """Answers the active blocking request."""
-        if self.finished or not self.request.blocking:
+        """Answers the active request: a blocking one, or one of a Busy request's actions."""
+        if self.finished or not self.request.answerable:
             raise RuntimeError(f"{self.name} test is not waiting for an answer")
         self.request.validate(answer)
         self._resume(answer)
@@ -348,8 +375,47 @@ class SensorTest:
         if err:
             raise SettingError(f"Failed to write {settings}: error {err}")
 
+    def wait(self, seconds: float, text: str) -> Generator:
+        """Waits without blocking the thread. Use as `yield from self.wait(1.0, "Waiting for the GPS")`"""
+        end = time.perf_counter() + seconds
+        while (remaining := end - time.perf_counter()) > 0:
+            yield Busy(text, f"{remaining:.1f} s")
+
+    def read_debug_messages(self) -> list[str]:
+        """Reads and removes every queued debug message"""
+        count = self.sensor.getNumDebugMessages().data
+        return [self.sensor.getOldestDebugMessage().data.strip() for _ in range(count)]
+
+    def start_streaming(self, commands: list[tuple[StreamableCommands, int | None]], callback: Callable, hz: int):
+        """
+        Streams the commands, given as (command, param), calling callback(status, user_data) for every packet.
+        The test must call self.streaming_manager.update() while streaming. Stopped by stop_streaming() or when the test ends.
+        """
+        if self._streaming_callback is not None:
+            raise RuntimeError("Already streaming, call stop_streaming() first")
+        manager = self.streaming_manager
+        for command, param in commands:
+            if not manager.register_command(self, command, param=param, immediate_update=False):
+                raise RuntimeError(f"No streaming slot left for {command.name}")
+        manager.register_callback(callback, hz=hz)
+        self._streaming_callback = callback
+        if not manager.enabled:
+            manager.enable()
+            self._enabled_streaming = True
+
+    def stop_streaming(self):
+        if self._streaming_callback is None:
+            return
+        manager = self.streaming_manager
+        manager.unregister_callback(self._streaming_callback)
+        manager.unregister_all_commands_from_owner(self)
+        self._streaming_callback = None
+        if self._enabled_streaming:   # Leave a supplied manager streaming if it already was
+            manager.disable()
+            self._enabled_streaming = False
+
     def cleanup(self):
-        """Override for any restoring beyond settings. Called after the settings are restored."""
+        """Override for any restoring beyond streaming and settings. Called after streaming stops, before the settings are restored."""
 
     # ---- Internals ----
 
@@ -357,11 +423,20 @@ class SensorTest:
         for s in self.steps:
             self.step = s
             self.step_states[s] = StepState.ACTIVE
-            requests = s.func(self)
-            if inspect.isgenerator(requests):
-                yield from requests
+            try:
+                requests = s.func(self)
+                if inspect.isgenerator(requests):
+                    yield from requests
+            except SkipStep:
+                self.step_states[s] = StepState.SKIPPED
+                continue
+            except UnsupportedTestError as e:
+                for result in self.results.values():
+                    if result.status == TestStatus.NOT_RUN:
+                        result.set_status(TestStatus.NA).message = str(e)
+                return
             self.step_states[s] = StepState.DONE
-            if self.stop_on_failure and self.check().status in (TestStatus.FAIL, TestStatus.ERROR):
+            if self.stop_on_failure and s.check is not None and self.check().status in (TestStatus.FAIL, TestStatus.ERROR):
                 return
 
     def _resume(self, answer: Any):
@@ -372,7 +447,9 @@ class SensorTest:
         except Exception as e:
             logger.exception("%s test raised during step %r", self.name, self.step.name)
             self.step_states[self.step] = StepState.ERROR
-            self.check().errored(str(e))
+            if self.step.check is None:   # The step's own checks are unknown, so record the error under the step
+                self.results[self.step.name] = TestResult(self.id, self.step.name)
+            self.results[self.step.check or self.step.name].errored(str(e))
             self._finish()
 
     def _finish(self):
@@ -382,9 +459,10 @@ class SensorTest:
             if state in (StepState.PENDING, StepState.ACTIVE):
                 self.step_states[s] = StepState.SKIPPED
         try:
+            self.stop_streaming()
+            self.cleanup()
             if self._settings_cache:
                 self.sensor.write_settings(**self._settings_cache)
-            self.cleanup()
         except Exception:
             # Ex: cancelled while the sensor was unplugged
             logger.exception("Failed to restore the sensor after the %s test", self.name)

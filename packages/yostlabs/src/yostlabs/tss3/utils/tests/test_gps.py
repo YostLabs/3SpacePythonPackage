@@ -1,154 +1,79 @@
-from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
+from yostlabs.tss3.utils.tests.base import SensorTest, Busy, step
+from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.api import ThreespaceSensor
 from yostlabs.tss3.consts import *
 
-import enum
 import time
 
 import logging
 logger = logging.getLogger(__name__)
 
-class GPSTestState(enum.Enum):
-    Inactive = 0
-    AwaitingFirstMessage = 1
-    AwaitingNoMessage = 2
-    Finished = 3
 
+class GPSTest(SensorTest):
+    """
+    Reads the GPS output through the sensor's debug messages.
+    1. With the GPS active, a position message must arrive within the expected interval.
+    2. With the GPS in standby, none may arrive for the same interval.
+    """
 
-class GPSTest(SensorTestBase):
+    id = "gps"
+    name = "GPS"
+    stop_on_failure = True
 
     EXPECTED_MESSAGE_INTERVAL = 1.0 #Seconds
     MESSAGE_PADDING = 0.5 #Seconds
 
-    def __init__(self, sensor: ThreespaceSensor):
-        super().__init__(sensor)
-        self.gps_settings_cache = None
+    @step("GPS active")
+    def active(self):
+        # Show the GPS output as debug info messages
+        self.change_settings(debug_mode=0,
+                             debug_level=THREESPACE_DEBUG_LEVEL_INFO,
+                             debug_module=THREESPACE_DEBUG_MODULE_GPS)
+        self.change_settings(gps_standby=0)
+        self.read_debug_messages()   # Discard old messages
 
-        self.result: dict[str, TestResult] = {
-            "active": TestResult("gps", "active"),
-            "standby": TestResult("gps", "standby"),
-        }
-    
-        self.state_start_time = None
-        self.state = GPSTestState.Inactive
-
-    def start(self):
-
-        #Cache Debug Messages and Standby
-        self.gps_settings_cache = self.sensor.read_settings(
-            "debug_level", "debug_module", 
-            "debug_mode", "gps_standby"
-        )
-
-        #Empty any current debug messages
-        self.__clear_messages()
-
-        #Enable Debug Info messages for GPS
-        self.sensor.writeDebugMode(0)
-        self.sensor.writeDebugLevel(THREESPACE_DEBUG_LEVEL_INFO)
-        self.sensor.writeDebugModule(THREESPACE_DEBUG_MODULE_GPS)
-
-        #Ensure not in standby
-        self.state_start_time = time.perf_counter()
-        self.sensor.writeGpsStandby(0)
-
-        self.state = GPSTestState.AwaitingFirstMessage
-
-    def cancel(self):
-        if self.state == GPSTestState.Inactive:
-            return
-        
-        self.state = GPSTestState.Inactive
-        self.__cleanup()
-
-    def update(self):
-        if self.state == GPSTestState.Inactive or self.state == GPSTestState.Finished:
-            return
-        
-        match self.state:
-            case GPSTestState.AwaitingFirstMessage:
-                self.__update_await_message()
-            case GPSTestState.AwaitingNoMessage:
-                self.__update_await_no_message()
-            case _:
-                raise Exception("Invalid state in GPS test update.")
-        
-        #Finished during update
-        if self.state == GPSTestState.Finished:
-            self.__cleanup()
-    
-    def __clear_messages(self):
-        num_messages = self.sensor.getNumDebugMessages().data
-        for _ in range(num_messages):
-            self.sensor.getOldestDebugMessage()
-
-    def __update_await_message(self):
-        elapsed_time = time.perf_counter() - self.state_start_time
-        num_messages = self.sensor.getNumDebugMessages().data
-        for _ in range(num_messages):
-            message = self.sensor.getOldestDebugMessage().data
-            if "$GPGGA" in message or "$GNGGA" in message:
-                self.result["active"].set_status(TestStatus.PASS)
-                self.result["active"].add_measurement("message", message)
-                #Transition to AwaitingNoMessage state
-                self.sensor.writeGpsStandby(1)
-                self.__clear_messages()
-                self.state = GPSTestState.AwaitingNoMessage
-                self.state_start_time = time.perf_counter()
+        start_time = time.perf_counter()
+        while True:
+            for message in self.read_debug_messages():
+                if self._is_position_message(message):
+                    self.check().add_measurement("message", message).passed()
+                    return
+            elapsed_time = time.perf_counter() - start_time
+            if elapsed_time > self.EXPECTED_MESSAGE_INTERVAL + self.MESSAGE_PADDING:
+                logger.warning("GPS test timed out waiting for a GPS message.")
+                self.check().failed(f"Timed out waiting for GPS message: {elapsed_time:.2f}s elapsed.")
                 return
+            yield Busy("Waiting for a GPS message.")
 
-        
-        if elapsed_time > self.EXPECTED_MESSAGE_INTERVAL + self.MESSAGE_PADDING:
-            logger.warning("GPS test timed out waiting for a GPS message.")
-            self.result["active"].failed(f"Timed out waiting for GPS message: {elapsed_time:.2f}s elapsed.")
-            self.state = GPSTestState.Finished
+    @step("GPS standby")
+    def standby(self):
+        self.change_settings(gps_standby=1)
+        self.read_debug_messages()   # Discard messages from before standby
 
-    def __update_await_no_message(self):
-        elapsed_time = time.perf_counter() - self.state_start_time
-        num_messages = self.sensor.getNumDebugMessages().data
-        for _ in range(num_messages):
-            message = self.sensor.getOldestDebugMessage().data
-            if "$GPGGA" in message or "$GNGGA" in message:
-                logger.warning("GPS test received a message while in standby.")
-                self.result["standby"].failed(message)
-                self.result["standby"].add_measurement("message", message)
-                self.state = GPSTestState.Finished
+        start_time = time.perf_counter()
+        while True:
+            for message in self.read_debug_messages():
+                if self._is_position_message(message):
+                    logger.warning("GPS test received a message while in standby.")
+                    self.check().add_measurement("message", message).failed(message)
+                    return
+            # Success is going the whole interval without receiving a GPS message
+            if time.perf_counter() - start_time > self.EXPECTED_MESSAGE_INTERVAL + self.MESSAGE_PADDING:
+                self.check().passed()
                 return
-        
-        #Success is going the whole interval without receiving a GPS message
-        if elapsed_time > self.EXPECTED_MESSAGE_INTERVAL + self.MESSAGE_PADDING:
-            self.result["standby"].set_status(TestStatus.PASS)
-            self.state = GPSTestState.Finished
+            yield Busy("Checking the GPS stays quiet in standby.")
 
-    def __cleanup(self):
-        self.sensor.write_settings(**self.gps_settings_cache)
-        self.__clear_messages()
+    def cleanup(self):
+        self.read_debug_messages()   # Discard the messages produced by the test
+
+    @staticmethod
+    def _is_position_message(message: str) -> bool:
+        return "$GPGGA" in message or "$GNGGA" in message
+
 
 def run_test(sensor: ThreespaceSensor):
-    test = GPSTest(sensor)
-    test.start()
-
-    try:
-        while test.state != GPSTestState.Finished:
-            test.update()
-            time.sleep(0.01)
-    except KeyboardInterrupt:
-        test.cancel()
-        print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result_flat
-
+    test = run_cli(GPSTest(sensor))
     return test.overall_success, test.result_flat
 
-def auto_run_test():
-    sensor = ThreespaceSensor()
-    overall_success, results = run_test(sensor)
-    sensor.cleanup()
-    for test in results:
-        print(test)
-    print("Overall success:", overall_success)
-    return overall_success, results
-
 if __name__ == "__main__":
-    auto_run_test()
-
-    
+    main(GPSTest)
