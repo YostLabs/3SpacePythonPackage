@@ -1,120 +1,39 @@
-from yostlabs.tss3.utils.tests.base import SensorTestBase, TestResult, TestStatus
+from yostlabs.tss3.utils.tests.base import SensorTest, TestStatus, Confirm, step
+from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.api import ThreespaceSensor
-import enum
 
 import logging
 logger = logging.getLogger(__name__)
 
-class LEDTestState(enum.Enum):
-    Inactive = 0
-    AwaitingRedResponse = 1
-    AwaitingGreenResponse = 2
-    AwaitingBlueResponse = 3
-    Finished = 4
+class LEDTest(SensorTest):
+    """Shows each color on the LED and asks the operator to confirm it."""
 
-class LEDTest(SensorTestBase):
+    id = "led"
+    name = "LED"
 
-    RED = [1.0, 0.0, 0.0]
-    GREEN = [0.0, 1.0, 0.0]
-    BLUE = [0.0, 0.0, 1.0]
+    @step("Red LED")
+    def red(self):
+        yield from self._check_color("red", [1.0, 0.0, 0.0])
 
-    COLORS_TO_TEST: dict[str, list[float]] = {
-        "red": RED,
-        "green": GREEN,
-        "blue": BLUE
-    }
+    @step("Green LED")
+    def green(self):
+        yield from self._check_color("green", [0.0, 1.0, 0.0])
 
-    def __init__(self, sensor: ThreespaceSensor):
-        super().__init__(sensor)
+    @step("Blue LED")
+    def blue(self):
+        yield from self._check_color("blue", [0.0, 0.0, 1.0])
 
-        self.state = LEDTestState.Inactive
-
-        self.expected_color_name = None
-
-        self.result: dict[str, TestResult] = {
-            color: TestResult("led", color) for color in LEDTest.COLORS_TO_TEST.keys()
-        }
-    
-    def start(self):
-        if self.state != LEDTestState.Inactive:
-            raise Exception("LED test already started.")
-        
-        self.led_settings_cache = self.sensor.read_settings("led_mode", "led_rgb")
-        self.sensor.writeLedMode(1)
-
-        self.__go_next_state()
-
-    def cancel(self):
-        if self.state == LEDTestState.Inactive:
-            return
-        self.state = LEDTestState.Inactive
-        self.sensor.write_settings(**self.led_settings_cache)
-
-    def verify_match(self, matches: bool):
+    def _check_color(self, color: str, rgb: list[float]):
+        self.change_settings(led_mode=1, led_rgb=rgb)
+        matches = yield Confirm(f"Is the LED {color}?")
         if not matches:
-            logger.warning("LED color %s did not match user expectation.", self.expected_color_name)
-        self.result[self.expected_color_name].set_status(TestStatus.PASS if matches else TestStatus.FAIL)
-        self.__go_next_state()
-
-        if self.state == LEDTestState.Finished:
-            return True
-        return False
-
-    def __go_next_state(self):
-        match self.state:
-            case LEDTestState.Inactive:
-                self.__set_color("red")
-                self.state = LEDTestState.AwaitingRedResponse
-            case LEDTestState.AwaitingRedResponse:
-                self.__set_color("green")
-                self.state = LEDTestState.AwaitingGreenResponse
-            case LEDTestState.AwaitingGreenResponse:
-                self.__set_color("blue")
-                self.state = LEDTestState.AwaitingBlueResponse
-            case LEDTestState.AwaitingBlueResponse:
-                self.state = LEDTestState.Finished
-                self.expected_color_name = None
-                self.sensor.write_settings(**self.led_settings_cache)
-            case _:
-                raise Exception("Invalid state for going to the next state.")
-    
-    @property
-    def expected_color(self) -> list[float]:
-        if self.expected_color_name is None:
-            return None
-        return LEDTest.COLORS_TO_TEST[self.expected_color_name]
-
-    def __set_color(self, name: str):
-        self.expected_color_name = name
-        self.sensor.writeLedRgb(self.expected_color)
+            logger.warning("LED color %s did not match user expectation.", color)
+        self.check().set_status(TestStatus.PASS if matches else TestStatus.FAIL)
 
 
 def run_test(sensor: ThreespaceSensor):
-
-    test = LEDTest(sensor)
-    test.start()
-    try:
-        while test.state != LEDTestState.Finished:
-            result = input(f"Is the LED {test.expected_color_name}? (Y/n)")
-            if result.lower() == "n":
-                test.verify_match(False)
-            elif result.lower() == "y" or result == "":
-                test.verify_match(True)
-    except KeyboardInterrupt:
-        test.cancel()
-        print("\nTest cancelled by user.")
-        return (False if not test.overall_success else None), test.result_flat
+    test = run_cli(LEDTest(sensor))
     return test.overall_success, test.result_flat
 
-def auto_run_test():
-    sensor = ThreespaceSensor()
-    overall_success, results = run_test(sensor)
-    sensor.cleanup()
-    for test in results:
-        print(test)
-    print("Overall success:", overall_success)
-    return overall_success, results
-
 if __name__ == "__main__":
-    auto_run_test()
-    
+    main(LEDTest)
