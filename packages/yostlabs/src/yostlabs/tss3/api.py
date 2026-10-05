@@ -750,7 +750,7 @@ class ThreespaceSensor:
         unregistered = []
         for key in keys:
             setting = threespace_setting_get(key) #This will register the setting if it is not already registered
-            if setting is not None:
+            if setting is not None and result[key] != THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
                 registered.append(key)
             else:
                 unregistered.append(key)
