@@ -7,7 +7,7 @@ import queue
 import threading
 
 from yostlabs.tss3 import ThreespaceSensor
-from yostlabs.tss3.utils.tests.base import SensorTest, TestResult, StepState, Request, Message, Confirm, Choice, Busy
+from yostlabs.tss3.utils.tests.base import SensorTest, TestResult, Step, Request, Message, Confirm, Choice, Busy
 
 import logging
 
@@ -69,7 +69,6 @@ _reader = _LineReader()
 
 def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
     """Runs the test to the end, asking the operator in the terminal. Ctrl+C cancels it."""
-    announced = set()       # Steps whose title has been printed
     shown = None            # The Busy request whose text has been printed
     status_shown = False    # A status line is on screen and needs ending before printing anything else
 
@@ -79,17 +78,15 @@ def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
             print()
             status_shown = False
 
-    def announce_steps():
-        for number, step in enumerate(test.steps, 1):
-            if step in announced or test.step_states[step] in (StepState.PENDING, StepState.SKIPPED):
-                continue
-            announced.add(step)
-            end_status()
-            print(f"\n{test.name} - step {number}/{len(test.steps)}: {step.title}")
+    def announce_step(step: Step):
+        nonlocal shown
+        end_status()
+        shown = None    # Show the new step's first request even if its text matches the last one
+        print(f"\n{test.name} - step {test.steps.index(step) + 1}/{len(test.steps)}: {step.title}", flush=True)
 
+    test.on_step_started = announce_step
     try:
         test.start()
-        announce_steps()
         while not test.finished:
             request = test.request
             if not isinstance(request, Busy):
@@ -112,7 +109,6 @@ def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
                 else:
                     time.sleep(poll_interval)
                     test.update()
-            announce_steps()
     except (KeyboardInterrupt, EOFError) as e:
         test.cancel()
         print(f"\nTest cancelled{': ' + str(e) if str(e) else ''}.")

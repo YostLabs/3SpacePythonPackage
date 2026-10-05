@@ -311,6 +311,10 @@ class SensorTest:
         self.finished = False
         self.cancelled = False
 
+        # Called with each step as it starts, before it runs. A runner reading test.step only after
+        # update() returns would see it late when the step blocks first, Ex: during a hard reset.
+        self.on_step_started: Callable[[Step], None] | None = None
+
         self._settings_cache: dict[str, Any] = {}
         self._run: Generator | None = None
         self._streaming_callback: Callable | None = None
@@ -423,6 +427,8 @@ class SensorTest:
         for s in self.steps:
             self.step = s
             self.step_states[s] = StepState.ACTIVE
+            if self.on_step_started is not None:
+                self.on_step_started(s)
             try:
                 requests = s.func(self)
                 if inspect.isgenerator(requests):
