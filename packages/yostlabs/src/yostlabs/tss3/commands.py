@@ -316,6 +316,9 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
 
     ThreespaceCommand("getMotionlessConfidenceFactor", 45, "", "f"),
 
+    ThreespaceCommand("getTemperatureCelsiusById", 46, "b", "f"),
+    ThreespaceCommand("getTemperatureFahrenheitById", 47, "b", "f"),
+
     ThreespaceCommand("correctRawGyroData", 48, "fffb", "fff"),
     ThreespaceCommand("correctRawAccelData", 49, "fffb", "fff"),
     ThreespaceCommand("correctRawMagData", 50, "fffb", "fff"),
@@ -352,7 +355,7 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
     ThreespaceCommand("eeptsAutoOffset", 74, "", ""),
 
     ThreespaceCommand("getStreamingLabel", 83, "b", "S"),
-    ThreespaceCommand("getStreamingBatch", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
+    ThreespaceCommand("generateStreamingPacket", THREESPACE_GET_STREAMING_BATCH_COMMAND_NUM, "", "S"),
     ThreespaceCommand("startStreaming", THREESPACE_START_STREAMING_COMMAND_NUM, "", ""),
     ThreespaceCommand("stopStreaming", THREESPACE_STOP_STREAMING_COMMAND_NUM, "", ""),
     ThreespaceCommand("pauseLogStreaming", 87, "b", ""),
@@ -369,6 +372,7 @@ THREESPACE_COMMANDS: list[ThreespaceCommand] = [
     ThreespaceCommand("getOldestDebugMessage", 127, "", "S"),
     ThreespaceCommand("selfTest", 128, "", "u"),
 
+    ThreespaceCommand("setTimesyncMode", 164, "b", ""),
     ThreespaceCommand("beginPassiveAutoCalibration", 165, "b", ""),
     ThreespaceCommand("getActivePassiveAutoCalibration", 166, "", "b"),
     ThreespaceCommand("beginActiveAutoCalibration", 167, "", ""),
@@ -455,6 +459,8 @@ class StreamableCommands(Enum):
     GetTemperatureCelsius = 43
     GetTemperatureFahrenheit = 44
     GetMotionlessConfidenceFactor = 45
+    GetTemperatureCelsiusById = 46
+    GetTemperatureFahrenheitById = 47
 
     GetNormalizedGyroRate = 51
     GetNormalizedAccelVec = 52
