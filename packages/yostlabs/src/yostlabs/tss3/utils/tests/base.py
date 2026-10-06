@@ -179,7 +179,8 @@ class Busy(Request):
     The step resumes on each update() and yields again to keep waiting, so the yield gives None.
     The operator may also pick one of the actions at any time. The yield then gives that action.
     """
-    status: str = ""                    # Live detail, Ex: "Held 1.4 / 2.0 s"
+    # Live detail, Ex: "Held 1.4 / 2.0 s". Not compared: a Busy request re-yielded with a new status is still the same request
+    status: str = field(default="", compare=False)
     actions: tuple[str, ...] = ()       # Ex: ("Flipped",)
 
     blocking: ClassVar[bool] = False

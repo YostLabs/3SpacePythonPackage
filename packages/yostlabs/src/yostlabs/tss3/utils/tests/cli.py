@@ -8,6 +8,7 @@ import threading
 
 from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.tss3.utils.tests.base import SensorTest, TestResult, Step, Request, Message, Confirm, Choice, Busy
+from yostlabs.tss3.utils.tests.session import TestSession
 
 import logging
 
@@ -67,10 +68,16 @@ class _LineReader:
 _reader = _LineReader()
 
 
-def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
-    """Runs the test to the end, asking the operator in the terminal. Ctrl+C cancels it."""
+def run_cli(session: TestSession | SensorTest, poll_interval: float = 0.01) -> TestSession:
+    """
+    Runs a session of tests, or a single test, to the end, asking the operator in the terminal. Ctrl+C cancels it.
+    Returns the session, which a single test is wrapped in.
+    """
+    if isinstance(session, SensorTest):
+        session = TestSession([session])
     shown = None            # The Busy request whose text has been printed
     status_shown = False    # A status line is on screen and needs ending before printing anything else
+    announced_test = None   # The test whose heading has been printed
 
     def end_status():
         nonlocal status_shown
@@ -78,24 +85,27 @@ def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
             print()
             status_shown = False
 
-    def announce_step(step: Step):
-        nonlocal shown
+    def announce_step(test: SensorTest, step: Step):
+        nonlocal shown, announced_test
         end_status()
-        shown = None    # Show the new step's first request even if its text matches the last one
+        shown = None    # Show the new step's first request even if it matches the last one
+        if len(session.tests) > 1 and test is not announced_test:
+            announced_test = test
+            print(f"\n=== {test.name} (test {session.index + 1} of {len(session.tests)}) ===")
         print(f"\n{test.name} - step {test.steps.index(step) + 1}/{len(test.steps)}: {step.title}", flush=True)
 
-    test.on_step_started = announce_step
+    session.on_step_started = announce_step
     try:
-        test.start()
-        while not test.finished:
-            request = test.request
+        session.start()
+        while not session.finished:
+            request = session.request
             if not isinstance(request, Busy):
                 end_status()
                 shown = None
                 _reader.clear()
-                test.respond(_ask(request))
+                session.respond(_ask(request))
             else:
-                if shown is None or (request.text, request.actions) != (shown.text, shown.actions):
+                if request != shown:   # Equal when only the status differs
                     end_status()
                     print(request.text + _actions_hint(request.actions))
                     _reader.clear()
@@ -105,14 +115,14 @@ def run_cli(test: SensorTest, poll_interval: float = 0.01) -> SensorTest:
                     status_shown = True
                 action = _pick_action(request.actions, _reader.poll()) if request.actions else None
                 if action is not None:
-                    test.respond(action)
+                    session.respond(action)
                 else:
                     time.sleep(poll_interval)
-                    test.update()
+                    session.update()
     except (KeyboardInterrupt, EOFError) as e:
-        test.cancel()
-        print(f"\nTest cancelled{': ' + str(e) if str(e) else ''}.")
-    return test
+        session.cancel()
+        print(f"\nCancelled{': ' + str(e) if str(e) else ''}.")
+    return session
 
 
 def _actions_hint(actions: tuple[str, ...]) -> str:
@@ -167,7 +177,7 @@ def print_results(results: list[TestResult], show_only_failures: bool = False):
             print(f"    (criteria) {name}: {value}")
 
 
-def main(test_type: type[SensorTest]) -> SensorTest:
+def main(test_type: type[SensorTest]) -> TestSession:
     """Runs one test on the first sensor found. For a test module's __main__."""
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter("%(message)s"))
@@ -175,10 +185,10 @@ def main(test_type: type[SensorTest]) -> SensorTest:
 
     sensor = ThreespaceSensor()
     try:
-        test = run_cli(test_type(sensor))
+        session = run_cli(test_type(sensor))
     finally:
         sensor.cleanup()
     print()
-    print_results(test.result_flat)
-    print("Overall success:", test.overall_success)
-    return test
+    print_results(session.results)
+    print("Overall success:", session.overall_success)
+    return session

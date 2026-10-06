@@ -486,6 +486,6 @@ class ComponentTest(SensorTest):
 
 if __name__ == "__main__":
     import json
-    test = main(ComponentTest)
+    session = main(ComponentTest)
     with open("component_test_results.json", "w") as f:
-        json.dump([r.to_dict() for r in test.result_flat], f, indent=4)
+        json.dump([r.to_dict() for r in session.results], f, indent=4)
