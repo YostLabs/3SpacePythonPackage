@@ -446,6 +446,7 @@ class SensorTest:
         for s in self.steps:
             self.step = s
             self.step_states[s] = StepState.ACTIVE
+            self.request = None   # The previous step's request no longer applies
             if self.on_step_started is not None:
                 self.on_step_started(s)
             try:
