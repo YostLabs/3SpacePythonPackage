@@ -1,8 +1,5 @@
-import time
-
-from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, Confirm, step
-from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
-from yostlabs.tss3.utils.tests.cli import run_cli, main
+from yostlabs.tss3.utils.tests.base import SensorTest, Busy, Confirm, step
+from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 
 # FatFs result codes returned in the response header status field
@@ -23,7 +20,7 @@ class SdTest(SensorTest):
 
     id = "sd"
     name = "SD Card"
-    variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    variants = ()   # Incomplete, so never selected. Run it directly while developing it
     stop_on_failure = True
 
     EXPECTED_LOG_DURATION = 2.0  # seconds
@@ -80,11 +77,6 @@ class SdTest(SensorTest):
 
     def _is_sd_present(self) -> bool:
         return self.sensor.getNextDirectoryItem().header.status != FR_NOT_ENABLED
-
-
-def run_test(sensor: ThreespaceSensor):
-    test = run_cli(SdTest(sensor))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     main(SdTest)

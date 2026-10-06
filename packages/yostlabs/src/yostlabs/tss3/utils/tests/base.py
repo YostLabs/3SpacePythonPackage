@@ -1,7 +1,6 @@
 import json
 import time
 import inspect
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Callable, ClassVar, Generator
@@ -117,38 +116,11 @@ class TestResult:
             test=data["test"],
             check=data["check"],
             components=list(data.get("components", [])),
-            status=data.get("status", TestStatus.PASS.value),
+            status=data.get("status", TestStatus.NOT_RUN.value),
             measurements=dict(data.get("measurements", {})),
             criteria=dict(data.get("criteria", {})),
             message=data.get("message"),
         )
-
-
-class SensorTestBase(ABC):
-
-    def __init__(self, sensor: ThreespaceSensor):
-        self.sensor = sensor
-
-        # Stored as a dict to make it easier to update results
-        # while test is running. For final use, use the results_flat property.
-        self.result: dict[Any, TestResult] = {}
-
-    @property
-    def result_flat(self) -> list[TestResult]:
-        return list(self.result.values())
-
-    @property
-    def overall_success(self) -> bool:
-        return all(result.success for result in self.result.values())
-
-    @abstractmethod
-    def start(self):
-        """Begin the test, setting up hardware as needed."""
-        ...
-
-    def cancel(self):
-        """Abort the test and restore any hardware state changed by start()."""
-        ...
 
 
 # ----------------------------------------------------------------------

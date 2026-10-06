@@ -4,7 +4,7 @@ import time
 
 from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
 from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
-from yostlabs.tss3.utils.tests.cli import run_cli, main
+from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.api import ThreespaceSensor
 from yostlabs.tss3.errors import UnsupportedTestError
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus, StreamableCommands, threespace_command_get
@@ -112,11 +112,6 @@ class ButtonTest(SensorTest):
             events = [int(event) for event in self.sensor.readLogStartEvent().strip().split(',')]
             if 0 in events:   # 0 is the button event
                 self.change_settings(log_start_event="2")   # Command only
-
-
-def run_test(sensor: ThreespaceSensor):
-    test = run_cli(ButtonTest(sensor))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     main(ButtonTest)

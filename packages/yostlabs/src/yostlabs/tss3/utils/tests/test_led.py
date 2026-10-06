@@ -1,6 +1,5 @@
 from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestStatus, Confirm, step
-from yostlabs.tss3.utils.tests.cli import run_cli, main
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.utils.tests.cli import main
 
 import logging
 logger = logging.getLogger(__name__)
@@ -30,11 +29,6 @@ class LEDTest(SensorTest):
         if not matches:
             logger.warning("LED color %s did not match user expectation.", color)
         self.check().set_status(TestStatus.PASS if matches else TestStatus.FAIL)
-
-
-def run_test(sensor: ThreespaceSensor):
-    test = run_cli(LEDTest(sensor))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     main(LEDTest)

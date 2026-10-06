@@ -18,7 +18,7 @@ import time
 from typing import Any
 
 from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestResult, TestStatus, Busy, Message, SkipStep, step
-from yostlabs.tss3.utils.tests.cli import run_cli, main
+from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 from yostlabs.tss3.errors import SettingError
@@ -483,11 +483,6 @@ class ComponentTest(SensorTest):
             ema = value if (prev is None or value is None) else self.BARO_EMA_ALPHA * value + (1 - self.BARO_EMA_ALPHA) * prev
             self._baro_ema_state[cid] = ema
             self._samples["baro_ema"][cid].append(ema)
-
-
-def run_test(sensor: ThreespaceSensor, expected_components: list[str] | None = None):
-    test = run_cli(ComponentTest(sensor, expected_components=expected_components))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     import json

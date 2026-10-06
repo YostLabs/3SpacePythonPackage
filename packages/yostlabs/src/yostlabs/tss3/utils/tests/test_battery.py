@@ -1,5 +1,5 @@
 from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
-from yostlabs.tss3.utils.tests.cli import run_cli, main
+from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager
 from yostlabs.tss3.api import ThreespaceSensor, ResponseTimeoutError
 from yostlabs.tss3.consts import *
@@ -94,11 +94,6 @@ class BatteryTest(SensorTest):
 
     def cleanup(self):
         self.read_debug_messages()   # Discard the messages produced by the test
-
-
-def run_test(sensor: ThreespaceSensor):
-    test = run_cli(BatteryTest(sensor))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     main(BatteryTest)

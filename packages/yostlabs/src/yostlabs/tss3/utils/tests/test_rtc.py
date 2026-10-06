@@ -3,8 +3,8 @@ import datetime
 
 from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestStatus, Busy, step
 from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
-from yostlabs.tss3.utils.tests.cli import run_cli, main
-from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError, ResponseTimeoutError
+from yostlabs.tss3.utils.tests.cli import main
+from yostlabs.tss3.api import InvalidKeyError, ResponseTimeoutError
 from yostlabs.tss3.errors import SettingError
 
 import logging
@@ -118,11 +118,6 @@ def _datetime_to_seconds(dt: list[int]) -> float:
     """Convert a [year, month, day, hour, minute, second] list to a POSIX timestamp."""
     year, month, day, hour, minute, second = dt
     return datetime.datetime(year, month, day, hour, minute, second, tzinfo=datetime.timezone.utc).timestamp()
-
-
-def run_test(sensor: ThreespaceSensor):
-    test = run_cli(RTCTest(sensor))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     main(RTCTest)

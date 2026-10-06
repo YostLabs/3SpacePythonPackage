@@ -5,8 +5,7 @@
 # case of failures.
 
 from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestStatus, step
-from yostlabs.tss3.utils.tests.cli import run_cli, main
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.utils.tests.cli import main
 
 class SelfTest(SensorTest):
 
@@ -33,11 +32,6 @@ class SelfTest(SensorTest):
         for i, key in enumerate(self.BIT_KEYS):
             result.add_measurement(key, not bool(raw & (1 << i)))
         result.set_status(TestStatus.PASS if raw == 0 else TestStatus.FAIL)
-
-
-def run_test(sensor: ThreespaceSensor):
-    test = run_cli(SelfTest(sensor))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     main(SelfTest)

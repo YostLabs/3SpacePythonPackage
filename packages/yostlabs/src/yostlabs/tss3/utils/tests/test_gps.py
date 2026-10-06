@@ -1,6 +1,5 @@
 from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
-from yostlabs.tss3.utils.tests.cli import run_cli, main
-from yostlabs.tss3.api import ThreespaceSensor
+from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.consts import *
 
 import time
@@ -70,11 +69,6 @@ class GPSTest(SensorTest):
     @staticmethod
     def _is_position_message(message: str) -> bool:
         return "$GPGGA" in message or "$GNGGA" in message
-
-
-def run_test(sensor: ThreespaceSensor):
-    test = run_cli(GPSTest(sensor))
-    return test.overall_success, test.result_flat
 
 if __name__ == "__main__":
     main(GPSTest)
