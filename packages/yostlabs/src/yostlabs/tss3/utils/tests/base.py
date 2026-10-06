@@ -418,8 +418,12 @@ class SensorTest:
         manager.register_callback(callback, hz=hz)
         self._streaming_callback = callback
         if not manager.enabled:
-            manager.enable()
+            manager.enable()   # Applies the registrations
             self._enabled_streaming = True
+        # An enabled manager only applies registrations itself while it is streaming, so one that is enabled but
+        # idle (Ex: a shared manager nothing else is using) would never start
+        elif not manager.apply_updated_settings():
+            raise RuntimeError("Failed to apply the streaming settings")
 
     def stop_streaming(self):
         if self._streaming_callback is None:
