@@ -5,10 +5,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 class LEDTest(SensorTest):
-    """Shows each color on the LED and asks the operator to confirm it."""
+    """Visual confirmation of the 3 primary LED colors."""
 
     id = "led"
     name = "LED"
+    description = "Shows each color on the LED for user confirmation."
     variants = ALL_SENSORS
 
     @step("Red LED")

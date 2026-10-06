@@ -10,13 +10,15 @@ logger = logging.getLogger(__name__)
 
 class GPSTest(SensorTest):
     """
-    Reads the GPS output through the sensor's debug messages.
+    Verifies the GPS is outputting messages and receives commands.
+
     1. With the GPS active, a position message must arrive within the expected interval.
     2. With the GPS in standby, none may arrive for the same interval.
     """
 
     id = "gps"
     name = "GPS"
+    description = "Checks the GPS outputs messages and receives commands."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 

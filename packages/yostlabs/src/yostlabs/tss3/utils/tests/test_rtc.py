@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class RTCTest(SensorTest):
     """
-    Tests the RTC (Real-Time Clock) functionality of the sensor. Any failure stops the test.
+    Tests the RTC (Real-Time Clock) functionality of the sensor.
 
     1. Verify the sensor reports an RTC component via readValidComponents().
     2. If rtc_source is available, set it to 3 (RTC). Fail if writing errors.
@@ -26,12 +26,13 @@ class RTCTest(SensorTest):
 
     id = "rtc"
     name = "Clock"
+    description = "Checks the real-time clock keeps time, including through a reset."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 
     TIME_CHANGE_TEST_DURATION = 1.0  # Seconds
 
-    @step("Check for an RTC")
+    @step("RTC present")
     def valid_components(self):
         components = self.sensor.readValidComponents()
         self.check().add_measurement("components", components)
@@ -40,7 +41,7 @@ class RTCTest(SensorTest):
         else:
             self.check().failed("Sensor does not report an RTC component.")
 
-    @step("Use the RTC as the time source")
+    @step("Time source")
     def rtc_source(self):
         if not self.sensor.has_setting("rtc_source"):
             self.check().set_status(TestStatus.NA)
@@ -52,7 +53,7 @@ class RTCTest(SensorTest):
             return
         self.check().passed()
 
-    @step("Check the clock advances")
+    @step("Clock running")
     def time_change(self):
         if self.sensor.has_setting("utc_offset"):
             self.change_settings(utc_offset=0)
@@ -76,7 +77,7 @@ class RTCTest(SensorTest):
         else:
             result.failed(f"Sensor time changed by {delta:.2f}s, expected ~{elapsed:.2f}s.")
 
-    @step("Check the clock keeps time through a reset")
+    @step("Survives reset")
     def reset(self):
         result = self.check()
         before = self.sensor.getDateTime().data

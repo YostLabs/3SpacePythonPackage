@@ -10,7 +10,7 @@ FR_NOT_ENABLED      = -12   # The volume has no work area (SD not present / not 
 
 class SdTest(SensorTest):
     """
-    Tests the SD card hardware on the sensor. Any failure stops the test.
+    Tests the SD card hardware on the sensor.
 
     1. Verify the SD card is present. If absent, the operator inserts it.
     2. Start a datalogging session. If the card is write protected (FR_WRITE_PROTECTED), the operator
@@ -20,6 +20,7 @@ class SdTest(SensorTest):
 
     id = "sd"
     name = "SD Card"
+    description = "Checks the SD card is detected and can be logged to."
     variants = ()   # Incomplete, so never selected. Run it directly while developing it
     stop_on_failure = True
 
@@ -29,7 +30,7 @@ class SdTest(SensorTest):
         super().__init__(sensor, streaming_manager)
         self._logging = False
 
-    @step("Check for an SD card")
+    @step("SD card present")
     def sd_present(self):
         self.change_settings(header_status=1)   # The SD commands report their result in the header status
         while not self._is_sd_present():
@@ -59,7 +60,7 @@ class SdTest(SensorTest):
                 self.check().failed("SD card is write protected.")
                 return
 
-    @step("Log for 2 seconds")
+    @step("Stop logging")
     def stop_logging(self):
         yield from self.wait(self.EXPECTED_LOG_DURATION, "Logging to the SD card.")
         self.sensor.getLoggingStatus()

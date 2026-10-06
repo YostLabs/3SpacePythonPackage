@@ -287,6 +287,7 @@ class SensorTest:
 
     id: ClassVar[str]                           # Identifies the test in results, Ex: "led"
     name: ClassVar[str]                         # Shown to the operator, Ex: "LED"
+    description: ClassVar[str]                  # What the test checks, in a sentence or two for the operator
     variants: ClassVar[tuple[SensorVariant, ...]]   # The sensors it applies to, Ex: ALL_SENSORS
     stop_on_failure: ClassVar[bool] = False     # Skip the remaining steps once a check fails
     steps: ClassVar[tuple[Step, ...]] = ()      # Collected from the @step methods, in declaration order
@@ -296,7 +297,7 @@ class SensorTest:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        for attribute in ("id", "name", "variants"):
+        for attribute in ("id", "name", "description", "variants"):
             if not hasattr(cls, attribute):
                 raise TypeError(f"{cls.__name__} must define {attribute}")
         cls.steps = tuple(value for value in cls.__dict__.values() if isinstance(value, Step))

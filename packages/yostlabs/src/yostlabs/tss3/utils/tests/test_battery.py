@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 class BatteryTest(SensorTest):
     """
-    Tests the battery of the sensor. Any failure stops the test.
+    Tests the battery functionality of the sensor.
+
     1. The self test reports no battery errors.
     2. The battery reports charging or charged.
     3. The operator unplugs the sensor, which stays powered on by its battery.
@@ -21,6 +22,7 @@ class BatteryTest(SensorTest):
 
     id = "battery"
     name = "Battery"
+    description = "Checks the battery charges, and keeps the sensor running while it is unplugged."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 
@@ -44,7 +46,7 @@ class BatteryTest(SensorTest):
         else:
             self.check().passed()
 
-    @step("Charging status")
+    @step("Charging Status")
     def status(self):
         status = self.sensor.getBatteryStatus().data
         self.check().add_measurement("status", status)
@@ -53,7 +55,7 @@ class BatteryTest(SensorTest):
         else:
             self.check().failed("Battery is not charging or charged.")
 
-    @step("Unplug the sensor", check="reconnect")
+    @step("Disconnect", check="reconnect")
     def disconnect(self):
         if self.sensor.has_setting("power_hold_state"):
             self.change_settings(power_hold_state=1)   # Keep the sensor powered on after it is unplugged
@@ -71,7 +73,7 @@ class BatteryTest(SensorTest):
             yield Busy(text)
         self.check().add_measurement("disconnect_time", self._disconnect_timestamp)
 
-    @step("Plug the sensor back in")
+    @step("Reconnect")
     def reconnect(self):
         while not self.sensor.attempt_reconnect(timeout=0):
             yield Busy("Plug the sensor back into the USB port.")

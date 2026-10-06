@@ -8,9 +8,14 @@ from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestStatus, 
 from yostlabs.tss3.utils.tests.cli import main
 
 class SelfTest(SensorTest):
+    """
+    Performs the generic on-board self test of the sensor.
+    """
+
 
     id = "self"
     name = "Self Test"
+    description = "Runs the sensor's built-in self test."
     variants = ALL_SENSORS
 
     # Keys must be in order of the bits in the self test result bitfield.

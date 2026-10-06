@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 class ButtonTest(SensorTest):
     """
+    Tests the button functionality of the sensor.
+    
     To pass this test, the operator must hold the button down for 2 seconds, and then release it for 2 seconds.
     Each stage fails if 10 seconds elapse without it finishing.
     The button state is streamed, so very quick blips in the button state are not missed.
@@ -22,6 +24,7 @@ class ButtonTest(SensorTest):
 
     id = "button"
     name = "Button"
+    description = "Checks the button reads pressed while held down, and released when let go."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 
@@ -36,7 +39,7 @@ class ButtonTest(SensorTest):
         self._pressed = False                                 # Treat the button as initially not pressed
         self._streaming_reset = False
 
-    @step("Hold the button")
+    @step("Button pressed")
     def held(self):
         if not self.sensor.has_command(threespace_command_get(StreamableCommands.GetButtonState.value)):
             raise UnsupportedTestError("Sensor does not support button state command.")
@@ -47,7 +50,7 @@ class ButtonTest(SensorTest):
         self.check().add_criteria("hold_time_s", self.HOLD_TIME)
         yield from self._await_button(True, self.HOLD_TIME, "Hold the button down for 2 seconds.")
 
-    @step("Release the button")
+    @step("Button released")
     def released(self):
         self.check().add_criteria("release_time_s", self.RELEASE_TIME)
         yield from self._await_button(False, self.RELEASE_TIME, "Release the button for 2 seconds.")

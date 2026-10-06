@@ -33,30 +33,35 @@ class ComponentTest(SensorTest):
     """
     Tests the data components of the sensor (Accel, Gyro, Mag, Barometer).
 
-    1. readValidComponents(). If expected_components supplied, compare and record pass/fail.
-       Continue testing all detected components regardless.
-    2. Set ODR=1000 for all components. Record any errors. Read back true set ODR.
-    3. Stream component data until CHECK_UPDATE_RATE_WAIT_DURATION after setting the ODR.
-       - Verify no component has unchanging (static) data.
-       - Mag: additionally verify average vector length is not near 0.
-    4. Compare measured update rates to the 1000 ODR true values (within 1% tolerance).
-    5. Set ODR=50 for all components. Read back true set ODR.
-    6. The operator places the sensor on a flat surface.
-    7. Stream, saving all component data, while the operator flips the sensor upside down.
-    8. Compare measured update rates to the 50 ODR true values (within 1% tolerance).
-    9. Analyze flip data per component:
+    Detect components:
+        readValidComponents(). If expected_components supplied, compare and record pass/fail.
+        Continue testing all detected components regardless.
+    1000 Hz data:
+        Set ODR=1000 for all components. Record any errors. Read back true set ODR.
+        Stream component data until CHECK_UPDATE_RATE_WAIT_DURATION after setting the ODR.
+        - Verify no component has unchanging (static) data.
+        - Mag: additionally verify average vector length is not near 0.
+        Compare measured update rates to the 1000 ODR true values (within 1% tolerance).
+    Flip:
+        Set ODR=50 for all components. Read back true set ODR.
+        The operator places the sensor on a flat surface, then flips it upside down while it streams.
+        Compare measured update rates to the 50 ODR true values (within 1% tolerance).
+        Analyze flip data per component:
         - Accel: verify gravity vector direction reversed.
         - Gyro: verify integrated rotation >= 120 degrees (raw gyro assumed in rad/s),
           and that it predicts the change in each accel's direction.
         - Mag: verify field vector direction reversed.
-    10. Barometer (if any passed step 3): the operator raises then lowers the sensor at least 1 ft,
-        holding it still each time. The operator may pass or fail each stage by hand if detection doesn't trigger.
+    Barometer raise, Barometer lower (if any barometer's data changed in 1000 Hz data):
+        Measure the starting altitude while the sensor is held still. The operator then raises and lowers
+        the sensor at least 1 ft, holding it still each time. The operator may pass or fail each stage by hand
+        if detection doesn't trigger.
 
     Checks are created per component, keyed (component type, id, check name) in self.results.
     """
 
     id = "component"
     name = "Component"
+    description = "Tests the primary data components of the sensor (Accel, Gyro, Mag, Barometer)."
     variants = ALL_SENSORS
 
     CHECK_UPDATE_RATE_WAIT_DURATION = 3.0    # seconds to wait before checking update rate (gives time for it to update, including settling time)
@@ -122,74 +127,29 @@ class ComponentTest(SensorTest):
             result.set_status(TestStatus.INFO)
             result.message = "No expected components supplied; detected components recorded for reference only."
 
-    @step("Set the data rate to 1000 Hz", check=None)
-    def set_odr_1000(self):
+    @step("1000 Hz data", check=None)
+    def data_1000(self):
         self._set_odr(1000, "set_odr_1000")
-
-    @step("Check the data changes", check=None)
-    def static_check(self):
-        self._start_sampling()
-        while time.perf_counter() - self._odr_set_time < self.CHECK_UPDATE_RATE_WAIT_DURATION:
-            self.streaming_manager.update()
-            yield Busy("Collecting component data.")
-        self.stop_streaming()
-        self._analyze_static_data(self._samples)
-
-    @step("Check the 1000 Hz update rates", check=None)
-    def update_rate_1000(self):
+        yield from self._collect_static_data()
         yield from self._check_update_rates("set_odr_1000", "update_rate_1000")
 
-    @step("Set the data rate to 50 Hz", check=None)
-    def set_odr_50(self):
-        self._set_odr(50, "set_odr_50")
-
-    @step("Place the sensor flat", check=None)
-    def place_flat(self):
-        yield Message("Place the sensor on a flat, level surface.")
-
-    @step("Flip the sensor", check=None)
+    @step("Flip", check=None)
     def flip(self):
-        self._start_sampling()
-        while True:
-            self.streaming_manager.update()
-            if (yield Busy("Flip the sensor upside down.", actions=("Flipped",))) == "Flipped":
-                break
-        self.stop_streaming()
-        self._flip_samples = self._samples
-
-    @step("Check the 50 Hz update rates", check=None)
-    def update_rate_50(self):
+        self._set_odr(50, "set_odr_50")
+        yield Message("Place the sensor on a flat, level surface.")
+        yield from self._collect_flip_data()
         yield from self._check_update_rates("set_odr_50", "update_rate_50")
-
-    @step("Check the flip", check=None)
-    def analyze_flip(self):
         self._analyze_flip("accel")
         self._analyze_flip("mag")
         self._analyze_gyro_flip()
 
-    @step("Barometer baseline", check=None)
-    def baro_baseline(self):
+    @step("Barometer raise", check=None)
+    def baro_raise(self):
         if not any(self._result("baro", bid, "static_check").success for bid in self._ids["baro"]):
             raise SkipStep()
-        self._baro_ema_state = {}
-        self._start_sampling()
-        self._baro_active = True
-        while not self._baro_window_full():
-            self.streaming_manager.update()
-            if (yield Busy("Hold the sensor still.", actions=("Fail",))) == "Fail":
-                self._fail_baro()
-                return
-        for bid in self._ids["baro"]:
-            starting_altitude = self._baro_altitude(bid)
-            result = self._result("baro", bid, "altitude")
-            result.add_measurement("starting_altitude", starting_altitude)
-            result.add_criteria("min_altitude_change_m", self.BARO_MIN_ALTITUDE_CHANGE)
-            result.add_criteria("high_altitude_threshold", starting_altitude + self.BARO_MIN_ALTITUDE_CHANGE)
-
-    @step("Raise the sensor", check=None)
-    def baro_raise(self):
-        if not self._baro_active:
-            raise SkipStep()
+        yield from self._baro_baseline()
+        if not self._baro_active:   # Failed by the operator while measuring the baseline
+            return
         baros = self._ids["baro"]
         stable_since = None
         while True:
@@ -228,7 +188,7 @@ class ComponentTest(SensorTest):
                     result.add_measurement("force_passed_high", True)
                 return
 
-    @step("Lower the sensor", check=None)
+    @step("Barometer lower", check=None)
     def baro_lower(self):
         if not self._baro_active:
             raise SkipStep()
@@ -317,6 +277,29 @@ class ComponentTest(SensorTest):
             rate_result.add_criteria("expected", true_odr)
             rate_result.add_criteria("tolerance", tolerance)
             rate_result.set_status(TestStatus.PASS if abs(measured_rate - true_odr) <= tolerance else TestStatus.FAIL)
+
+    # ------------------------------------------------------------------
+    # Data collection
+    # ------------------------------------------------------------------
+
+    def _collect_static_data(self):
+        """Streams until the update rates have settled after setting the ODR, then checks every component's data changes"""
+        self._start_sampling()
+        while time.perf_counter() - self._odr_set_time < self.CHECK_UPDATE_RATE_WAIT_DURATION:
+            self.streaming_manager.update()
+            yield Busy("Collecting component data.")
+        self.stop_streaming()
+        self._analyze_static_data(self._samples)
+
+    def _collect_flip_data(self):
+        """Streams while the operator flips the sensor"""
+        self._start_sampling()
+        while True:
+            self.streaming_manager.update()
+            if (yield Busy("Flip the sensor upside down.", actions=("Flipped",))) == "Flipped":
+                break
+        self.stop_streaming()
+        self._flip_samples = self._samples
 
     # ------------------------------------------------------------------
     # Static data analysis
@@ -426,6 +409,23 @@ class ComponentTest(SensorTest):
     # ------------------------------------------------------------------
     # Barometer altitude
     # ------------------------------------------------------------------
+
+    def _baro_baseline(self):
+        """Starts streaming the barometers and records the starting altitude once enough samples are in"""
+        self._baro_ema_state = {}
+        self._start_sampling()
+        self._baro_active = True
+        while not self._baro_window_full():
+            self.streaming_manager.update()
+            if (yield Busy("Hold the sensor still.", actions=("Fail",))) == "Fail":
+                self._fail_baro()
+                return
+        for bid in self._ids["baro"]:
+            starting_altitude = self._baro_altitude(bid)
+            result = self._result("baro", bid, "altitude")
+            result.add_measurement("starting_altitude", starting_altitude)
+            result.add_criteria("min_altitude_change_m", self.BARO_MIN_ALTITUDE_CHANGE)
+            result.add_criteria("high_altitude_threshold", starting_altitude + self.BARO_MIN_ALTITUDE_CHANGE)
 
     def _baro_altitude(self, baro_id: int, default: float = None) -> float:
         """The latest smoothed altitude. default if there is none yet, or raises if no default is given."""
