@@ -1,4 +1,4 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
 from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager
 from yostlabs.tss3.api import ThreespaceSensor, ResponseTimeoutError
@@ -21,6 +21,7 @@ class BatteryTest(SensorTest):
 
     id = "battery"
     name = "Battery"
+    variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 
     TIME_TOLERANCE_S = 1.0

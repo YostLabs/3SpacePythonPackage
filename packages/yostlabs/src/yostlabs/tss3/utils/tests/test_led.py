@@ -1,4 +1,4 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, TestStatus, Confirm, step
+from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestStatus, Confirm, step
 from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.api import ThreespaceSensor
 
@@ -10,6 +10,7 @@ class LEDTest(SensorTest):
 
     id = "led"
     name = "LED"
+    variants = ALL_SENSORS
 
     @step("Red LED")
     def red(self):

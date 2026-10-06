@@ -1,4 +1,4 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
 from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.api import ThreespaceSensor
 from yostlabs.tss3.consts import *
@@ -18,6 +18,7 @@ class GPSTest(SensorTest):
 
     id = "gps"
     name = "GPS"
+    variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 
     EXPECTED_MESSAGE_INTERVAL = 1.0 #Seconds

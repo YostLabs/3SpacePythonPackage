@@ -2,40 +2,17 @@ import sys
 import datetime
 
 from yostlabs.tss3 import ThreespaceSensor
-from yostlabs.tss3.errors import UnsupportedTestError
-from yostlabs.tss3.consts import *
-from yostlabs.tss3.utils.tests.base import TestResult, TestStatus
-import yostlabs.tss3.utils.tests as tests
+from yostlabs.tss3.utils.tests.base import SensorTest, TestResult
+from yostlabs.tss3.utils.tests.cli import run_cli
+import yostlabs.tss3.utils.tests   # Registers every test in SensorTest.REGISTERED
 from typing import Callable
 import json
 
 import logging
 logger = logging.getLogger(__name__)
 
-GENERIC_TESTS = {
-    "self_test": tests.test_self.run_test,
-    "led_test": tests.test_led.run_test,
-    "component_test": tests.test_components.run_test,
-}
-
-FAMILY_TO_TESTS = {
-    THREESPACE_FAMILY_EMBEDDED: {
-        # Add other tests for embedded family here
-    },
-    THREESPACE_FAMILY_DATA_LOGGER: {
-        "battery_test": tests.test_battery.run_test,
-        "rtc_test": tests.test_rtc.run_test,
-        "button_test": tests.test_button.run_test,
-        "gps_test": tests.test_gps.run_test,
-        # Add other tests for data logger family here
-    },
-    THREESPACE_FAMILY_LX: {
-        # Add other tests for LX family here
-    },
-    THREESPACE_FAMILY_USB: {
-        # Add other tests for USB family here
-    },
-}
+# Creates a test for a sensor. A test class, or Ex: functools.partial(ComponentTest, expected_components=[...])
+TestFactory = Callable[[ThreespaceSensor], SensorTest]
 
 def overall_test_initialize_results(sensor: ThreespaceSensor, operator=None, context=None, test_suite_version="0.0.1"):
     results = {
@@ -77,56 +54,44 @@ def overall_test_add_error(results: dict, test_name: str, error: str):
     })
     return results
 
-def run_test(sensor: ThreespaceSensor, 
-             test_table: dict[str, Callable[[ThreespaceSensor], tuple[bool,list[TestResult]]] | dict],
+def run_test(sensor: ThreespaceSensor, tests: list[TestFactory],
              operator=None, context=None, test_suite_version="0.0.1"):
     results = overall_test_initialize_results(sensor, operator=operator, context=context, test_suite_version=test_suite_version)
 
     test_checks = []
 
-    for test_name, test in test_table.items():
+    for create_test in tests:
         try:
-            if isinstance(test, dict):
-                func = test["func"]
-                kwargs = test.get("kwargs", {})
-                test_success, test_results = func(sensor, **kwargs)
-            else:
-                test_success, test_results = test(sensor)
-            test_checks.extend(test_results)
-        except UnsupportedTestError as e:
-            logger.warning(f"Unsupported test: {test_name}")
+            test = run_cli(create_test(sensor))
+            test_checks.extend(test.result_flat)
         except Exception as e:
-            overall_test_add_error(results, test_name, str(e))
+            # A test records its own errors in its checks, so this is a failure outside of one, Ex: creating it
+            overall_test_add_error(results, getattr(create_test, "id", repr(create_test)), str(e))
             break
     results = overall_test_finalize_results(results, test_checks)
     overall_success = results["overall_success"]
     return overall_success, results
 
-def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True):
+def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True) -> list[type[SensorTest]] | None:
+    """The registered tests that apply to the sensor, in registration order"""
     family = sensor.sensor_family
     if family == "Unknown":
         logger.warning("Unknown sensor family, cannot determine which tests to run.")
         if fail_on_unknown_family:
             return None
-        else:
-            return GENERIC_TESTS
-    
+
     logger.info(f"Detected sensor family: {family}.")
+    variation = sensor.hardware_version.variation
+    return [test for test in SensorTest.REGISTERED if test.is_applicable(family, variation)]
 
-    tests_to_run = GENERIC_TESTS
-    if family in FAMILY_TO_TESTS:
-        tests_to_run |= FAMILY_TO_TESTS[family]
-
-    return tests_to_run
-
-def verbose_run_tests(sensor: ThreespaceSensor, 
-                      test_table: dict[str, Callable[[ThreespaceSensor], tuple[bool,dict]] | dict],
+def verbose_run_tests(sensor: ThreespaceSensor,
+                      tests: list[TestFactory],
                       output_path = "test_results.json"):
     print("Running Tests:")
-    for test_name in test_table.keys():
-        print(f" - {test_name}")
+    for create_test in tests:
+        print(f" - {getattr(create_test, 'name', repr(create_test))}")
 
-    overall_success, results = run_test(sensor, test_table)
+    overall_success, results = run_test(sensor, tests)
     sensor.cleanup()
 
     print(results)
@@ -143,14 +108,14 @@ def auto_run_tests():
     if family == "Unknown":
         logger.error("Unknown sensor family, cannot determine which tests to run.")
         return False, {"error": "Unknown sensor family"}
-    
+
     tests_to_run = auto_select_tests(sensor, fail_on_unknown_family=False)
 
     return verbose_run_tests(sensor, tests_to_run)
 
 if __name__ == "__main__":
-    h = logging.StreamHandler(sys.stdout)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    logging.basicConfig(level=logging.INFO, handlers=[h])
+    # h = logging.StreamHandler(sys.stdout)
+    # h.setFormatter(logging.Formatter("%(message)s"))
+    # logging.basicConfig(level=logging.INFO, handlers=[h])
 
     auto_run_tests()

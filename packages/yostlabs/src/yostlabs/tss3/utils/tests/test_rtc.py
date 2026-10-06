@@ -1,7 +1,8 @@
 import time
 import datetime
 
-from yostlabs.tss3.utils.tests.base import SensorTest, TestStatus, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestStatus, Busy, step
+from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
 from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.api import ThreespaceSensor, InvalidKeyError, ResponseTimeoutError
 from yostlabs.tss3.errors import SettingError
@@ -25,6 +26,7 @@ class RTCTest(SensorTest):
 
     id = "rtc"
     name = "Clock"
+    variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 
     TIME_CHANGE_TEST_DURATION = 1.0  # Seconds

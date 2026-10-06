@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Callable, ClassVar, Generator
 
-from yostlabs.tss3 import ThreespaceSensor
+from yostlabs.tss3 import ThreespaceSensor, ThreespaceHardwareVersion
 from yostlabs.tss3.errors import SettingError, UnsupportedTestError
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, StreamableCommands
 
@@ -267,6 +267,30 @@ def step(title: str, check: str | None = _METHOD_NAME):
 
 
 # ----------------------------------------------------------------------
+# Sensor variants
+# ----------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SensorVariant:
+    """
+    Sensors a test applies to. family is a THREESPACE_FAMILY_* name, Ex: THREESPACE_FAMILY_DATA_LOGGER.
+    None for family: every sensor. None for variation: every variation of the family.
+    """
+    family: str | None = None
+    variation: int | None = None
+
+    def matches(self, family: str, variation: int | None) -> bool:
+        if self.family is None:
+            return True
+        if family != self.family:
+            return False
+        # A specific variation is only confirmed when the variation is known
+        return self.variation is None or self.variation == variation
+
+ALL_SENSORS = (SensorVariant(),)
+
+
+# ----------------------------------------------------------------------
 # SensorTest
 # ----------------------------------------------------------------------
 
@@ -291,12 +315,30 @@ class SensorTest:
 
     id: ClassVar[str]                           # Identifies the test in results, Ex: "led"
     name: ClassVar[str]                         # Shown to the operator, Ex: "LED"
+    variants: ClassVar[tuple[SensorVariant, ...]]   # The sensors it applies to, Ex: ALL_SENSORS
     stop_on_failure: ClassVar[bool] = False     # Skip the remaining steps once a check fails
     steps: ClassVar[tuple[Step, ...]] = ()      # Collected from the @step methods, in declaration order
 
+    # Every test class, in the order they were defined. Importing yostlabs.tss3.utils.tests defines them all.
+    REGISTERED: ClassVar[list[type["SensorTest"]]] = []
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        for attribute in ("id", "name", "variants"):
+            if not hasattr(cls, attribute):
+                raise TypeError(f"{cls.__name__} must define {attribute}")
         cls.steps = tuple(value for value in cls.__dict__.values() if isinstance(value, Step))
+        SensorTest.REGISTERED.append(cls)
+
+    @classmethod
+    def is_applicable(cls, family: str | ThreespaceHardwareVersion, variation: int | None = None) -> bool:
+        """
+        Whether the test applies to a sensor, given its family name and variation, or its hardware version.
+        A test for a specific variation needs the variation, the family alone is not enough.
+        """
+        if isinstance(family, ThreespaceHardwareVersion):
+            family, variation = family.family_name, family.variation
+        return any(variant.matches(family, variation) for variant in cls.variants)
 
     def __init__(self, sensor: ThreespaceSensor, streaming_manager: ThreespaceStreamingManager = None):
         self.sensor = sensor

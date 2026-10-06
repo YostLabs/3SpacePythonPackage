@@ -1,6 +1,7 @@
 import time
 
-from yostlabs.tss3.utils.tests.base import SensorTest, Busy, Confirm, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, Confirm, step
+from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
 from yostlabs.tss3.utils.tests.cli import run_cli, main
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 
@@ -22,6 +23,7 @@ class SdTest(SensorTest):
 
     id = "sd"
     name = "SD Card"
+    variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
     stop_on_failure = True
 
     EXPECTED_LOG_DURATION = 2.0  # seconds
