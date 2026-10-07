@@ -306,17 +306,24 @@ class ThreespaceSensor:
 
                 #Need to rediscover the com port
                 potential_coms = [self.com] if not self.com.reenumerates else self.com.auto_detect()
-                for potential_com in potential_coms:
-                    try:
-                        potential_com.open()
-                        sensor = ThreespaceSensor(potential_com)
-                        if sensor.serial_number == self.serial_number:
-                            self.com = potential_com
-                            self.__dynamic_reinit()  # Reinitialize the sensor state after reconnect
-                            return True
-                        sensor.cleanup() #Handles closing the potential_com
-                    except Exception as e:
-                        continue
+                try:
+                    for potential_com in potential_coms:
+                        try:
+                            potential_com.open()
+                            sensor = ThreespaceSensor(potential_com)
+                            if sensor.serial_number == self.serial_number:
+                                self.com = potential_com
+                                self.__dynamic_reinit()  # Reinitialize the sensor state after reconnect
+                                return True
+                            sensor.cleanup() #Handles closing the potential_com
+                        except Exception as e:
+                            continue
+                finally:
+                    # Close the auto_detect generator here when returning partway through it. Otherwise garbage collection
+                    # closes it, by raising GeneratorExit inside it with no Python code above to catch it, which debuggers
+                    # then stop on as an uncaught exception
+                    if hasattr(potential_coms, "close"):
+                        potential_coms.close()
             elapsed_time = time.perf_counter() - start_time
         return False
 
