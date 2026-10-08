@@ -39,7 +39,8 @@ class TestStatus(str, Enum):
     SKIP = "skip"   #Test intentionally skipped with reason. Check message.
     NA = "n/a"      #Test not applicable to this sensor.
     INFO = "info"   #Test informational only, not a pass/fail check. Check message.
-    NOT_RUN = "not_run"   #Test not run yet
+    NOT_RUN = "not_run"   #Test not run yet. Still not run once the test has ended means it ended by an error (or crash)
+    CANCELLED = "cancelled"   #Never ran: the test was explicitly cancelled
 
 
 @dataclass
@@ -378,6 +379,7 @@ class SensorTest:
         self.cancelled = True
         if self._run is not None:
             self._run.close()   # Raises GeneratorExit at the active step's yield, so its finally blocks run
+        self._cancel_remaining_checks()
         self._finish()
 
     # ---- For tests ----
@@ -463,8 +465,15 @@ class SensorTest:
                         result.set_status(TestStatus.NA).message = str(e)
                 return
             self.step_states[s] = StepState.DONE
-            if self.stop_on_failure and s.check is not None and self.check().status in (TestStatus.FAIL, TestStatus.ERROR):
-                return
+            if self.stop_on_failure and s.check is not None:
+                # The test skips the rest after a failure. After an error the rest stays not run, like a crash
+                if self.check().status == TestStatus.FAIL:
+                    for result in self.results.values():
+                        if result.status == TestStatus.NOT_RUN:
+                            result.skipped(f"Stopped after {s.check} failed")
+                    return
+                if self.check().status == TestStatus.ERROR:
+                    return
 
     def _resume(self, answer: Any):
         try:
@@ -478,6 +487,11 @@ class SensorTest:
                 self.results[self.step.name] = TestResult(self.id, self.step.name)
             self.results[self.step.check or self.step.name].errored(str(e))
             self._finish()
+
+    def _cancel_remaining_checks(self):
+        for result in self.results.values():
+            if result.status == TestStatus.NOT_RUN:
+                result.set_status(TestStatus.CANCELLED)
 
     def _finish(self):
         self.finished = True
