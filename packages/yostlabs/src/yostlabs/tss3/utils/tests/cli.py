@@ -190,5 +190,5 @@ def main(test_type: type[SensorTest]) -> TestSession:
         sensor.cleanup()
     print()
     print_results(session.results)
-    print("Overall success:", session.overall_success)
+    print("Outcome:", session.outcome)
     return session

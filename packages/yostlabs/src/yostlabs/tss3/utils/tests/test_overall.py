@@ -11,10 +11,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 def run_test(sensor: ThreespaceSensor, tests: list[TestItem],
-             operator=None, context=None, test_suite_version="0.0.1") -> tuple[bool, dict]:
-    """Runs the tests in the terminal. Returns the overall success and the results document, see TestSession.report()"""
+             operator=None, context=None, test_suite_version="0.0.1") -> tuple[str, dict]:
+    """Runs the tests in the terminal. Returns the outcome and the results document, see TestSession.report()"""
     session = run_cli(TestSession(tests, sensor, operator=operator, context=context, suite_version=test_suite_version))
-    return session.overall_success, session.report()
+    return session.outcome, session.report()
 
 def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True) -> list[type[SensorTest]] | None:
     """The registered tests that apply to the sensor, in registration order"""
@@ -35,16 +35,16 @@ def verbose_run_tests(sensor: ThreespaceSensor,
     for item in tests:
         print(f" - {test_class(item).name}")
 
-    overall_success, results = run_test(sensor, tests)
+    outcome, results = run_test(sensor, tests)
     sensor.cleanup()
 
     print(results)
-    print("Overall success:", overall_success)
+    print("Outcome:", outcome)
 
     with open(output_path, "w") as f:
         f.write(json.dumps(results, indent=4))
 
-    return overall_success, results
+    return outcome, results
 
 def auto_run_tests():
     sensor = ThreespaceSensor()

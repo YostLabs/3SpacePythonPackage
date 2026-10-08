@@ -43,6 +43,33 @@ class TestStatus(str, Enum):
     CANCELLED = "cancelled"   #Never ran: the test was explicitly cancelled
 
 
+def summarize(statuses) -> str:
+    """
+    One status for a set of checks, given their statuses (TestStatus or its values), by priority:
+    error > fail > cancelled > not_run > n/a > pass. Any other status (skip) counts as fail.
+    "not_run" when there are no checks, or some were never reached without anything going wrong (Ex: a crash).
+    """
+    statuses = {TestStatus(status).value for status in statuses}
+    # No checks at all
+    if not statuses:
+        return TestStatus.NOT_RUN.value
+    # Any check is error, fail or cancelled, in that order
+    for status in (TestStatus.ERROR, TestStatus.FAIL, TestStatus.CANCELLED):
+        if status.value in statuses:
+            return status.value
+    # Any check never reached
+    if TestStatus.NOT_RUN.value in statuses:
+        return TestStatus.NOT_RUN.value
+    # Any check is skip (anything else but pass, n/a or info), which counts as failing
+    if statuses - {TestStatus.PASS.value, TestStatus.NA.value, TestStatus.INFO.value}:
+        return TestStatus.FAIL.value
+    # Every check is n/a
+    if statuses == {TestStatus.NA.value}:
+        return TestStatus.NA.value
+    # Every check is pass, n/a or info, and at least one is pass or info
+    return TestStatus.PASS.value
+
+
 @dataclass
 class TestResult:
     """
