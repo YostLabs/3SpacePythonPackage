@@ -3,6 +3,7 @@ import sys
 from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.tss3.utils.tests.base import SensorTest
 from yostlabs.tss3.utils.tests.session import TestSession, TestItem, test_class
+from yostlabs.tss3.utils.tests.report import SessionReport
 from yostlabs.tss3.utils.tests.cli import run_cli
 import yostlabs.tss3.utils.tests   # Registers every test in SensorTest.REGISTERED
 import json
@@ -11,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 def run_test(sensor: ThreespaceSensor, tests: list[TestItem],
-             operator=None, context=None, test_suite_version="0.0.1") -> tuple[str, dict]:
+             operator=None, context=None, test_suite_version="0.0.1") -> tuple[str, SessionReport]:
     """Runs the tests in the terminal. Returns the outcome and the results document, see TestSession.report()"""
     session = run_cli(TestSession(tests, sensor, operator=operator, context=context, suite_version=test_suite_version))
     return session.outcome, session.report()
@@ -38,11 +39,11 @@ def verbose_run_tests(sensor: ThreespaceSensor,
     outcome, results = run_test(sensor, tests)
     sensor.cleanup()
 
-    print(results)
+    print(results.to_dict())
     print("Outcome:", outcome)
 
     with open(output_path, "w") as f:
-        f.write(json.dumps(results, indent=4))
+        f.write(json.dumps(results.to_dict(), indent=4))
 
     return outcome, results
 

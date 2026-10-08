@@ -1,3 +1,4 @@
+import copy
 import socket
 import datetime
 from typing import Any, Callable
@@ -132,8 +133,11 @@ class TestSession:
 
     # ---- Results ----
 
-    def report(self) -> dict:
-        """The results document of the session as it stands, see report.py. Only once started"""
+    def report(self) -> SessionReport:
+        """
+        The results document of the session as it stands, see report.py. Only once started. A copy: it does not
+        change as the session goes on. to_dict() for JSON
+        """
         if self.started_at is None:
             raise RuntimeError("The test session has not started")
         firmware = self.sensor.firmware_version
@@ -142,9 +146,9 @@ class TestSession:
             name=self.name, certifies=self.certifies, operator=self.operator, station=self.station,
             firmware_version=str(firmware) if firmware is not None else None, suite_version=self.suite_version,
             started_at=self.started_at, ended_at=self.ended_at, outcome=self.outcome, error=self.error,
-            context=self.context,
-            tests=[TestReport(test_class(item).id, self._checks(index)) for index, item in enumerate(self.tests)],
-        ).to_dict()
+            context=copy.deepcopy(self.context),
+            tests=[TestReport(test_class(item).id, copy.deepcopy(self._checks(index))) for index, item in enumerate(self.tests)],
+        )
 
     # ---- Internals ----
 
