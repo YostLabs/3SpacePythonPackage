@@ -1,4 +1,4 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestStatus, Confirm, step
+from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestKind, TestStatus, Confirm, step
 from yostlabs.tss3.utils.tests.cli import main
 
 import logging
@@ -11,6 +11,7 @@ class LEDTest(SensorTest):
     name = "LED"
     description = "Shows each color on the LED for user confirmation."
     variants = ALL_SENSORS
+    kind = TestKind.FUNCTIONAL
 
     @step("Red LED")
     def red(self):

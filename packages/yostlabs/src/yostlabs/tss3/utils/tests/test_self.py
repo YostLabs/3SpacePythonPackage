@@ -4,7 +4,7 @@
 # were missed, and may give additional information in the
 # case of failures.
 
-from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestStatus, step
+from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestKind, TestStatus, step
 from yostlabs.tss3.utils.tests.cli import main
 
 class SelfTest(SensorTest):
@@ -17,6 +17,7 @@ class SelfTest(SensorTest):
     name = "Self Test"
     description = "Runs the sensor's built-in self test."
     variants = ALL_SENSORS
+    kind = TestKind.FUNCTIONAL
 
     # Keys must be in order of the bits in the self test result bitfield.
     BIT_KEYS = ["accel", "gyro", "mag", "baro", "rtc", "gps", "bluetooth", "sd", "sms", "battery"]

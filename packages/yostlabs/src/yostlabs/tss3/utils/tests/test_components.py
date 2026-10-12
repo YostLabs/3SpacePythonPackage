@@ -17,7 +17,7 @@ import math
 import time
 from typing import Any
 
-from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestResult, TestStatus, Busy, Message, SkipStep, step
+from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestKind, TestResult, TestStatus, Busy, Message, SkipStep, step
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
@@ -63,6 +63,7 @@ class ComponentTest(SensorTest):
     name = "Component"
     description = "Tests the primary data components of the sensor (Accel, Gyro, Mag, Barometer)."
     variants = ALL_SENSORS
+    kind = TestKind.FUNCTIONAL
 
     CHECK_UPDATE_RATE_WAIT_DURATION = 3.0    # seconds to wait before checking update rate (gives time for it to update, including settling time)
     UPDATE_RATE_TOLERANCE = 0.01    # 1% tolerance for update rate vs true ODR

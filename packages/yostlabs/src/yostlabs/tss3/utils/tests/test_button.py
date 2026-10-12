@@ -2,7 +2,7 @@ from collections import deque
 from typing import Any
 import time
 
-from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, Busy, step
 from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.api import ThreespaceSensor
@@ -26,6 +26,7 @@ class ButtonTest(SensorTest):
     name = "Button"
     description = "Checks the button reads pressed while held down, and released when let go."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 
     HOLD_TIME = 2.0

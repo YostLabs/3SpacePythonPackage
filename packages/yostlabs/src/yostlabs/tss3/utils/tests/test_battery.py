@@ -1,4 +1,4 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, Busy, step
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager
 from yostlabs.tss3.api import ThreespaceSensor, ResponseTimeoutError
@@ -24,6 +24,7 @@ class BatteryTest(SensorTest):
     name = "Battery"
     description = "Checks the battery charges, and keeps the sensor running while it is unplugged."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 
     TIME_TOLERANCE_S = 1.0

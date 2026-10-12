@@ -5,7 +5,7 @@ so any run of the tests, from the command line or an application, produces the s
 {
     "serial": "1400010101000001",       # Hex. null when the sensor has no serial number (0)
     "name": "Full Test",
-    "certifies": false,
+    "certification_level": 1,           # The level passing it certifies the sensor to, see TestKind. null: none
     "operator": "Unknown",
     "station": "DESKTOP-1",             # The computer the tests ran on
     "firmware_version": "1.2.3",
@@ -19,7 +19,7 @@ so any run of the tests, from the command line or an application, produces the s
         {"test_id": "led", "check": "green", "components": [], "status": "fail", "message": "Did not match"}
     ],
     "tests": [                          # Every test of the session, in order, even those it never reached
-        {"test_id": "led", "status": "fail", "checks": [...]}   # checks: TestResult dicts, without their "test"
+        {"test_id": "led", "kind": "functional", "status": "fail", "checks": [...]}   # checks: TestResult dicts, without their "test"
     ]
 }
 """
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from yostlabs.tss3.utils.tests.base import TestResult, TestStatus, summarize
+from yostlabs.tss3.utils.tests.base import TestResult, TestStatus, TestKind, summarize
 
 OUTCOMES = ("running", "pass", "fail", "cancelled", "error")
 
@@ -36,6 +36,7 @@ OUTCOMES = ("running", "pass", "fail", "cancelled", "error")
 class TestReport:
     """One test of a session"""
     test_id: str
+    kind: TestKind                      # The test's, as it was when the session ran
     checks: list[TestResult] = field(default_factory=list)
 
     @property
@@ -49,12 +50,12 @@ class TestReport:
             data = check.to_dict()
             del data["test"]   # The test's own test_id, moving it to the parent dictionary
             checks.append(data)
-        return {"test_id": self.test_id, "status": self.status, "checks": checks}
+        return {"test_id": self.test_id, "kind": self.kind.value, "status": self.status, "checks": checks}
 
     @classmethod
     def from_dict(cls, data: dict) -> "TestReport":
         """status is not read: it always follows from the checks"""
-        return cls(data["test_id"], [TestResult.from_dict({**check, "test": data["test_id"]}) for check in data["checks"]])
+        return cls(data["test_id"], TestKind(data["kind"]), [TestResult.from_dict({**check, "test": data["test_id"]}) for check in data["checks"]])
 
 
 @dataclass
@@ -62,7 +63,7 @@ class SessionReport:
     """A test session's results document, see the module docstring"""
     serial: str | None
     name: str
-    certifies: bool
+    certification_level: int | None     # None: does not certify
     operator: str | None
     station: str
     firmware_version: str | None
@@ -87,7 +88,7 @@ class SessionReport:
         return {
             "serial": self.serial,
             "name": self.name,
-            "certifies": self.certifies,
+            "certification_level": self.certification_level,
             "operator": self.operator,
             "station": self.station,
             "firmware_version": self.firmware_version,
@@ -105,7 +106,8 @@ class SessionReport:
     @classmethod
     def from_dict(cls, data: dict) -> "SessionReport":
         """failed_checks and each test's status are not read: they always follow from the checks"""
-        return cls(serial=data["serial"], name=data["name"], certifies=data["certifies"], operator=data["operator"],
+        return cls(serial=data["serial"], name=data["name"], certification_level=data["certification_level"],
+                   operator=data["operator"],
                    station=data["station"], firmware_version=data["firmware_version"],
                    suite_version=data["suite_version"], started_at=_parse_time(data["started_at"]),
                    outcome=data["outcome"], tests=[TestReport.from_dict(test) for test in data["tests"]],

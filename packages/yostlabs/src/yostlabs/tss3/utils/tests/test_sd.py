@@ -1,4 +1,4 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, Busy, Confirm, step
+from yostlabs.tss3.utils.tests.base import SensorTest, TestKind, Busy, Confirm, step
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 
@@ -22,6 +22,7 @@ class SdTest(SensorTest):
     name = "SD Card"
     description = "Checks the SD card is detected and can be logged to."
     variants = ()   # Incomplete, so never selected. Run it directly while developing it
+    kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 
     EXPECTED_LOG_DURATION = 2.0  # seconds

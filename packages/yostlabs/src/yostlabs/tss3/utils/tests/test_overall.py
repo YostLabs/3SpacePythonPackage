@@ -1,7 +1,7 @@
 import sys
 
 from yostlabs.tss3 import ThreespaceSensor
-from yostlabs.tss3.utils.tests.base import SensorTest
+from yostlabs.tss3.utils.tests.base import SensorTest, TestKind
 from yostlabs.tss3.utils.tests.session import TestSession, TestItem, test_class
 from yostlabs.tss3.utils.tests.report import SessionReport
 from yostlabs.tss3.utils.tests.cli import run_cli
@@ -17,8 +17,9 @@ def run_test(sensor: ThreespaceSensor, tests: list[TestItem],
     session = run_cli(TestSession(tests, sensor, operator=operator, context=context, suite_version=test_suite_version))
     return session.outcome, session.report()
 
-def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True) -> list[type[SensorTest]] | None:
-    """The registered tests that apply to the sensor, in registration order"""
+def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True,
+                      kind: TestKind = TestKind.FUNCTIONAL) -> list[type[SensorTest]] | None:
+    """The registered tests of the kind that apply to the sensor, in registration order"""
     family = sensor.sensor_family
     if family == "Unknown":
         logger.warning("Unknown sensor family, cannot determine which tests to run.")
@@ -27,7 +28,7 @@ def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True) -> 
 
     logger.info(f"Detected sensor family: {family}.")
     variation = sensor.hardware_version.variation
-    return [test for test in SensorTest.REGISTERED if test.is_applicable(family, variation)]
+    return [test for test in SensorTest.REGISTERED if test.kind == kind and test.is_applicable(family, variation)]
 
 def verbose_run_tests(sensor: ThreespaceSensor,
                       tests: list[TestItem],

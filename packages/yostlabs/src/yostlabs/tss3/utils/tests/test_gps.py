@@ -1,4 +1,4 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, Busy, step
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.consts import *
 
@@ -20,6 +20,7 @@ class GPSTest(SensorTest):
     name = "GPS"
     description = "Checks the GPS outputs messages and receives commands."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 
     EXPECTED_MESSAGE_INTERVAL = 1.0 #Seconds

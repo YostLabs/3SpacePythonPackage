@@ -1,7 +1,7 @@
 import time
 import datetime
 
-from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestStatus, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, TestStatus, Busy, step
 from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.api import InvalidKeyError, ResponseTimeoutError
@@ -28,6 +28,7 @@ class RTCTest(SensorTest):
     name = "Clock"
     description = "Checks the real-time clock keeps time, including through a reset."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 
     TIME_CHANGE_TEST_DURATION = 1.0  # Seconds

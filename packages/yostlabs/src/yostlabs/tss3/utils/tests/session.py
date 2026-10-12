@@ -40,14 +40,15 @@ class TestSession:
     """
 
     def __init__(self, tests: list[TestItem], sensor: ThreespaceSensor = None, streaming_manager: ThreespaceStreamingManager = None,
-                 name: str = None, certifies: bool = False, operator: str = None, station: str = None,
+                 name: str = None, certification_level: int = None, operator: str = None, station: str = None,
                  context: dict = None, suite_version: str = "0.0.1"):
         """
         tests: test objects run as they are. Factories are called with sensor and streaming_manager when their turn
                comes, so a test is only created if the run gets that far.
         sensor: needed when any test is a factory. Defaults to the sensor of the first test object.
         streaming_manager: given to the tests created by factories. None: each test creates its own when it needs one.
-        name, certifies, operator, station, context, suite_version: recorded in report(), see report.py.
+        name, certification_level, operator, station, context, suite_version: recorded in report(), see report.py.
+            certification_level: the level passing the session certifies the sensor to (see TestKind), None for none.
             name defaults to the test's name, or "Sensor Tests" for several. station defaults to this computer's name.
             context is any extra information, Ex: the operating system.
         """
@@ -60,7 +61,7 @@ class TestSession:
             raise ValueError("Every test must be for the session's sensor")
         self.streaming_manager = streaming_manager
         self.name = name or (test_class(self.tests[0]).name if len(self.tests) == 1 else "Sensor Tests")
-        self.certifies = certifies
+        self.certification_level = certification_level
         self.operator = operator
         self.station = station or socket.gethostname()
         self.context = context or {}
@@ -143,11 +144,12 @@ class TestSession:
         firmware = self.sensor.firmware_version
         return SessionReport(
             serial=f"{self.sensor.serial_number:016X}" if self.sensor.serial_number else None,
-            name=self.name, certifies=self.certifies, operator=self.operator, station=self.station,
+            name=self.name, certification_level=self.certification_level, operator=self.operator, station=self.station,
             firmware_version=str(firmware) if firmware is not None else None, suite_version=self.suite_version,
             started_at=self.started_at, ended_at=self.ended_at, outcome=self.outcome, error=self.error,
             context=copy.deepcopy(self.context),
-            tests=[TestReport(test_class(item).id, copy.deepcopy(self._checks(index))) for index, item in enumerate(self.tests)],
+            tests=[TestReport(test_class(item).id, test_class(item).kind, copy.deepcopy(self._checks(index)))
+                   for index, item in enumerate(self.tests)],
         )
 
     # ---- Internals ----

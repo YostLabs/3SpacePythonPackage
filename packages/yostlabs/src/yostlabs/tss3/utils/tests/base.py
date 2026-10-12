@@ -292,6 +292,25 @@ ALL_SENSORS = (SensorVariant(),)
 
 
 # ----------------------------------------------------------------------
+# Test kinds
+# ----------------------------------------------------------------------
+
+class TestKind(str, Enum):
+    """
+    What a test checks. Each kind is a certification level: passing its tests certifies a sensor to that level, once
+    certified to every lower level. Lower levels come earlier in the chain.
+    """
+    FUNCTIONAL = "functional"   # The sensor works
+    RELEASE = "release"         # The sensor is ready to send to a customer, Ex: its serial number and clock are set
+
+    @property
+    def certification_level(self) -> int:
+        return _CERTIFICATION_LEVELS[self]
+
+_CERTIFICATION_LEVELS = {TestKind.FUNCTIONAL: 1, TestKind.RELEASE: 2}
+
+
+# ----------------------------------------------------------------------
 # SensorTest
 # ----------------------------------------------------------------------
 
@@ -318,6 +337,7 @@ class SensorTest:
     name: ClassVar[str]                         # Shown to the operator, Ex: "LED"
     description: ClassVar[str]                  # What the test checks, in a sentence or two for the operator
     variants: ClassVar[tuple[SensorVariant, ...]]   # The sensors it applies to, Ex: ALL_SENSORS
+    kind: ClassVar[TestKind]                    # What it checks, Ex: TestKind.FUNCTIONAL
     stop_on_failure: ClassVar[bool] = False     # Skip the remaining steps once a check fails
     steps: ClassVar[tuple[Step, ...]] = ()      # Collected from the @step methods, in declaration order
 
@@ -326,7 +346,7 @@ class SensorTest:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        for attribute in ("id", "name", "description", "variants"):
+        for attribute in ("id", "name", "description", "variants", "kind"):
             if not hasattr(cls, attribute):
                 raise TypeError(f"{cls.__name__} must define {attribute}")
         cls.steps = tuple(value for value in cls.__dict__.values() if isinstance(value, Step))
