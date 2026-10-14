@@ -349,6 +349,8 @@ class ComponentTest(SensorTest):
             dot = vec_dot(vec_normalize(values[0]), vec_normalize(values[-1]))
             direction_changed = dot < 0.0
             result.add_measurement("dot_product", dot)
+            result.add_measurement("direction_initial", values[0])
+            result.add_measurement("direction_final", values[-1])
             result.add_measurement("direction_changed", direction_changed)
             result.set_status(TestStatus.PASS if direction_changed else TestStatus.FAIL)
 
