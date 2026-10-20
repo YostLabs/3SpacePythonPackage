@@ -300,8 +300,8 @@ class TestKind(str, Enum):
     What a test checks. Each kind is a certification level: passing its tests certifies a sensor to that level, once
     certified to every lower level. Lower levels come earlier in the chain.
     """
-    FUNCTIONAL = "functional"   # The sensor works
-    RELEASE = "release"         # The sensor is ready to send to a customer, Ex: its serial number and clock are set
+    FUNCTIONAL = "functional"   # All sensor hardware works
+    RELEASE = "release"         # The sensor is prepared for shipping
 
     @property
     def certification_level(self) -> int:
