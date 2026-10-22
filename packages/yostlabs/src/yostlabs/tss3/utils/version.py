@@ -4,9 +4,9 @@ Firmware files: reading what they are for, picking the firmware for a sensor, an
 A firmware file is XML. The root's children before the first programming instruction are the header:
 
 <?xml version="1.0"?>
-<Firmware>                                          Any root name (older files use <root>)
+<Firmware>                                          Any root name, but folders only find <Firmware> files (older ones use <root>)
   <Version>Sep 30 2026 20:02:51</Version>           Exactly the version_firmware the sensor reports for this build
-  <Edition>compatibility</Edition>                  Optional: standard when missing
+  <Edition>compatibility</Edition>                  Optional: standard when missing. Any case
   <Hash algorithm="sha256">3f9a...</Hash>           Optional: of the decoded MemProgC bytes, all of them in order
   <Compatibility>                                   Optional, but files without it are never auto picked for a sensor
     <Hardware family="16" variation="000">          Hex as in the serial number
@@ -15,7 +15,7 @@ A firmware file is XML. The root's children before the first programming instruc
       <ExcludedBoard core="3" major="0" minor="c0"/>    Never for this board; any number of these
     </Hardware>
   </Compatibility>
-  <SetAddr/> <MemProgC>hex</MemProgC> <Finish/> <Run/>
+  <SetAddr/> <MemProgC>hex</MemProgC> <Finish/> <Run/>    Erase, program, end of the file (no action), boot
 </Firmware>
 
 The instructions follow the header. They must stay the root's children: older uploaders only look there.
@@ -36,7 +36,8 @@ from yostlabs.tss3.types import ThreespaceBoardRevision, ThreespaceHardwareVersi
 
 STANDARD_EDITION = "standard"
 
-INSTRUCTIONS = ("SetAddr", "MemProgC", "Finish", "Run")
+_ROOT = "Firmware"   # What a folder's firmware files are recognized by
+_INSTRUCTIONS = ("SetAddr", "MemProgC", "Finish", "Run")
 _HEADER = ("Version", "Edition", "Hash", "Compatibility")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -62,7 +63,9 @@ class ThreespaceFirmwareHardware:
         board = hardware.board_revision
         if board < self.min_board or board in self.excluded_boards:
             return ThreespaceFirmwareCompatibility.INCOMPATIBLE
-        return ThreespaceFirmwareCompatibility.TARGETED if board <= self.target_board else ThreespaceFirmwareCompatibility.OLDER_TARGET
+        if board > self.target_board:
+            return ThreespaceFirmwareCompatibility.OLDER_TARGET
+        return ThreespaceFirmwareCompatibility.TARGETED
 
 @dataclass(frozen=True)
 class ThreespaceFirmwareInfo:
@@ -70,7 +73,7 @@ class ThreespaceFirmwareInfo:
     path: str
     version: str | None             # With its whitespace collapsed. None: older files without one
     build_time: datetime | None     # From the version. None: older files whose version isn't the sensor's format
-    edition: str
+    edition: str                    # Lowercase, so editions match in any case
     hash: str | None                # Lowercase hex. None: older files without one
     hash_algorithm: str | None
     compatible_hardware: tuple[ThreespaceFirmwareHardware, ...] | None   # None: no Compatibility section
@@ -79,9 +82,13 @@ class ThreespaceFirmwareInfo:
         """How this firmware fits a sensor's hardware"""
         if self.compatible_hardware is None:
             return ThreespaceFirmwareCompatibility.UNKNOWN
-        # At most one entry is for the sensor's family and variation (parsing refuses duplicates): every other one says INCOMPATIBLE
-        fits = (entry.fit(hardware) for entry in self.compatible_hardware)
-        return next((fit for fit in fits if fit != ThreespaceFirmwareCompatibility.INCOMPATIBLE), ThreespaceFirmwareCompatibility.INCOMPATIBLE)
+        # At most one entry is for the sensor's family and variation (parsing refuses duplicates):
+        # every other one says INCOMPATIBLE
+        for entry in self.compatible_hardware:
+            fit = entry.fit(hardware)
+            if fit != ThreespaceFirmwareCompatibility.INCOMPATIBLE:
+                return fit
+        return ThreespaceFirmwareCompatibility.INCOMPATIBLE
 
     def is_version(self, sensor_version: str) -> bool:
         """Whether this is the firmware a sensor reports as its version_firmware"""
@@ -124,21 +131,30 @@ def read_firmware_info(path: str) -> ThreespaceFirmwareInfo:
     Returns:
     ThreespaceFirmwareInfo: The parsed firmware information from the header elements.
     """
+    with _prefix_errors_with(path):
+        _, header = _read_header(path)
+        return _parse_header(path, header)
+
+def _read_header(path: str) -> tuple[str, list[ET.Element]]:
+    """The root's tag, and the root's children before the first instruction (each complete)"""
     # iterparse reads the file as a stream, reporting each tag as it gets to it instead of building the whole tree first:
     #   "start": its opening tag was read. Its name and attributes are there, its text and children may not be yet.
     #   "end":   its closing tag was read, so it's complete, children included.
     # depth counts the tags open: the root's start makes it 1, so the root's children start at depth 2, and are
     # complete when their end brings it back to 1. Stopping at the first instruction's start means the large
     # programming data is never parsed (the file is read in chunks, so a little past it is read from disk).
-    header = []   # The root's children before the first instruction, complete
+    root_tag = None
+    header = []
     depth = 0
-    with _prefix_errors_with(path), open(path, "rb") as source:
+    with open(path, "rb") as source:
         try:
             for event, element in ET.iterparse(source, events=("start", "end")):
                 if event == "start":
                     depth += 1
+                    if depth == 1:
+                        root_tag = element.tag
                     # Stop parsing when the first instruction is encountered
-                    if depth == 2 and element.tag in INSTRUCTIONS:
+                    elif depth == 2 and element.tag in _INSTRUCTIONS:
                         break
                 else:
                     depth -= 1
@@ -146,7 +162,7 @@ def read_firmware_info(path: str) -> ThreespaceFirmwareInfo:
                         header.append(element)
         except ET.ParseError as error:
             raise FirmwareFileError(str(error)) from error
-        return _parse_header(path, header)
+    return root_tag, header
 
 def load_firmware_file(path: str) -> ThreespaceFirmwareFile:
     """A whole firmware file. Raises FirmwareFileError when it's malformed, or its programming data doesn't match its hash"""
@@ -158,7 +174,7 @@ def load_firmware_file(path: str) -> ThreespaceFirmwareFile:
             raise FirmwareFileError(str(error)) from error
         # Split the root's children where the instructions start, as read_firmware_info does: the header is what comes before
         children = list(root)
-        start = next((index for index, child in enumerate(children) if child.tag in INSTRUCTIONS), len(children))
+        start = next((index for index, child in enumerate(children) if child.tag in _INSTRUCTIONS), len(children))
         info = _parse_header(path, children[:start])
         # A header element after the instructions would be missed by read_firmware_info: Ex, a late <Compatibility> would
         # leave the file looking like an old one, uploading to anything
@@ -167,7 +183,10 @@ def load_firmware_file(path: str) -> ThreespaceFirmwareFile:
             raise FirmwareFileError(f"<{misplaced[0]}> must come before the instructions")
         # Anything else among the instructions is skipped, as older uploaders do
         instructions = tuple((child.tag, _program_data(child) if child.tag == "MemProgC" else None)
-                             for child in children[start:] if child.tag in INSTRUCTIONS)
+                             for child in children[start:] if child.tag in _INSTRUCTIONS)
+        # Without it, uploading would erase the firmware and put nothing in its place
+        if not any(name == "MemProgC" for name, _ in instructions):
+            raise FirmwareFileError("no <MemProgC>: nothing to program")
         firmware = ThreespaceFirmwareFile(info, instructions)
         if info.hash is not None and firmware.compute_hash(info.hash_algorithm) != info.hash:
             raise FirmwareFileError("the programming data doesn't match the file's hash (corrupted or edited)")
@@ -175,13 +194,17 @@ def load_firmware_file(path: str) -> ThreespaceFirmwareFile:
 
 def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None] = None) -> list[ThreespaceFirmwareInfo]:
     """
-    The headers of the firmware files (*.xml) directly in a folder. A file that can't be read raises, or when on_error
-    is given, is passed to it with the error and left out.
+    The headers of the firmware files directly in a folder: the *.xml files whose root is <Firmware>. Others are left out,
+    including older firmware files (their root is <root>), which can still be read and uploaded by their path.
+    A file that can't be read raises, or when on_error is given, is passed to it with the error and left out.
     """
     firmware = []
     for path in sorted(entry.path for entry in os.scandir(folder) if entry.is_file() and entry.name.lower().endswith(".xml")):
         try:
-            firmware.append(read_firmware_info(path))
+            with _prefix_errors_with(path):
+                root_tag, header = _read_header(path)
+                if root_tag == _ROOT:
+                    firmware.append(_parse_header(path, header))
         except (FirmwareFileError, OSError) as error:
             if on_error is None:
                 raise
@@ -197,16 +220,17 @@ def compatible_firmware(firmware: Iterable[ThreespaceFirmwareInfo], hardware: Th
     the files built for its board or a newer one, newest first, then the files built for an older board, newest first.
     edition: only that edition, or any when None. Never the files that are incompatible or say nothing about their hardware.
     """
-    fits = [(info, info.fit(hardware)) for info in firmware if edition is None or info.edition == edition]
+    fits = [(info, info.fit(hardware)) for info in firmware if edition is None or info.edition == edition.lower()]
     def ordered_by_newest(wanted: ThreespaceFirmwareCompatibility):
         return sorted((info for info, fit in fits if fit == wanted), key=lambda info: info.build_time, reverse=True)
-    return ordered_by_newest(ThreespaceFirmwareCompatibility.TARGETED) + ordered_by_newest(ThreespaceFirmwareCompatibility.OLDER_TARGET)
+    return (ordered_by_newest(ThreespaceFirmwareCompatibility.TARGETED)
+            + ordered_by_newest(ThreespaceFirmwareCompatibility.OLDER_TARGET))
 
 def pick_firmware(firmware: Iterable[ThreespaceFirmwareInfo], hardware: ThreespaceHardwareVersion,
-                  edition: str = STANDARD_EDITION) -> ThreespaceFirmwareInfo | None:
+                  edition: str | None = STANDARD_EDITION) -> ThreespaceFirmwareInfo | None:
     """
-    The firmware to put on a sensor automatically, or None when there is none for its hardware. Check its fit():
-    OLDER_TARGET means it was built for an older board, which deserves a warning.
+    The firmware to put on a sensor automatically, or None when there is none for its hardware. edition: as for
+    compatible_firmware(). Check its fit(): OLDER_TARGET means it was built for an older board, which deserves a warning.
     """
     found = compatible_firmware(firmware, hardware, edition)
     return found[0] if found else None
@@ -252,14 +276,15 @@ def _parse_header(path: str, header: list[ET.Element]) -> ThreespaceFirmwareInfo
         build_time = _build_time(version)
     edition = STANDARD_EDITION
     if "Edition" in elements:
-        edition = (elements["Edition"].text or "").strip()
+        edition = (elements["Edition"].text or "").strip().lower()
         if not edition:
             raise FirmwareFileError("<Edition> is empty")
     hash = hash_algorithm = None
     if "Hash" in elements:
-        hash_algorithm = elements["Hash"].get("algorithm")
-        if hash_algorithm not in hashlib.algorithms_available:
-            raise FirmwareFileError(f"<Hash> needs an algorithm this computer has (Ex: sha256), not {hash_algorithm}")
+        hash_algorithm = (elements["Hash"].get("algorithm") or "").lower()
+        # The shake algorithms are left out: their hexdigest() needs a length
+        if hash_algorithm not in hashlib.algorithms_available or hash_algorithm.startswith("shake_"):
+            raise FirmwareFileError(f"<Hash> needs an algorithm this computer has (Ex: sha256), not {hash_algorithm or 'none'}")
         hash = (elements["Hash"].text or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]+", hash):
             raise FirmwareFileError("<Hash> isn't hex")
@@ -269,6 +294,9 @@ def _parse_header(path: str, header: list[ET.Element]) -> ThreespaceFirmwareInfo
         if build_time is None:
             raise FirmwareFileError(f"<Version> must be the sensor's version_firmware (Ex: Sep 30 2026 20:02:51), not {version}")
         compatible_hardware = tuple(_parse_hardware(element) for element in elements["Compatibility"].findall("Hardware"))
+        # Ex: a misspelled <Hardware>, which would make the firmware refuse every sensor without saying why
+        if not compatible_hardware:
+            raise FirmwareFileError("<Compatibility> has no <Hardware>")
         families = [(entry.family_id, entry.variation) for entry in compatible_hardware]
         if len(set(families)) != len(families):
             raise FirmwareFileError("more than one <Hardware> for the same family and variation")
@@ -279,7 +307,8 @@ def _parse_hardware(element: ET.Element) -> ThreespaceFirmwareHardware:
     family_id = _hex(element, "family", (2,))
     variation = _hex(element, "variation", (1, 2, 3))
     # Its board elements by name, in file order
-    boards = {tag: [_parse_board(board) for board in element.findall(tag)] for tag in ("MinBoard", "TargetBoard", "ExcludedBoard")}
+    boards = {tag: [_parse_board(board) for board in element.findall(tag)]
+              for tag in ("MinBoard", "TargetBoard", "ExcludedBoard")}
     for tag in ("MinBoard", "TargetBoard"):
         if len(boards[tag]) != 1:
             raise FirmwareFileError(f"<Hardware> needs one <{tag}>, not {len(boards[tag])}")
@@ -317,7 +346,7 @@ def _program_data(element: ET.Element) -> bytes:
 
 class ThreespaceFirmwareUploader:
 
-    def __init__(self, sensor: ThreespaceSensor, file_path: str = None, percentage_callback: Callable[[int],None] = None, verbose: bool = False):
+    def __init__(self, sensor: ThreespaceSensor, file_path: str = None, percentage_callback: Callable[[float],None] = None, verbose: bool = False):
         self.sensor = sensor
         self.firmware: ThreespaceFirmwareFile | None = None
         self.set_firmware_path(file_path)
@@ -398,7 +427,7 @@ class ThreespaceFirmwareUploader:
                 self.log("Resetting with new firmware.")
                 self.sensor.bootloader_boot_firmware()
                 self.__set_percent_complete(100)
-            # Finish: ignored, as it always has been
+            # Finish: only marks the end of the file, nothing to do
 
 def _bootloader_error(error: int) -> str:
     return "no response" if error == -1 else f"error {error}"
