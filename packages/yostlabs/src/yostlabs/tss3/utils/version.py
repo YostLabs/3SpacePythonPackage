@@ -197,6 +197,8 @@ def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None]
     The headers of the firmware files directly in a folder: the *.xml files whose root is <Firmware>. Others are left out,
     including older firmware files (their root is <root>), which can still be read and uploaded by their path.
     A file that can't be read raises, or when on_error is given, is passed to it with the error and left out.
+    The error's message already starts with the file's path (an OSError's names it too), so show it on its own.
+    Reads only the headers: a file listed can still fail to load for uploading (see verify in compatible_firmware()).
     """
     firmware = []
     for path in sorted(entry.path for entry in os.scandir(folder) if entry.is_file() and entry.name.lower().endswith(".xml")):
@@ -214,26 +216,41 @@ def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None]
 # ---- Picking firmware --------------------------------------------------------
 
 def compatible_firmware(firmware: Iterable[ThreespaceFirmwareInfo], hardware: ThreespaceHardwareVersion,
-                        edition: str | None = STANDARD_EDITION) -> list[ThreespaceFirmwareInfo]:
+                        edition: str | None = STANDARD_EDITION, verify: bool = False) -> list[ThreespaceFirmwareInfo]:
     """
     The firmware for a sensor's hardware, in the order it would be picked:
     the files built for its board or a newer one, newest first, then the files built for an older board, newest first.
     edition: only that edition, or any when None. Never the files that are incompatible or say nothing about their hardware.
+    verify: also leave out the files that won't load for uploading (see _loads()). Loads every file found, so it's slow.
     """
     fits = [(info, info.fit(hardware)) for info in firmware if edition is None or info.edition == edition.lower()]
     def ordered_by_newest(wanted: ThreespaceFirmwareCompatibility):
         return sorted((info for info, fit in fits if fit == wanted), key=lambda info: info.build_time, reverse=True)
-    return (ordered_by_newest(ThreespaceFirmwareCompatibility.TARGETED)
-            + ordered_by_newest(ThreespaceFirmwareCompatibility.OLDER_TARGET))
+    found = (ordered_by_newest(ThreespaceFirmwareCompatibility.TARGETED)
+             + ordered_by_newest(ThreespaceFirmwareCompatibility.OLDER_TARGET))
+    return [info for info in found if _loads(info)] if verify else found
 
 def pick_firmware(firmware: Iterable[ThreespaceFirmwareInfo], hardware: ThreespaceHardwareVersion,
-                  edition: str | None = STANDARD_EDITION) -> ThreespaceFirmwareInfo | None:
+                  edition: str | None = STANDARD_EDITION, verify: bool = False) -> ThreespaceFirmwareInfo | None:
     """
     The firmware to put on a sensor automatically, or None when there is none for its hardware. edition: as for
     compatible_firmware(). Check its fit(): OLDER_TARGET means it was built for an older board, which deserves a warning.
+    verify: the first file that loads for uploading (see _loads()), passing over any that don't. Loads only until one
+    does, so usually just the one picked.
     """
     found = compatible_firmware(firmware, hardware, edition)
-    return found[0] if found else None
+    return next((info for info in found if not verify or _loads(info)), None)
+
+def _loads(info: ThreespaceFirmwareInfo) -> bool:
+    """
+    Whether a file loads for uploading: read_firmware_info() reads only its header, so this is what finds the
+    files that are corrupted (Ex: don't match their hash) or malformed after the header, and the ones gone since
+    """
+    try:
+        load_firmware_file(info.path)
+        return True
+    except (FirmwareFileError, OSError):
+        return False
 
 # ---- Parsing -----------------------------------------------------------------
 
