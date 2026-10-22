@@ -7,6 +7,7 @@ from yostlabs.tss3.types import (
     ThreespaceCmdResult,
     ThreespaceBootloaderInfo,
     ThreespaceHardwareVersion,
+    ThreespaceBoardRevision,
     ThreespaceHeader,
     ThreespaceHeaderInfo,
 )
@@ -24,6 +25,8 @@ from yostlabs.tss3.errors import (
     InvalidKeyError,
     SettingAccessError,
     UnsupportedCommandError,
+    FirmwareFileError,
+    FirmwareUploadError,
 )
 
 from yostlabs.tss3.commands import (

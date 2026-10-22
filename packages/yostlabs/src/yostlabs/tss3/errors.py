@@ -13,7 +13,9 @@ ThreespaceError
 │   ├── UnregisteredKeyError    - Key is not in the API's own settings table
 │   ├── InvalidKeyError         - Firmware rejected the key (e.g. <KEY_ERROR> response)
 │   └── SettingAccessError      - Setting exists but cannot be read or written that way
-└── UnsupportedCommandError - Command is not available on this particular sensor
+├── UnsupportedCommandError - Command is not available on this particular sensor
+├── FirmwareFileError       - A firmware file is malformed or does not match its hash
+└── FirmwareUploadError     - Firmware is not for the sensor, or the bootloader refused it
 """
 
 
@@ -81,3 +83,13 @@ class UnsupportedCommandError(ThreespaceError):
 
 class UnsupportedTestError(ThreespaceError):
     """Raised when a test is not available on the connected sensor model."""
+
+
+# --- Firmware errors ---
+
+class FirmwareFileError(ThreespaceError):
+    """Raised when a firmware file is malformed, or its programming data does not match its hash."""
+
+
+class FirmwareUploadError(ThreespaceError):
+    """Raised when firmware is not for the sensor's hardware, or the bootloader refuses to erase or program it."""
