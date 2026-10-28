@@ -193,8 +193,16 @@ def load_firmware_file(path: str) -> ThreespaceFirmwareFile:
             raise FirmwareFileError("the programming data doesn't match the file's hash (corrupted or edited)")
         return firmware
 
+FirmwareFolderCache = dict[str, tuple[tuple[int, int], ThreespaceFirmwareInfo | Exception | None]]
+"""
+read_firmware_folder()'s memory of the files it read, kept by its caller between reads. By path: the file's (size,
+modification time in ns) when read, and what it was: its header, the error reading it, or None when it isn't a folder's
+firmware file (Ex: an older <root> file)
+"""
+
 def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None] = None,
-                         search_depth: int | None = None) -> list[ThreespaceFirmwareInfo]:
+                         search_depth: int | None = None, cache: FirmwareFolderCache | None = None
+                         ) -> list[ThreespaceFirmwareInfo]:
     """
     The headers of the firmware files in a folder and its subfolders: the *.xml files whose root is <Firmware>. Others
     are left out, including older firmware files (their root is <root>), which can still be read and uploaded by their path.
@@ -204,6 +212,9 @@ def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None]
     The error's message already starts with the file's path (an OSError's names it too), so show it on its own.
     The folder itself not being readable always raises its OSError.
     Reads only the headers: a file listed can still fail to load for uploading (see verify in compatible_firmware()).
+    cache: an empty dict to keep between reads, which then open only the files new or changed (by size and modification
+    time) since. Opening is what's slow on a network drive (several round trips each), while listing a folder gives each
+    file's size and time without opening it. Files gone stay in it, which is harmless.
     """
     if search_depth is not None and search_depth < 0:
         raise ValueError(f"search_depth must be 0 or more, or None for no limit, not {search_depth}")
@@ -217,10 +228,19 @@ def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None]
                     if search_depth is None or depth < search_depth:
                         read(entry.path, depth + 1)
                 elif entry.is_file() and entry.name.lower().endswith(".xml"):
-                    with _prefix_errors_with(entry.path):
-                        root_tag, header = _read_header(entry.path)
-                        if root_tag == _ROOT:
-                            firmware.append(_parse_header(entry.path, header))
+                    stat = entry.stat()   # From the folder's listing on Windows: the file isn't opened
+                    file_state = (stat.st_size, stat.st_mtime_ns)
+                    cached = cache.get(entry.path) if cache is not None else None
+                    if cached is not None and cached[0] == file_state:
+                        outcome = cached[1]
+                    else:
+                        outcome = _read_folder_file(entry.path)
+                        if cache is not None:
+                            cache[entry.path] = (file_state, outcome)
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    if outcome is not None:
+                        firmware.append(outcome)
             except (FirmwareFileError, OSError) as error:
                 if on_error is None:
                     raise
@@ -228,6 +248,18 @@ def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None]
                 on_error(entry.path, error)
     read(folder, 0)
     return firmware
+
+def _read_folder_file(path: str) -> ThreespaceFirmwareInfo | FirmwareFileError | OSError | None:
+    """
+    A folder's *.xml file: its header, the error reading it (returned, so it can be cached), or None when its root isn't
+    <Firmware>
+    """
+    try:
+        with _prefix_errors_with(path):
+            root_tag, header = _read_header(path)
+            return _parse_header(path, header) if root_tag == _ROOT else None
+    except (FirmwareFileError, OSError) as error:
+        return error
 
 # ---- Picking firmware --------------------------------------------------------
 
