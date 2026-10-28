@@ -192,25 +192,40 @@ def load_firmware_file(path: str) -> ThreespaceFirmwareFile:
             raise FirmwareFileError("the programming data doesn't match the file's hash (corrupted or edited)")
         return firmware
 
-def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None] = None) -> list[ThreespaceFirmwareInfo]:
+def read_firmware_folder(folder: str, on_error: Callable[[str, Exception], None] = None,
+                         search_depth: int | None = None) -> list[ThreespaceFirmwareInfo]:
     """
-    The headers of the firmware files directly in a folder: the *.xml files whose root is <Firmware>. Others are left out,
-    including older firmware files (their root is <root>), which can still be read and uploaded by their path.
-    A file that can't be read raises, or when on_error is given, is passed to it with the error and left out.
+    The headers of the firmware files in a folder and its subfolders: the *.xml files whose root is <Firmware>. Others
+    are left out, including older firmware files (their root is <root>), which can still be read and uploaded by their path.
+    search_depth is how many subfolders deep to look: 0 for only the files directly in the folder, 1 for its subfolders'
+    too, and so on; None for no limit. Links to folders aren't followed.
+    A file or subfolder that can't be read raises, or when on_error is given, is passed to it with the error and left out.
     The error's message already starts with the file's path (an OSError's names it too), so show it on its own.
+    The folder itself not being readable always raises its OSError.
     Reads only the headers: a file listed can still fail to load for uploading (see verify in compatible_firmware()).
     """
+    if search_depth is not None and search_depth < 0:
+        raise ValueError(f"search_depth must be 0 or more, or None for no limit, not {search_depth}")
     firmware = []
-    for path in sorted(entry.path for entry in os.scandir(folder) if entry.is_file() and entry.name.lower().endswith(".xml")):
-        try:
-            with _prefix_errors_with(path):
-                root_tag, header = _read_header(path)
-                if root_tag == _ROOT:
-                    firmware.append(_parse_header(path, header))
-        except (FirmwareFileError, OSError) as error:
-            if on_error is None:
-                raise
-            on_error(path, error)
+    def read(folder: str, depth: int):
+        with os.scandir(folder) as scan:
+            entries = sorted(scan, key=lambda entry: entry.name)
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if search_depth is None or depth < search_depth:
+                        read(entry.path, depth + 1)
+                elif entry.is_file() and entry.name.lower().endswith(".xml"):
+                    with _prefix_errors_with(entry.path):
+                        root_tag, header = _read_header(entry.path)
+                        if root_tag == _ROOT:
+                            firmware.append(_parse_header(entry.path, header))
+            except (FirmwareFileError, OSError) as error:
+                if on_error is None:
+                    raise
+                # For a subfolder, only it not being listable: its files' errors were passed on by its read()
+                on_error(entry.path, error)
+    read(folder, 0)
     return firmware
 
 # ---- Picking firmware --------------------------------------------------------
