@@ -120,7 +120,8 @@ class ThreespaceFirmwareFile:
 #   for child in element    its child elements, in file order (text and comments aren't children)
 #   element.findall("Hardware")   its child elements with that tag, in file order
 # The <?xml ...?> declaration isn't an element: the root is the one element holding everything else (<Firmware>).
-# Malformed XML raises ET.ParseError, turned into FirmwareFileError.
+# Malformed XML raises ET.ParseError, and an encoding Python doesn't know LookupError: both are turned into
+# FirmwareFileError.
 # Elements and attributes not used here are ignored, so a file with later additions still reads.
 # Errors name the file: the two readers below add its path to the FirmwareFileErrors raised inside them
 # (_prefix_errors_with), so the parsing helpers needn't take it.
@@ -160,7 +161,7 @@ def _read_header(path: str) -> tuple[str, list[ET.Element]]:
                     depth -= 1
                     if depth == 1:
                         header.append(element)
-        except ET.ParseError as error:
+        except (ET.ParseError, LookupError) as error:   # LookupError: an encoding Python doesn't know, Ex: "unicode"
             raise FirmwareFileError(str(error)) from error
     return root_tag, header
 
@@ -170,7 +171,7 @@ def load_firmware_file(path: str) -> ThreespaceFirmwareFile:
         # parse reads the whole file into a tree of elements; getroot is its root element
         try:
             root = ET.parse(path).getroot()
-        except ET.ParseError as error:
+        except (ET.ParseError, LookupError) as error:   # As in _read_header()
             raise FirmwareFileError(str(error)) from error
         # Split the root's children where the instructions start, as read_firmware_info does: the header is what comes before
         children = list(root)
