@@ -279,15 +279,18 @@ def compatible_firmware(firmware: Iterable[ThreespaceFirmwareInfo], hardware: Th
     return [info for info in found if _loads(info)] if verify else found
 
 def pick_firmware(firmware: Iterable[ThreespaceFirmwareInfo], hardware: ThreespaceHardwareVersion,
-                  edition: str | None = STANDARD_EDITION, verify: bool = False) -> ThreespaceFirmwareInfo | None:
+                  edition: str | None = STANDARD_EDITION, verify: bool = False,
+                  hash: str | None = None) -> ThreespaceFirmwareInfo | None:
     """
     The firmware to put on a sensor automatically, or None when there is none for its hardware. edition: as for
     compatible_firmware(). Check its fit(): OLDER_TARGET means it was built for an older board, which deserves a warning.
     verify: the first file that loads for uploading (see _loads()), passing over any that don't. Loads only until one
     does, so usually just the one picked.
+    hash: only the build with this <Hash> (any case), Ex: one a product is pinned to. None: the newest
     """
     found = compatible_firmware(firmware, hardware, edition)
-    return next((info for info in found if not verify or _loads(info)), None)
+    return next((info for info in found
+                 if (hash is None or info.hash == hash.lower()) and (not verify or _loads(info))), None)
 
 def _loads(info: ThreespaceFirmwareInfo) -> bool:
     """
