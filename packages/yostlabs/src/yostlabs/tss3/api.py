@@ -1501,8 +1501,10 @@ class ThreespaceSensor:
     
     def bootloader_erase_firmware(self, timeout=20):
         """
-        This may take a long time
+        This may take a long time. Afterwards firmware_version is None (unknown) until the sensor boots into firmware again
         """
+        #Forgotten before the command is sent: the firmware may be gone even if no response comes back
+        self.firmware_version = None
         self.com.write('S'.encode())
 
         start_time = time.perf_counter()
