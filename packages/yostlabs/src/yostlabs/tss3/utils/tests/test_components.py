@@ -44,11 +44,12 @@ class ComponentTest(SensorTest):
         Compare measured update rates to the 1000 ODR true values (within 1% tolerance).
     Flip:
         Set ODR=50 for all components. Read back true set ODR.
-        The operator places the sensor on a flat surface, then flips it upside down while it streams.
+        The operator places the sensor on a flat surface, then flips it upside down while it streams calibrated
+        data (see FLIP_STREAM_COMMANDS).
         Compare measured update rates to the 50 ODR true values (within 1% tolerance).
         Analyze flip data per component:
         - Accel: verify gravity vector direction reversed.
-        - Gyro: verify integrated rotation >= 120 degrees (raw gyro assumed in rad/s),
+        - Gyro: verify integrated rotation >= 120 degrees (gyro in rad/s),
           and that it predicts the change in each accel's direction.
         - Mag: verify field vector direction reversed.
     Barometer raise, Barometer lower (if any barometer's data changed in 1000 Hz data):
@@ -86,6 +87,13 @@ class ComponentTest(SensorTest):
         "mag": StreamableCommands.GetRawMagVec,
         "baro": StreamableCommands.GetBarometerAltitudeById,
     }
+    # The flip judges calibrated data: a battery in the case can bias the raw readings so much they never reverse. A
+    # stopgap: such a sensor has to be calibrated before it can pass
+    FLIP_STREAM_COMMANDS = STREAM_COMMANDS | {
+        "accel": StreamableCommands.GetCorrectedAccelVec,
+        "gyro": StreamableCommands.GetCorrectedGyroRate,
+        "mag": StreamableCommands.GetCorrectedMagVec,
+    }
 
     def __init__(self, sensor: ThreespaceSensor,
                  expected_components: list[str] | None = None,
@@ -97,6 +105,7 @@ class ComponentTest(SensorTest):
 
         # Streamed data. "time": [s], <type>: {id: [values]}, "baro_ema": {id: [smoothed altitudes]}
         self._samples: dict = {}
+        self._stream_commands = self.STREAM_COMMANDS   # Those _samples are of
         self._flip_samples: dict = {}
         self._baro_ema_state: dict[int, float | None] = {}
         self._baro_active = False   # The barometer altitude stages are running
@@ -293,8 +302,8 @@ class ComponentTest(SensorTest):
         self._analyze_static_data(self._samples)
 
     def _collect_flip_data(self):
-        """Streams while the operator flips the sensor"""
-        self._start_sampling()
+        """Streams calibrated data while the operator flips the sensor"""
+        self._start_sampling(self.FLIP_STREAM_COMMANDS)
         while True:
             self.streaming_manager.update()
             if (yield Busy("Flip the sensor upside down.", actions=("Flipped",))) == "Flipped":
@@ -464,12 +473,14 @@ class ComponentTest(SensorTest):
     # Streaming
     # ------------------------------------------------------------------
 
-    def _start_sampling(self):
-        """Clears the samples and streams every component, collecting one sample per packet"""
+    def _start_sampling(self, stream_commands: dict = None):
+        """Clears the samples and streams every component, collecting one sample per packet.
+        stream_commands: the command streamed per component type, STREAM_COMMANDS (raw) by default"""
+        self._stream_commands = stream_commands or self.STREAM_COMMANDS
         self._samples = {"time": []} | {ctype: {cid: [] for cid in ids} for ctype, ids in self._ids.items()}
         self._samples["baro_ema"] = {cid: [] for cid in self._ids["baro"]}
         commands = [(StreamableCommands.GetTimestamp, None)] + \
-                   [(self.STREAM_COMMANDS[ctype], cid) for ctype, cid in self._components()]
+                   [(self._stream_commands[ctype], cid) for ctype, cid in self._components()]
         self.start_streaming(commands, self._on_streaming_data, hz=self.STREAMING_HZ)
 
     def _on_streaming_data(self, status: ThreespaceStreamingStatus, user_data: Any = None):
@@ -479,7 +490,7 @@ class ComponentTest(SensorTest):
         manager = self.streaming_manager
         self._samples["time"].append(manager.get_value(StreamableCommands.GetTimestamp) / 1_000_000)
         for ctype, cid in self._components():
-            self._samples[ctype][cid].append(manager.get_value(self.STREAM_COMMANDS[ctype], cid))
+            self._samples[ctype][cid].append(manager.get_value(self._stream_commands[ctype], cid))
         for cid in self._ids["baro"]:
             value = self._samples["baro"][cid][-1]
             prev = self._baro_ema_state.get(cid)
