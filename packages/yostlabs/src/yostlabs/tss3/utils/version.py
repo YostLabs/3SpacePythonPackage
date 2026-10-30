@@ -268,10 +268,12 @@ def compatible_firmware(firmware: Iterable[ThreespaceFirmwareInfo], hardware: Th
     """
     The firmware for a sensor's hardware, in the order it would be picked:
     the files built for its board or a newer one, newest first, then the files built for an older board, newest first.
-    edition: only that edition, or any when None. Never the files that are incompatible or say nothing about their hardware.
+    edition: only that edition, or any when None. Never the files that are incompatible or say nothing about their hardware,
+    nor those whose version isn't in the sensor's format (build_time None): they can't be ordered by age.
     verify: also leave out the files that won't load for uploading (see _loads()). Loads every file found, so it's slow.
     """
-    fits = [(info, info.fit(hardware)) for info in firmware if edition is None or info.edition == edition.lower()]
+    fits = [(info, info.fit(hardware)) for info in firmware
+            if info.build_time is not None and (edition is None or info.edition == edition.lower())]
     def ordered_by_newest(wanted: ThreespaceFirmwareCompatibility):
         return sorted((info for info, fit in fits if fit == wanted), key=lambda info: info.build_time, reverse=True)
     found = (ordered_by_newest(ThreespaceFirmwareCompatibility.TARGETED)
