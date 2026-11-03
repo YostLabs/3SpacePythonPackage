@@ -28,7 +28,7 @@ class AxisOrder:
         >>> axis.to_xyz_string()  # 'xyz'
         >>> axis.to_compass_string()  # 'eun'
         >>> axis.order  # [0, 1, 2]
-        >>> axis.is_right_handed  # True
+        >>> axis.is_right_handed  # False
     """
     
     # Compass mapping
