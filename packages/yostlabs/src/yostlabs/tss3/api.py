@@ -1,5 +1,4 @@
 from yostlabs.communication.base import ThreespaceComClass
-from yostlabs.communication.serial import ThreespaceSerialComClass
 
 from yostlabs.tss3.consts import *
 import yostlabs.tss3.specs as specs
@@ -52,6 +51,7 @@ class ThreespaceSensor:
     
     def __init__(self, com = None, timeout=2, verbose=False, initial_clear_timeout=None):
         if com is None: #Default to attempting to use the serial com class if none is provided
+            from yostlabs.communication.serial import ThreespaceSerialComClass
             com = ThreespaceSerialComClass
         self.verbose = verbose
 
@@ -75,6 +75,7 @@ class ThreespaceSensor:
                 self.com.open()
                 manually_opened_com = True
         else: #Unknown type, try making a ThreespaceSerialComClass out of this
+            from yostlabs.communication.serial import ThreespaceSerialComClass
             try:
                 self.com = ThreespaceSerialComClass(com)
                 self.com.open()
@@ -115,7 +116,6 @@ class ThreespaceSensor:
         self.serial_number = None
         self.hardware_version: ThreespaceHardwareVersion = None
         self.short_serial_number = None
-        self.sensor_family = None
         self.firmware_version = None
 
         self.commands: list[ThreespaceCommand] = [None] * 256
@@ -126,14 +126,7 @@ class ThreespaceSensor:
 
         self.log("Checking firmware status")
         try:
-            self.__cached_in_bootloader = self.__check_bootloader_status()
-            if not self.in_bootloader:
-                self.log("Initializing firmware")
-                self.__firmware_init()
-            else:
-                self.log("Initializing bootloader")
-                self.__cache_serial_number(self.bootloader_get_sn())
-                self.__empty_debug_cache()
+            self.__dynamic_reinit()
         #This is just to prevent a situation where instantiating the API creates and fails to release a com class on failure when user catches the exception
         #If user provides the com class, it is up to them to handle its state on error
         except Exception as e:
@@ -160,6 +153,16 @@ class ThreespaceSensor:
                 data = self.com.read_all()
                 if len(data) > 0:
                     break #Refresh the start time and wait for more data
+
+    def __dynamic_reinit(self):
+        self.__cached_in_bootloader = self.__check_bootloader_status()
+        if not self.__cached_in_bootloader:
+            self.log("Initializing firmware")
+            self.__firmware_init()
+        else:
+            self.log("Initializing bootloader")
+            self.__cache_serial_number(self.bootloader_get_sn())
+            self.__empty_debug_cache()
 
     def __firmware_init(self):
         """
@@ -271,19 +274,57 @@ class ThreespaceSensor:
                 return command
         return None
     
-    def __attempt_rediscover_self(self):
+    def attempt_reconnect(self, timeout=1):
         """
         Trys to change the com class currently being used to be a detected
         com class with the same serial number. Useful for re-enumeration, such as when
         entering bootloader and using USB.
+
+        Params
+        ------
+        timeout: float
+            The maximum amount of time, in seconds, to attempt the reconnection before giving up. If 0, will only attempt once
+            and be non-blocking
         """
-        for potential_com in self.com.auto_detect():
-            potential_com.open()
-            sensor = ThreespaceSensor(potential_com)
-            if sensor.serial_number == self.serial_number:
-                self.com = potential_com
-                return True
-            sensor.cleanup() #Handles closing the potential_com
+        closed_port = False
+        start_time = time.perf_counter()
+        elapsed_time = -1 #To guarantee at least 1 iteration of the loop, initialize to a negative value
+        while elapsed_time < timeout:
+            if self.com.check_open():
+                #Com port still function, just try and reinit the sensor
+                try:
+                    self.__dynamic_reinit()
+                    return True
+                except:
+                    pass
+            else:
+                #Even though it is considered not open, the OS may be holding onto info
+                #This is to clean that up.
+                if not closed_port:
+                    self.com.close()
+                    closed_port = True
+
+                #Need to rediscover the com port
+                potential_coms = [self.com] if not self.com.reenumerates else self.com.auto_detect()
+                try:
+                    for potential_com in potential_coms:
+                        try:
+                            potential_com.open()
+                            sensor = ThreespaceSensor(potential_com)
+                            if sensor.serial_number == self.serial_number:
+                                self.com = potential_com
+                                self.__dynamic_reinit()  # Reinitialize the sensor state after reconnect
+                                return True
+                            sensor.cleanup() #Handles closing the potential_com
+                        except Exception as e:
+                            continue
+                finally:
+                    # Close the auto_detect generator here when returning partway through it. Otherwise garbage collection
+                    # closes it, by raising GeneratorExit inside it with no Python code above to catch it, which debuggers
+                    # then stop on as an uncaught exception
+                    if hasattr(potential_coms, "close"):
+                        potential_coms.close()
+            elapsed_time = time.perf_counter() - start_time
         return False
 
     def __cache_header_settings(self):
@@ -331,12 +372,20 @@ class ThreespaceSensor:
         self.hardware_version = ThreespaceHardwareVersion.from_serial_number(serial_number)
 
         self.short_serial_number = self.hardware_version.short_serial_number
-        self.sensor_family = self.hardware_version.family_name
         if self.sensor_family == "Unknown":
             self.log(f"Unknown Sensor Family detected, {self.hardware_version.family_id}")
 
     def __cache_debug_mode(self):
         self.immediate_debug = self.readDebugMode()
+
+    @property
+    def sensor_family(self):
+        family = self.hardware_version.family_name
+        if family == "Unknown":
+            #Check to see if the com class knows (Like via PID in USB)
+            if hasattr(self.com, "suffix"):
+                family = self.com.suffix
+        return family
 
 #--------------------------------REINIT/DIRTY Helpers-----------------------------------------------
     def set_cached_settings_dirty(self, 
@@ -371,9 +420,10 @@ class ThreespaceSensor:
         #set the most severe state and get correct operations.
         if dirty_flags & DIRTY_FLAGS_UNKNOWN_STATE:
             if self.com.reenumerates and not self.com.check_open(): #Must check this, as could have transitioned from bootloader to firmware or vice versa and just needs re-opened/detected
-                success = self.__attempt_rediscover_self()
+                success = self.attempt_reconnect()
                 if not success:
                     raise SensorConnectionError("Sensor connection lost")
+                return #Attempt_Reconnect handles reinitializing the state
             
             self._force_stop_streaming() #Can't be streaming when checking the dirty cache. If you want to stream, don't do things that cause the object to go dirty.
             was_in_bootloader = self.__cached_in_bootloader
@@ -485,6 +535,7 @@ class ThreespaceSensor:
         settings = {}
         checksum = 0
         end_reached = False
+        error: Exception = None
         while not end_reached:
             key = self.com.read_until(b'\0')
             if key[-1] != 0:
@@ -494,21 +545,26 @@ class ThreespaceSensor:
 
             if setting is None:
                 if key == THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
-                    raise InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}", result=settings)
-                #Can't use keystring to check expected keys since a query/aggregate key may have been used.
-                #Because the number of keys in the response has no way of being known, also can't just search
-                #ahead for a ';' or '0' because 1. Both of those could be valid data bytes, 2. They could be part
-                #of a subsequent command response/streaming packet.
-                raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}", result=settings)
-            if setting.out_format is None:
-                raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}", result=settings)
+                    error = InvalidKeyError(f"Failed to read setting, got error response from firmware for keystring: {keystring}")
+
+                else:
+                    #Can't use keystring to check expected keys since a query/aggregate key may have been used.
+                    #Because the number of keys in the response has no way of being known, also can't just search
+                    #ahead for a ';' or '0' because 1. Both of those could be valid data bytes, 2. They could be part
+                    #of a subsequent command response/streaming packet.
+                    raise UnregisteredKeyError(f"Failed to read setting, unregistered key: {key}", result=settings)
             
             checksum += sum(ord(v) for v in key)
 
-            #Now parse the value
-            data, raw = setting.out_format.read_response(self.com)
-            settings[key] = data
-            checksum += sum(raw)
+            #Allows reading <KEY_ERROR> still, just don't access any data
+            if setting is not None:
+                if setting.out_format is None:
+                    raise SettingAccessError(f"Failed to read setting, setting does not have an out format: {key}", result=settings)
+                
+                #Now parse the value
+                data, raw = setting.out_format.read_response(self.com)
+                settings[key] = data
+                checksum += sum(raw)
 
             #Check if more to read or if this is the end of the response
             buffer = self.com.read(1)
@@ -518,10 +574,14 @@ class ThreespaceSensor:
             elif buffer[0] != ord(';'):
                 raise ResponseError(f"Failed to read setting, expected ';' or null terminator but got: {buffer}", result=settings)
         
-        #Reading key values has finished, not check the checksum
+        #Reading key values has finished, now check the checksum
         reported_checksum = self.com.read(1)
         if reported_checksum[0] != checksum % 256:
             raise ChecksumMismatchError(f"Failed to read setting, checksum does not match expected value. Expected {checksum % 256} but got {reported_checksum[0]} for keystring: {keystring}", result=settings)
+
+        if error:
+            error.result = settings
+            raise error
 
         return settings
             
@@ -691,13 +751,13 @@ class ThreespaceSensor:
         ----------
         query: used for the setting lookup. 'all' is good for getting all available keys, and 'settings' is good for all writable settings.
         """
-        result = self.read_settings_ascii(query)
+        result = self.read_settings_ascii(query, format="Dict")
         keys = list(result.keys())
         registered = []
         unregistered = []
         for key in keys:
             setting = threespace_setting_get(key) #This will register the setting if it is not already registered
-            if setting is not None:
+            if setting is not None and result[key] != THREESPACE_GET_SETTINGS_ERROR_RESPONSE:
                 registered.append(key)
             else:
                 unregistered.append(key)
@@ -705,6 +765,10 @@ class ThreespaceSensor:
             self.log(f"Unregistered settings found: {unregistered}")
             self.cached_unregistered_settings |= set(unregistered)
         return {"registered": registered, "unregistered": unregistered}
+
+    def has_setting(self, key: str) -> bool:
+        registered_settings = self.read_available_setting_keys(key)["registered"]
+        return len(registered_settings) > 0
 
 #-------------------------------------ASCII SETTINGS PROTOCOL------------------------------------------------
 
@@ -1100,6 +1164,7 @@ class ThreespaceSensor:
             result = self.__await_command(cmd)
             if result == THREESPACE_AWAIT_COMMAND_FOUND:
                 break
+            self.log("Reattempting command due to timeout:", cmd.info.name)
             retries += 1
         
         if retries == MAX_RETRIES:
@@ -1342,15 +1407,15 @@ class ThreespaceSensor:
 
 #---------------------------------POWER STATE CHANGING COMMANDS & BOOTLOADER------------------------------------
 
-    def __softwareReset(self):
+    def __softwareReset(self, timeout=1):
+        print(f"{timeout=}")
         self.check_dirty()
         cmd = self.commands[THREESPACE_SOFTWARE_RESET_COMMAND_NUM]
         cmd.send_command(self.com)
-        self.com.close()
-        #TODO: Make this actually wait instead of an arbitrary sleep length
-        time.sleep(self.restart_delay) #Give it time to restart
-        self.com.open()
-        self.__firmware_init()
+        success = self.attempt_reconnect(timeout=timeout)
+
+        if not success:
+            raise SensorConnectionError("Failed to reconnect to sensor after software reset")
 
     def __enterBootloader(self):
         if self.in_bootloader: return
@@ -1361,7 +1426,7 @@ class ThreespaceSensor:
         time.sleep(self.restart_delay) #Give it time to boot into bootloader
         if self.com.reenumerates:
             self.com.close()
-            success = self.__attempt_rediscover_self()
+            success = self.attempt_reconnect()
             if not success:
                 raise SensorConnectionError("Failed to reconnect to sensor in bootloader")
         in_bootloader = self.__check_bootloader_status()
@@ -1425,7 +1490,7 @@ class ThreespaceSensor:
         time.sleep(self.restart_delay) #Give time to boot into firmware
         if self.com.reenumerates:
             self.com.close()
-            success = self.__attempt_rediscover_self()
+            success = self.attempt_reconnect()
             if not success:
                 raise SensorConnectionError("Failed to reconnect to sensor in firmware")
         in_bootloader = self.__check_bootloader_status()
@@ -1436,8 +1501,10 @@ class ThreespaceSensor:
     
     def bootloader_erase_firmware(self, timeout=20):
         """
-        This may take a long time
+        This may take a long time. Afterwards firmware_version is None (unknown) until the sensor boots into firmware again
         """
+        #Forgotten before the command is sent: the firmware may be gone even if no response comes back
+        self.firmware_version = None
         self.com.write('S'.encode())
 
         start_time = time.perf_counter()
@@ -1674,7 +1741,7 @@ class ThreespaceSensor:
         """
         warnings.warn("commitSettings is deprecated, use commitSettingsSafe instead.", DeprecationWarning, stacklevel=2)
 
-    def softwareReset(self): ...
+    def softwareReset(self, timeout=1): ...
     def enterBootloader(self): ...
 
     def getLedColor(self) -> ThreespaceCmdResult[list[float]]: ...
@@ -1686,6 +1753,31 @@ class ThreespaceSensor:
     
     def restoreDefaultSettings(self) -> int:
         return self.write_settings(default=None)[0]
+    
+    def hardReset(self, timeout=3) -> bool:
+        #Doing this because the binary method can't differentiate between
+        #no response due to command not being supported or no response due to the sensor resetting.
+        #The ascii version will always get a response if not supported.
+        
+        try:
+            err, num_success = self.write_settings_ascii("hardreset")
+        except:
+            # If the sensor actually reset, the response will typically timeout or throw some communication error.
+            pass
+        else:
+            if err == 2:
+                raise InvalidKeyError("Hard reset not supported.")
+
+        #Most ports can't maintain connection when the sensor hard resets.
+        #If they can (like SPI/I2C/UART) they can reconnect very quickly (The open/close functions are typically)
+        #empty since they aren't stateful like USB or BLE. So, just close the connection to speed up the reconnect process.
+        self.com.close()
+        success = self.attempt_reconnect(timeout=timeout)
+        
+        if not success:
+            raise SensorConnectionError("Failed to reconnect to sensor after hard reset")
+
+        return success
 
     def readAllSettings(self) -> dict[str,Any]:
         return self.read_settings("all")

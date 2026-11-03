@@ -44,6 +44,7 @@ THREESPACE_SETTINGS_LIST: list[ThreespaceSetting] = [
     ThreespaceCmdSetting("default"),
     ThreespaceCmdSetting("commit"),
     ThreespaceCmdSetting("reboot"),
+    ThreespaceCmdSetting("hardreset"),
     ThreespaceAggregateSetting("all"),
     ThreespaceAggregateSetting("settings"),
     ThreespaceReadSetting("serial_number", "U"),

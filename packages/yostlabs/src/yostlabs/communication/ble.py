@@ -124,6 +124,10 @@ class ThreespaceBLEComClass(ThreespaceComClass):
         #then direct reads. This means reading functions will need to assert the connection status but writing does not.
 
     async def __async_open(self):
+        # On Windows, BleakClient's underlying WinRT BluetoothLEDevice object enters an
+        # aborted/closed state after an unexpected disconnect and cannot be reused.
+        # Recreating the client from the address gives a fresh WinRT handle each time.
+        self.client = BleakClient(self.client.address, disconnected_callback=self.__on_disconnect)
         self.data_read_event = asyncio.Event()
         await self.client.connect()
         await self.client.start_notify(self.profile.TX_UUID, self.__on_data_received)

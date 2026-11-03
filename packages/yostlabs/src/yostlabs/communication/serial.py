@@ -1,4 +1,5 @@
 from yostlabs.communication.base import *
+from yostlabs.tss3.consts import *
 import serial
 import serial.tools.list_ports
 from serial.tools.list_ports_common import ListPortInfo
@@ -17,12 +18,12 @@ class ThreespaceSerialComClass(ThreespaceComClass):
     PID_WT = 0x3180
 
     PID_TO_STR_DICT = {
-        PID_EMBED: "EM",
-        PID_DL: "DL",
+        PID_EMBED: THREESPACE_FAMILY_EMBEDDED,
+        PID_DL: THREESPACE_FAMILY_DATA_LOGGER,
         PID_BOOTLOADER: "BOOT",
-        PID_LX: "LX",
-        PID_USB: "USB",
-        PID_WT: "WT"
+        PID_LX: THREESPACE_FAMILY_LX,
+        PID_USB: THREESPACE_FAMILY_USB,
+        PID_WT: THREESPACE_FAMILY_WATERTIGHT
     }
 
 
