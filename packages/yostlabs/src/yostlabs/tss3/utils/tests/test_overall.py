@@ -1,4 +1,5 @@
 import sys
+from typing import Collection
 
 from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.tss3.utils.tests.base import SensorTest, TestKind
@@ -17,9 +18,13 @@ def run_test(sensor: ThreespaceSensor, tests: list[TestItem],
     session = run_cli(TestSession(tests, sensor, operator=operator, context=context, suite_version=test_suite_version))
     return session.outcome, session.report()
 
-def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True,
-                      kind: TestKind = TestKind.FUNCTIONAL) -> list[type[SensorTest]] | None:
-    """The registered tests of the kind that apply to the sensor, in registration order"""
+def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True, kind: TestKind = TestKind.FUNCTIONAL,
+                      hardware: Collection[str] | None = None) -> list[type[SensorTest]] | None:
+    """
+    The registered tests of the kind that apply to the sensor, in registration order.
+    hardware: what the sensor is built with, Ex: {"gps", "rtc", "battery"}, see SensorTest.required_hardware. None: not
+    known, so every test of its family is selected, including ones for hardware it may not have.
+    """
     family = sensor.sensor_family
     if family == "Unknown":
         logger.warning("Unknown sensor family, cannot determine which tests to run.")
@@ -28,7 +33,7 @@ def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True,
 
     logger.info(f"Detected sensor family: {family}.")
     variation = sensor.hardware_version.variation
-    return [test for test in SensorTest.REGISTERED if test.kind == kind and test.is_applicable(family, variation)]
+    return [test for test in SensorTest.REGISTERED if test.kind == kind and test.is_applicable(family, variation, hardware)]
 
 def verbose_run_tests(sensor: ThreespaceSensor,
                       tests: list[TestItem],
@@ -48,14 +53,15 @@ def verbose_run_tests(sensor: ThreespaceSensor,
 
     return outcome, results
 
-def auto_run_tests():
+def auto_run_tests(hardware: Collection[str] | None = None):
+    """hardware: what the sensor is built with, see auto_select_tests()"""
     sensor = ThreespaceSensor()
     family = sensor.sensor_family
     if family == "Unknown":
         logger.error("Unknown sensor family, cannot determine which tests to run.")
         return False, {"error": "Unknown sensor family"}
 
-    tests_to_run = auto_select_tests(sensor, fail_on_unknown_family=False)
+    tests_to_run = auto_select_tests(sensor, fail_on_unknown_family=False, hardware=hardware)
 
     return verbose_run_tests(sensor, tests_to_run)
 

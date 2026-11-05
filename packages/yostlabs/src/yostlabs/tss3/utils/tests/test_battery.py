@@ -26,6 +26,7 @@ class BatteryTest(SensorTest):
     name = "Battery"
     description = "Checks the battery charges, and keeps the sensor running while it is unplugged."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    required_hardware = frozenset({"battery"})
     kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 

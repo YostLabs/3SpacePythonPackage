@@ -3,7 +3,7 @@ import time
 import inspect
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any, Callable, ClassVar, Generator
+from typing import Any, Callable, ClassVar, Collection, Generator
 
 from yostlabs.tss3 import ThreespaceSensor, ThreespaceHardwareVersion
 from yostlabs.tss3.errors import SettingError, UnsupportedTestError
@@ -344,6 +344,9 @@ class SensorTest:
     name: ClassVar[str]                         # Shown to the operator, Ex: "LED"
     description: ClassVar[str]                  # What the test checks, in a sentence or two for the operator
     variants: ClassVar[tuple[SensorVariant, ...]]   # The sensors it applies to, Ex: ALL_SENSORS
+    # What a sensor must be built with for the test to apply, as lowercase names: a component type (Ex: "gps"), a
+    # communication interface (Ex: "ble") or "battery". Not every sensor of a variant has all of these
+    required_hardware: ClassVar[frozenset[str]] = frozenset()
     kind: ClassVar[TestKind]                    # What it checks, Ex: TestKind.FUNCTIONAL
     stop_on_failure: ClassVar[bool] = False     # Skip the remaining steps once a check fails
     steps: ClassVar[tuple[Step, ...]] = ()      # Collected from the @step methods, in declaration order
@@ -360,13 +363,18 @@ class SensorTest:
         SensorTest.REGISTERED.append(cls)
 
     @classmethod
-    def is_applicable(cls, family: str | ThreespaceHardwareVersion, variation: int | None = None) -> bool:
+    def is_applicable(cls, family: str | ThreespaceHardwareVersion, variation: int | None = None,
+                      hardware: Collection[str] | None = None) -> bool:
         """
         Whether the test applies to a sensor, given its family name and variation, or its hardware version.
         A test for a specific variation needs the variation, the family alone is not enough.
+        hardware: what the sensor is built with, see required_hardware. None: not known, so not considered. The sensor
+        can't always say (Ex: a dead GPS, or a battery), so this comes from whoever knows what it was built as.
         """
         if isinstance(family, ThreespaceHardwareVersion):
             family, variation = family.family_name, family.variation
+        if hardware is not None and not cls.required_hardware <= set(hardware):
+            return False
         return any(variant.matches(family, variation) for variant in cls.variants)
 
     def __init__(self, sensor: ThreespaceSensor, streaming_manager: ThreespaceStreamingManager = None):

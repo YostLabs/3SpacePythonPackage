@@ -28,6 +28,7 @@ class RTCTest(SensorTest):
     name = "Clock"
     description = "Checks the real-time clock keeps time, including through a reset."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    required_hardware = frozenset({"rtc"})
     kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 

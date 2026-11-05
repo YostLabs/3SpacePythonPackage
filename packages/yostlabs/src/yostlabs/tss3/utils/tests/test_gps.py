@@ -20,6 +20,7 @@ class GPSTest(SensorTest):
     name = "GPS"
     description = "Checks the GPS outputs messages and receives commands."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    required_hardware = frozenset({"gps"})
     kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 
