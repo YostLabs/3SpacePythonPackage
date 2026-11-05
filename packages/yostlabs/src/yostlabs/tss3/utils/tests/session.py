@@ -37,6 +37,7 @@ class TestSession:
 
     session.test is the running test. A test that cannot be created (Ex: its constructor raises) ends the run,
     and is recorded as the session's error. Errors while a test runs are recorded in its own checks.
+    A test setting stop_session ends the run after it, Ex: its failure left the sensor unusable.
     """
 
     def __init__(self, tests: list[TestItem], sensor: ThreespaceSensor = None, streaming_manager: ThreespaceStreamingManager = None,
@@ -170,6 +171,9 @@ class TestSession:
             # Previous test has finished, collect its results before moving to the next one
             if self.test is not None:
                 self.results += self.test.result_flat
+                if self.test.stop_session:
+                    self._finish()
+                    return
 
             # Move to the next test in the sequence
             self.index += 1

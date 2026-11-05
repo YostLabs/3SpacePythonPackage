@@ -18,6 +18,8 @@ class BatteryTest(SensorTest):
     3. The operator unplugs the sensor, which stays powered on by its battery.
        If the sensor can't be told to stay on (no power_hold_state), the operator must make sure it does.
     4. The operator plugs it back in. The sensor's clock must have kept running for the time it was unplugged.
+
+    While waiting on either, the operator can fail the step if the app never notices.
     """
 
     id = "battery"
@@ -71,13 +73,18 @@ class BatteryTest(SensorTest):
             except (OSError, ResponseTimeoutError):
                 self._disconnect_time = attempt_time
                 break
-            yield Busy(text)
+            if (yield Busy(text, actions=("Fail",))) == "Fail":
+                self.check().failed("Failed by the operator: the sensor being unplugged was not detected.")
+                return
         self.check().add_measurement("disconnect_time", self._disconnect_timestamp)
 
     @step("Reconnect")
     def reconnect(self):
         while not self.sensor.attempt_reconnect(timeout=0):
-            yield Busy("Plug the sensor back into the USB port.")
+            if (yield Busy("Plug the sensor back into the USB port.", actions=("Fail",))) == "Fail":
+                self.check().failed("Failed by the operator: the sensor being plugged back in was not detected.")
+                self.stop_session = True   # The sensor is gone, so no later test can run
+                return
 
         expected_elapsed = time.perf_counter() - self._disconnect_time
         timestamp = self.sensor.getTimestamp().data

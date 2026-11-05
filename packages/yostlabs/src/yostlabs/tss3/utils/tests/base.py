@@ -381,6 +381,7 @@ class SensorTest:
         self.request: Request | None = None     # What the active step is waiting on
         self.finished = False
         self.cancelled = False
+        self.stop_session = False               # Set by a step leaving the sensor unusable (Ex: it never came back), so a session runs no more tests
 
         # Called with each step as it starts, before it runs. A runner reading test.step only after
         # update() returns would see it late when the step blocks first, Ex: during a hard reset.
