@@ -1,6 +1,5 @@
 from collections import deque
 from typing import Any
-import time
 
 from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, Busy, step
 from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
@@ -18,7 +17,7 @@ class ButtonTest(SensorTest):
     Tests the button functionality of the sensor.
     
     To pass this test, the operator must hold the button down for 2 seconds, and then release it for 2 seconds.
-    Each stage fails if 10 seconds elapse without it finishing.
+    Each stage waits for as long as it takes: only the operator fails it, if the button doesn't respond.
     The button state is streamed, so very quick blips in the button state are not missed.
     """
 
@@ -31,7 +30,6 @@ class ButtonTest(SensorTest):
 
     HOLD_TIME = 2.0
     RELEASE_TIME = 2.0
-    TIMEOUT = 10.0
 
     def __init__(self, sensor: ThreespaceSensor, streaming_manager: ThreespaceStreamingManager = None):
         super().__init__(sensor, streaming_manager)
@@ -57,10 +55,9 @@ class ButtonTest(SensorTest):
         yield from self._await_button(False, self.RELEASE_TIME, "Release the button for 2 seconds.")
 
     def _await_button(self, pressed: bool, duration: float, text: str):
-        """Passes the active check once the button stays in the pressed state for duration seconds."""
+        """Passes the active check once the button stays in the pressed state for duration seconds, or the operator fails it."""
         result = self.check()
-        deadline = time.perf_counter() + self.TIMEOUT
-        since = None        # Sensor time the button entered the wanted state
+        since = None       # Sensor time the button entered the wanted state
         elapsed = 0.0
         while True:
             self.streaming_manager.update()
@@ -90,11 +87,10 @@ class ButtonTest(SensorTest):
                     result.passed()
                     return
 
-            if time.perf_counter() > deadline:
-                logger.warning("Button test timed out after %.1f seconds.", self.TIMEOUT)
-                result.failed("Timed out waiting for button input.")
+            status = f"Button {'pressed' if self._pressed else 'released'}, {elapsed:.2f} / {duration:.2f} s"
+            if (yield Busy(text, status, actions=("Fail",))) == "Fail":
+                result.failed(f"Failed by the operator while waiting for the button to be {'pressed' if pressed else 'released'}.")
                 return
-            yield Busy(text, f"Button {'pressed' if self._pressed else 'released'}, {elapsed:.2f} / {duration:.2f} s")
 
     def _on_streaming_data(self, status: ThreespaceStreamingStatus, user_data: Any):
         match status:
