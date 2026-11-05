@@ -21,6 +21,8 @@ class SelfTest(SensorTest):
 
     # Keys must be in order of the bits in the self test result bitfield.
     BIT_KEYS = ["accel", "gyro", "mag", "baro", "rtc", "gps", "bluetooth", "sd", "sms", "battery"]
+    # Bits that fail without a part, by the part's name in not_installed. No coin cell doesn't fail the rtc bit over USB
+    BIT_PARTS = {"sd": "sd_card", "battery": "battery"}
 
     @step("Self test")
     def bitfield(self):
@@ -35,9 +37,16 @@ class SelfTest(SensorTest):
         raw = self.sensor.selfTest().data
         result = self.check()
         result.add_measurement("raw", raw)
+        failed = raw
+        ignored = []
         for i, key in enumerate(self.BIT_KEYS):
             result.add_measurement(key, not bool(raw & (1 << i)))
-        result.set_status(TestStatus.PASS if raw == 0 else TestStatus.FAIL)
+            if self.BIT_PARTS.get(key) in self.not_installed:
+                failed &= ~(1 << i)
+                ignored.append(key)
+        if ignored:
+            result.message = f"Not installed yet, so not checked: {', '.join(ignored)}"
+        result.set_status(TestStatus.PASS if failed == 0 else TestStatus.FAIL)
 
 if __name__ == "__main__":
     main(SelfTest)

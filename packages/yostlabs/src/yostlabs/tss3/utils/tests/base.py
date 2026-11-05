@@ -36,8 +36,8 @@ class TestStatus(str, Enum):
     PASS = "pass"   #Criteria met, test passed
     FAIL = "fail"   #Criteria not met, test failed
     ERROR = "error" #Error occurred during test, test failed
-    SKIP = "skip"   #Test intentionally skipped with reason. Check message.
-    NA = "n/a"      #Test not applicable to this sensor.
+    SKIP = "skip"   #Applies to this sensor, but wasn't checked this time. Check message. Ex: after a failure, or its part isn't installed yet. Never counts as passing.
+    NA = "n/a"      #Can never apply to this sensor as built. Counts as passing.
     INFO = "info"   #Test informational only, not a pass/fail check. Check message.
     NOT_RUN = "not_run"   #Test not run yet. Still not run once the test has ended means it ended by an error (or crash)
     CANCELLED = "cancelled"   #Never ran: the test was explicitly cancelled
@@ -46,7 +46,7 @@ class TestStatus(str, Enum):
 def summarize(statuses) -> str:
     """
     One status for a set of checks, given their statuses (TestStatus or its values), by priority:
-    error > fail > cancelled > not_run > n/a > pass. Any other status (skip) counts as fail.
+    error > fail > cancelled > not_run > skip > n/a > pass.
     "not_run" when there are no checks, or some were never reached without anything going wrong (Ex: a crash).
     """
     statuses = {TestStatus(status).value for status in statuses}
@@ -60,9 +60,9 @@ def summarize(statuses) -> str:
     # Any check never reached
     if TestStatus.NOT_RUN.value in statuses:
         return TestStatus.NOT_RUN.value
-    # Any check is skip (anything else but pass, n/a or info), which counts as failing
-    if statuses - {TestStatus.PASS.value, TestStatus.NA.value, TestStatus.INFO.value}:
-        return TestStatus.FAIL.value
+    # Any check is skip, without anything having failed (Ex: a part isn't installed yet)
+    if TestStatus.SKIP.value in statuses:
+        return TestStatus.SKIP.value
     # Every check is n/a
     if statuses == {TestStatus.NA.value}:
         return TestStatus.NA.value
@@ -390,6 +390,10 @@ class SensorTest:
         self.finished = False
         self.cancelled = False
         self.stop_session = False               # Set by a step leaving the sensor unusable (Ex: it never came back), so a session runs no more tests
+        # Hardware the sensor is built with but doesn't have on yet (Ex: {"battery"}), named as in required_hardware,
+        # plus "coin_cell" and "sd_card". Set before starting. A test requiring any of it is skipped, and other checks
+        # relying on it are too
+        self.not_installed: frozenset[str] = frozenset()
 
         # Called with each step as it starts, before it runs. A runner reading test.step only after
         # update() returns would see it late when the step blocks first, Ex: during a hard reset.
@@ -509,6 +513,11 @@ class SensorTest:
     # ---- Internals ----
 
     def _run_steps(self) -> Generator:
+        if missing := self.required_hardware & self.not_installed:
+            names = ", ".join(sorted(missing)).replace("_", " ")
+            for result in self.results.values():
+                result.skipped(f"Not installed yet: {names}")
+            return
         for s in self.steps:
             self.step = s
             self.step_states[s] = StepState.ACTIVE

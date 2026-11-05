@@ -22,6 +22,7 @@ class SdTest(SensorTest):
     name = "SD Card"
     description = "Checks the SD card is detected and can be logged to."
     variants = ()   # Incomplete, so never selected. Run it directly while developing it
+    required_hardware = frozenset({"sd_card"})
     kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 

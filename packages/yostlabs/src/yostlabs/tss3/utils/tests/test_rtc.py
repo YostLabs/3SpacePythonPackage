@@ -82,6 +82,9 @@ class RTCTest(SensorTest):
     @step("Survives reset")
     def reset(self):
         result = self.check()
+        if "coin_cell" in self.not_installed:
+            result.skipped("Not installed yet: coin cell")
+            return
         before = self.sensor.getDateTime().data
         reset_start = time.perf_counter()
 

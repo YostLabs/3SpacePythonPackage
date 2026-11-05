@@ -1,7 +1,7 @@
 import copy
 import socket
 import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Collection
 
 from yostlabs.tss3 import ThreespaceSensor
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager
@@ -42,7 +42,7 @@ class TestSession:
 
     def __init__(self, tests: list[TestItem], sensor: ThreespaceSensor = None, streaming_manager: ThreespaceStreamingManager = None,
                  name: str = None, certification_level: int = None, operator: str = None, station: str = None,
-                 context: dict = None, suite_version: str = "0.0.1"):
+                 context: dict = None, suite_version: str = "0.0.1", not_installed: Collection[str] = ()):
         """
         tests: test objects run as they are. Factories are called with sensor and streaming_manager when their turn
                comes, so a test is only created if the run gets that far.
@@ -52,6 +52,9 @@ class TestSession:
             certification_level: the level passing the session certifies the sensor to (see TestKind), None for none.
             name defaults to the test's name, or "Sensor Tests" for several. station defaults to this computer's name.
             context is any extra information, Ex: the operating system.
+        not_installed: hardware the sensor doesn't have on yet, given to every test (see SensorTest.not_installed), and
+            recorded in the context as "not_installed". What relies on it is skipped, so a run that would have passed
+            is "partial".
         """
         self.tests = list(tests)
         objects = [item for item in self.tests if isinstance(item, SensorTest)]
@@ -65,7 +68,10 @@ class TestSession:
         self.certification_level = certification_level
         self.operator = operator
         self.station = station or socket.gethostname()
-        self.context = context or {}
+        self.not_installed = frozenset(not_installed)
+        self.context = dict(context or {})
+        if self.not_installed:
+            self.context["not_installed"] = sorted(self.not_installed)
         self.suite_version = suite_version
 
         self.test: SensorTest | None = None    # The running test, or the last one once finished
@@ -87,7 +93,7 @@ class TestSession:
 
     @property
     def outcome(self) -> str:
-        """running, pass, fail, cancelled or error"""
+        """running, pass, partial (nothing failed, but some checks were skipped), fail, cancelled or error"""
         if not self.finished:
             return "running"
         if self.error is not None:
@@ -96,7 +102,9 @@ class TestSession:
             return "cancelled"
         if all(result.success for result in self.results):
             return "pass"
-        return "error" if any(result.status == TestStatus.ERROR.value for result in self.results) else "fail"
+        if any(result.status == TestStatus.ERROR.value for result in self.results):
+            return "error"
+        return "partial" if all(result.success or result.status == TestStatus.SKIP.value for result in self.results) else "fail"
 
     # ---- Runner interface, see SensorTest ----
 
@@ -196,6 +204,7 @@ class TestSession:
                 if self.on_step_started is not None:
                     self.on_step_started(test, step)
             test.on_step_started = step_started
+            test.not_installed = self.not_installed
 
             # Start the test
             self.test = test

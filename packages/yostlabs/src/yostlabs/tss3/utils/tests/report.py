@@ -13,7 +13,7 @@ so any run of the tests, from the command line or an application, produces the s
     "context": {},
     "started_at": "2026-10-08T15:25:25Z",
     "ended_at": "2026-10-08T15:27:02Z", # null while running
-    "outcome": "fail",                  # running, pass, fail, cancelled or error
+    "outcome": "fail",                  # running, pass, partial, fail, cancelled or error
     "error": null,                      # Why the session could not go on, Ex: a test could not be created
     "failed_checks": [                  # The checks that failed or errored, to see at a glance what went wrong
         {"test_id": "led", "check": "green", "components": [], "status": "fail", "message": "Did not match"}
@@ -29,7 +29,7 @@ from typing import Any
 
 from yostlabs.tss3.utils.tests.base import TestResult, TestStatus, TestKind, summarize
 
-OUTCOMES = ("running", "pass", "fail", "cancelled", "error")
+OUTCOMES = ("running", "pass", "partial", "fail", "cancelled", "error")
 
 
 @dataclass

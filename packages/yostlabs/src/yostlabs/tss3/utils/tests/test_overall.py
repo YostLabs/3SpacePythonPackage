@@ -12,10 +12,14 @@ import json
 import logging
 logger = logging.getLogger(__name__)
 
-def run_test(sensor: ThreespaceSensor, tests: list[TestItem],
-             operator=None, context=None, test_suite_version="0.0.1") -> tuple[str, SessionReport]:
-    """Runs the tests in the terminal. Returns the outcome and the results document, see TestSession.report()"""
-    session = run_cli(TestSession(tests, sensor, operator=operator, context=context, suite_version=test_suite_version))
+def run_test(sensor: ThreespaceSensor, tests: list[TestItem], operator=None, context=None, test_suite_version="0.0.1",
+             not_installed: Collection[str] = ()) -> tuple[str, SessionReport]:
+    """
+    Runs the tests in the terminal. Returns the outcome and the results document, see TestSession.report()
+    not_installed: hardware the sensor doesn't have on yet, see TestSession
+    """
+    session = run_cli(TestSession(tests, sensor, operator=operator, context=context, suite_version=test_suite_version,
+                                  not_installed=not_installed))
     return session.outcome, session.report()
 
 def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True, kind: TestKind = TestKind.FUNCTIONAL,
@@ -37,12 +41,13 @@ def auto_select_tests(sensor: ThreespaceSensor, fail_on_unknown_family=True, kin
 
 def verbose_run_tests(sensor: ThreespaceSensor,
                       tests: list[TestItem],
-                      output_path = "test_results.json"):
+                      output_path = "test_results.json",
+                      not_installed: Collection[str] = ()):
     print("Running Tests:")
     for item in tests:
         print(f" - {test_class(item).name}")
 
-    outcome, results = run_test(sensor, tests)
+    outcome, results = run_test(sensor, tests, not_installed=not_installed)
     sensor.cleanup()
 
     print(results.to_dict())
@@ -53,8 +58,11 @@ def verbose_run_tests(sensor: ThreespaceSensor,
 
     return outcome, results
 
-def auto_run_tests(hardware: Collection[str] | None = None):
-    """hardware: what the sensor is built with, see auto_select_tests()"""
+def auto_run_tests(hardware: Collection[str] | None = None, not_installed: Collection[str] = ()):
+    """
+    hardware: what the sensor is built with, see auto_select_tests()
+    not_installed: what it doesn't have on yet, see TestSession
+    """
     sensor = ThreespaceSensor()
     family = sensor.sensor_family
     if family == "Unknown":
@@ -63,7 +71,7 @@ def auto_run_tests(hardware: Collection[str] | None = None):
 
     tests_to_run = auto_select_tests(sensor, fail_on_unknown_family=False, hardware=hardware)
 
-    return verbose_run_tests(sensor, tests_to_run)
+    return verbose_run_tests(sensor, tests_to_run, not_installed=not_installed)
 
 if __name__ == "__main__":
     # h = logging.StreamHandler(sys.stdout)
