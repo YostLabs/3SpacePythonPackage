@@ -210,8 +210,15 @@ class Busy(Request):
     # Live detail, Ex: "Held 1.4 / 2.0 s". Not compared: a Busy request re-yielded with a new status is still the same request
     status: str = field(default="", compare=False)
     actions: tuple[str, ...] = ()       # Ex: ("Flipped",)
+    # The action a single key press may pick (Ex: Enter in a UI), so only one that can't wrongly pass or fail anything.
+    # None: picking an action takes a deliberate choice, Ex: ("Pass anyway", "Fail")
+    default_action: str | None = None
 
     blocking: ClassVar[bool] = False
+
+    def __post_init__(self):
+        if self.default_action is not None and self.default_action not in self.actions:
+            raise ValueError(f"The default action {self.default_action!r} is not one of {self.actions}")
 
     @property
     def answerable(self) -> bool:

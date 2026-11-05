@@ -306,7 +306,7 @@ class ComponentTest(SensorTest):
         self._start_sampling(self.FLIP_STREAM_COMMANDS)
         while True:
             self.streaming_manager.update()
-            if (yield Busy("Flip the sensor upside down.", actions=("Flipped",))) == "Flipped":
+            if (yield Busy("Flip the sensor upside down.", actions=("Flipped",), default_action="Flipped")) == "Flipped":
                 break
         self.stop_streaming()
         self._flip_samples = self._samples
