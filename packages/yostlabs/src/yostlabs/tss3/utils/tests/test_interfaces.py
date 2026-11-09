@@ -19,10 +19,13 @@ class InterfaceTest(SensorTest, abstract=True):
     2. Serial number: the second connection's matches the test's own.
 
     When the test's own connection is over that interface already (see ThreespaceComClass.interface), both checks pass
-    without asking for another: a port can't be opened twice.
+    without asking for another: a port can't be opened twice. So do they when it's over one of same_module: that module
+    is working, and it couldn't be reached over this interface meanwhile.
     """
 
     interface: ClassVar[str]   # The interface tested, named as in required_hardware, Ex: "ble"
+    # Interfaces served by the same module as this one, which can't be connected over both at once
+    same_module: ClassVar[frozenset[str]] = frozenset()
     variants = ALL_SENSORS
     kind = TestKind.FUNCTIONAL
     stop_on_failure = True
@@ -35,13 +38,19 @@ class InterfaceTest(SensorTest, abstract=True):
     def __init__(self, sensor: ThreespaceSensor, streaming_manager: ThreespaceStreamingManager = None):
         super().__init__(sensor, streaming_manager)
         self._other: ThreespaceSensor | None = None   # The sensor over the interface, once connected
-        self._own_connection = False                  # The test's own connection is over the interface
+        # Why both checks pass without another connection, see the class docstring. None: one is made
+        self._checked_through: str | None = None
 
     @step("Connect")
     def connect(self):
-        if self.sensor.com.interface == self.interface:
-            self._own_connection = True
-            self.check().passed(f"The test is connected over {self.name}.")
+        through = self.sensor.com.interface
+        if through == self.interface:
+            self._checked_through = f"The test is connected over {self.name}."
+        elif through in self.same_module:
+            self._checked_through = (f"Checked through the test's {_interface_name(through)} connection: this sensor "
+                                     f"can't connect over both at once.")
+        if self._checked_through is not None:
+            self.check().add_measurement("checked_through", through).passed(self._checked_through)
             return
         com = yield Connect(f"Connect to the sensor over {self.name}.", self.interface)
         if com is None:
@@ -60,8 +69,8 @@ class InterfaceTest(SensorTest, abstract=True):
 
     @step("Serial number")
     def serial_number(self):
-        if self._own_connection:
-            self.check().passed(f"The test is connected over {self.name}.")
+        if self._checked_through is not None:
+            self.check().passed(self._checked_through)
             return
         expected = f"{self.sensor.serial_number:016X}"
         found = f"{self._other.serial_number:016X}"
@@ -77,13 +86,21 @@ class InterfaceTest(SensorTest, abstract=True):
             self._other.com.close()
 
 
+def _interface_name(interface: str) -> str:
+    """As the operator sees it, Ex: "Bluetooth Classic": the name of the test of that interface"""
+    return next(test.name for test in SensorTest.REGISTERED
+                if issubclass(test, InterfaceTest) and test.interface == interface)
+
+
 class BleInterfaceTest(InterfaceTest):
     id = "ble_interface"
     name = "BLE"
     interface = "ble"
+    same_module = frozenset({"bluetooth_classic"})
 
 
 class BluetoothClassicInterfaceTest(InterfaceTest):
     id = "bluetooth_classic_interface"
     name = "Bluetooth Classic"
     interface = "bluetooth_classic"
+    same_module = frozenset({"ble"})
