@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Callable, ClassVar, Collection, Generator
 
+from yostlabs.communication.base import ThreespaceComClass
 from yostlabs.tss3 import ThreespaceSensor, ThreespaceHardwareVersion
 from yostlabs.tss3.errors import SettingError, UnsupportedTestError
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, StreamableCommands
@@ -229,6 +230,20 @@ class Busy(Request):
             raise ValueError(f"{answer!r} is not one of {self.actions}")
 
 
+@dataclass
+class Connect(Request):
+    """
+    A connection to the sensor over one of its communication interfaces, which only the runner can make (Ex: BLE needs a
+    scan, and an app has its own com classes). Answer: an unopened ThreespaceComClass reaching the sensor over interface,
+    or None when the operator couldn't find the sensor
+    """
+    interface: str   # Named as in SensorTest.required_hardware, Ex: "ble", "bluetooth_classic"
+
+    def validate(self, answer: Any):
+        if answer is not None and not isinstance(answer, ThreespaceComClass):
+            raise ValueError(f"Connect takes a ThreespaceComClass or None, got {answer!r}")
+
+
 # ----------------------------------------------------------------------
 # Steps
 # ----------------------------------------------------------------------
@@ -349,17 +364,25 @@ class SensorTest:
     required_hardware: ClassVar[frozenset[str]] = frozenset()
     kind: ClassVar[TestKind]                    # What it checks, Ex: TestKind.FUNCTIONAL
     stop_on_failure: ClassVar[bool] = False     # Skip the remaining steps once a check fails
-    steps: ClassVar[tuple[Step, ...]] = ()      # Collected from the @step methods, in declaration order
+    # Collected from the @step methods in declaration order, a base class's first (a step redefined under the same name
+    # stays in its place)
+    steps: ClassVar[tuple[Step, ...]] = ()
 
     # Every test class, in the order they were defined. Importing yostlabs.tss3.utils.tests defines them all.
     REGISTERED: ClassVar[list[type["SensorTest"]]] = []
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, abstract: bool = False, **kwargs):
+        """abstract: a base for other tests (Ex: InterfaceTest), never run itself, so not registered"""
         super().__init_subclass__(**kwargs)
+        steps = {}
+        for klass in reversed(cls.__mro__):
+            steps |= {name: value for name, value in vars(klass).items() if isinstance(value, Step)}
+        cls.steps = tuple(steps.values())
+        if abstract:
+            return
         for attribute in ("id", "name", "description", "variants", "kind"):
             if not hasattr(cls, attribute):
                 raise TypeError(f"{cls.__name__} must define {attribute}")
-        cls.steps = tuple(value for value in cls.__dict__.values() if isinstance(value, Step))
         SensorTest.REGISTERED.append(cls)
 
     @classmethod

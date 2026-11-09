@@ -6,8 +6,9 @@ import time
 import queue
 import threading
 
+from yostlabs.communication.base import ThreespaceComClass
 from yostlabs.tss3 import ThreespaceSensor
-from yostlabs.tss3.utils.tests.base import SensorTest, TestResult, Step, Request, Message, Confirm, Choice, Busy
+from yostlabs.tss3.utils.tests.base import SensorTest, TestResult, Step, Request, Message, Confirm, Choice, Busy, Connect
 from yostlabs.tss3.utils.tests.session import TestSession
 
 import logging
@@ -160,8 +161,36 @@ def _ask(request: Request):
         case Message():
             _reader.read(f"{request.text} (Enter to continue) ")
             return None
+        case Connect():
+            return _connect(request)
         case _:
             raise TypeError(f"No terminal prompt for {type(request).__name__}")
+
+
+def _connect(request: Connect) -> ThreespaceComClass | None:
+    """The answer to a Connect: the sensor's com over the interface, from what the operator types. Nothing: not found"""
+    match request.interface:
+        case "ble":
+            prompt, create = "Its BLE name or address", _ble_com
+        case "bluetooth_classic":
+            from yostlabs.communication.bluetooth import ThreespaceBluetoothComClass
+            prompt, create = "Its Bluetooth address", ThreespaceBluetoothComClass
+        case _:
+            raise TypeError(f"No terminal connection over {request.interface}")
+    while True:
+        answer = _reader.read(f"{request.text} {prompt} (Enter: not found): ").strip()
+        if not answer:
+            return None
+        try:
+            return create(answer)
+        except Exception as e:   # Ex: no device by that name
+            print(f"  Could not find it: {e}")
+
+
+def _ble_com(name_or_address: str) -> ThreespaceComClass:
+    from yostlabs.communication.ble import ThreespaceBLEComClass
+    is_address = len(name_or_address) == 17 and name_or_address.count(":") == 5
+    return ThreespaceBLEComClass(name_or_address, discover_name=not is_address)
 
 
 def print_results(results: list[TestResult], show_only_failures: bool = False):

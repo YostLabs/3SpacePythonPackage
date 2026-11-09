@@ -8,5 +8,6 @@ from yostlabs.tss3.utils.tests import (
     test_button,
     test_gps,
     test_sd,
+    test_interfaces,
     test_overall,
 )

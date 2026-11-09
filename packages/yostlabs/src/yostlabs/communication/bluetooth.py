@@ -192,6 +192,7 @@ else:
 
 class ThreespaceBluetoothComClass(ThreespaceSocketComClass):
 
+    interface = "bluetooth_classic"
     SCANNER: Scanner = None
 
     def __init__(self, addr: str, name: str = None, connection_timeout=None):

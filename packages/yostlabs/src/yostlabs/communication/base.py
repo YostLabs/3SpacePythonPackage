@@ -57,7 +57,11 @@ class ThreespaceComClass(ThreespaceInputStream, ThreespaceOutputStream):
     Com classes should be initialized without connection and require
     there open called before use
     """
-    
+
+    # The communication interface it connects over, Ex: "ble", "bluetooth_classic" (as in SensorTest.required_hardware).
+    # None: not known, Ex: a serial port may be USB or a UART adapter
+    interface: str | None = None
+
     @abstractmethod
     def close(self): ...
     

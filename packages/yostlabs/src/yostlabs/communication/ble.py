@@ -39,6 +39,7 @@ def ylBleEventLoopThread(loop: asyncio.AbstractEventLoop):
 from yostlabs.communication.base import *
 class ThreespaceBLEComClass(ThreespaceComClass):
 
+    interface = "ble"
     DEFAULT_TIMEOUT = 2
     EVENT_LOOP = None
     EVENT_LOOP_THREAD = None
