@@ -6,6 +6,7 @@
 
 from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestKind, TestStatus, step
 from yostlabs.tss3.utils.tests.cli import main
+from yostlabs.tss3.consts import THREESPACE_DEBUG_LEVEL_WRN, THREESPACE_DEBUG_LEVEL_ERR
 
 class SelfTest(SensorTest):
     """
@@ -34,9 +35,15 @@ class SelfTest(SensorTest):
             self.change_settings(gps_periodic_enabled=0)
             yield from self.wait(1.0, "Waiting for the GPS to settle.")
 
+        self.change_settings(debug_mode=0,
+                             debug_level=(THREESPACE_DEBUG_LEVEL_WRN | THREESPACE_DEBUG_LEVEL_ERR),
+                             debug_module=0xFFFFFFFF)
+        self.read_debug_messages()
         raw = self.sensor.selfTest().data
         result = self.check()
+        messages = self.read_debug_messages()
         result.add_measurement("raw", raw)
+        result.add_measurement("messages", messages)
         failed = raw
         ignored = []
         for i, key in enumerate(self.BIT_KEYS):
