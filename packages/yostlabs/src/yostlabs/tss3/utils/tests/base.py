@@ -360,7 +360,8 @@ class SensorTest:
     description: ClassVar[str]                  # What the test checks, in a sentence or two for the operator
     variants: ClassVar[tuple[SensorVariant, ...]]   # The sensors it applies to, Ex: ALL_SENSORS
     # What a sensor must be built with for the test to apply, as lowercase names: a component type (Ex: "gps"), a
-    # communication interface (Ex: "ble") or "battery". Not every sensor of a variant has all of these
+    # communication interface (Ex: "ble"), "battery", "button" (a push button the sensor reads) or "switch" (one it
+    # can't). Not every sensor of a variant has all of these
     required_hardware: ClassVar[frozenset[str]] = frozenset()
     kind: ClassVar[TestKind]                    # What it checks, Ex: TestKind.FUNCTIONAL
     stop_on_failure: ClassVar[bool] = False     # Skip the remaining steps once a check fails

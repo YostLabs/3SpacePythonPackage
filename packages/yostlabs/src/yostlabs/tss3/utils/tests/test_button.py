@@ -25,6 +25,7 @@ class ButtonTest(SensorTest):
     name = "Button"
     description = "Checks the button reads pressed while held down, and released when let go."
     variants = (SensorVariant(THREESPACE_FAMILY_DATA_LOGGER),)
+    required_hardware = frozenset({"button"})   # A push button the sensor reads: not every variation has one
     kind = TestKind.FUNCTIONAL
     stop_on_failure = True
 
