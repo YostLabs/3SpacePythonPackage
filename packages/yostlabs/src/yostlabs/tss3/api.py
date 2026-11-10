@@ -1153,7 +1153,8 @@ class ThreespaceSensor:
 
 #-----------------------------BASE COMMAND EXECUTION-------------------------------------
 
-    def execute_command(self, cmd: ThreespaceCommand, *args):
+    def execute_command(self, cmd: ThreespaceCommand, *args, timeout: float = 2):
+        """timeout: how long to wait for the response, in seconds, before sending the command again"""
         self.check_dirty()
 
         retries = 0
@@ -1161,7 +1162,7 @@ class ThreespaceSensor:
 
         while retries < MAX_RETRIES:
             cmd.send_command(self.com, *args, header_enabled=self.header_enabled)
-            result = self.__await_command(cmd)
+            result = self.__await_command(cmd, timeout)
             if result == THREESPACE_AWAIT_COMMAND_FOUND:
                 break
             self.log("Reattempting command due to timeout:", cmd.info.name)
@@ -1374,6 +1375,13 @@ class ThreespaceSensor:
 
         response = self.com.read(num_bytes)
         return ThreespaceCmdResult(response, header, data_raw_binary=response)
+
+#----------------------------SD CARD--------------------------------------
+
+    FORMAT_SD_TIMEOUT_S = 20   # Formatting answers once done, which can take longer than other commands
+
+    def __formatSd(self) -> ThreespaceCmdResult[None]:
+        return self.execute_command(self.__get_command_by_name("formatSd"), timeout=self.FORMAT_SD_TIMEOUT_S)
 
 #----------------------------DATA LOGGING--------------------------------------
 
