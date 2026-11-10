@@ -1416,7 +1416,6 @@ class ThreespaceSensor:
 #---------------------------------POWER STATE CHANGING COMMANDS & BOOTLOADER------------------------------------
 
     def __softwareReset(self, timeout=1):
-        print(f"{timeout=}")
         self.check_dirty()
         cmd = self.commands[THREESPACE_SOFTWARE_RESET_COMMAND_NUM]
         cmd.send_command(self.com)
