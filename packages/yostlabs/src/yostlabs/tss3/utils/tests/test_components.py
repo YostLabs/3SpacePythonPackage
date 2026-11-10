@@ -131,8 +131,13 @@ class ComponentTest(SensorTest):
             expected_modified = [c.split("_")[0].lower() for c in self._expected_components]  # split into type and ID
             result.add_criteria("expected", list(self._expected_components))
             result.add_criteria("expected_modified", expected_modified)
-            matches = set(result.measurements["detected_modified"]) == set(expected_modified)
-            result.set_status(TestStatus.PASS if matches else TestStatus.FAIL)
+            detected_modified = result.measurements["detected_modified"]
+            # What differs, so a failure reads without comparing the two lists: in the order each list has them
+            missing = [c for c in dict.fromkeys(expected_modified) if c not in detected_modified]
+            extra = [c for c in dict.fromkeys(detected_modified) if c not in expected_modified]
+            result.add_measurement("missing_components", missing)
+            result.add_measurement("extra_components", extra)
+            result.set_status(TestStatus.FAIL if missing or extra else TestStatus.PASS)
         else:
             result.set_status(TestStatus.INFO)
             result.message = "No expected components supplied; detected components recorded for reference only."
