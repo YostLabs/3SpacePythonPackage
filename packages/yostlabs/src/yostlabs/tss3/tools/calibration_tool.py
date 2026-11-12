@@ -71,8 +71,8 @@ _ORIENTATION_ROOTS = [
 ]
 
 
-def _build_orientations() -> list[np.ndarray]:
-    """Return the 24 calibration quaternions in wizard order."""
+def build_orientations() -> list[np.ndarray]:
+    """Return the 24 calibration quaternions (x, y, z, w, in the sensor's natural "xyz" frame) in wizard order."""
     orientations = []
     rotation_sign = -1  # 1 = CCW, -1 = CW
     for root in _ORIENTATION_ROOTS:
@@ -94,7 +94,7 @@ def _build_orientations() -> list[np.ndarray]:
 # Group boundaries match _ORIENTATION_ROOTS above.
 # ---------------------------------------------------------------------------
 
-_ORIENTATION_LABELS: list[tuple[str, str]] = [
+ORIENTATION_LABELS: list[tuple[str, str]] = [
     # Group 1
     ("+Z forward", "+Y up"),
     ("+Z forward", "+Y right"),
@@ -127,7 +127,7 @@ _ORIENTATION_LABELS: list[tuple[str, str]] = [
     ("+Z right", "+Y forward"),
 ]
 
-_AXIS_REFERENCE_TEXT = (
+AXIS_REFERENCE_TEXT = (
     "Axis reference:\n"
     "  'up'        = face pointing away from ground (against gravity)\n"
     "  'down'      = face pointing towards the ground (with gravity)\n"
@@ -136,6 +136,48 @@ _AXIS_REFERENCE_TEXT = (
     "  'left'      = face pointing to your left side\n"
     "  'right'     = face pointing to your right side"
 )
+
+
+# ---------------------------------------------------------------------------
+# Calculation
+# ---------------------------------------------------------------------------
+
+def calculate_calibration(samples: dict[str, dict], orientations: list[np.ndarray],
+                          verbose: bool = False) -> dict[str, dict]:
+    """Calculate the calibration of every component sampled, by gradient descent.
+
+    Parameters
+    ----------
+    samples:
+        ``{"accel": {key: [vector, ...]}, "mag": {key: [vector, ...]}}``: for each
+        component, one averaged raw reading per orientation, in the order of
+        ``orientations``, taken in the "xyz" axis order with no axis offset.
+    orientations:
+        The orientations the samples were taken in, Ex: :func:`build_orientations`.
+    verbose:
+        Pass ``True`` to print gradient-descent progress.
+
+    Returns
+    -------
+    dict
+        ``{"accel": {"<key>": {"matrix": [...9], "bias": [...3]}}, "mag": {...}}``,
+        for the "xyz" axis order. Can take several seconds per component.
+    """
+    gradient = ThreespaceGradientDescentCalibration(orientations)
+    result: dict[str, dict] = {"accel": {}, "mag": {}}
+
+    for key, mag_samples in samples["mag"].items():
+        bias_guess = sum(mag_samples) / len(mag_samples)
+        centered   = [s - bias_guess for s in mag_samples]
+        p = np.array(gradient.calculate(centered, centered[0], verbose=verbose).tolist())
+        p[9:] += -bias_guess  # Gradient descent uses opposite sign convention
+        result["mag"][str(key)] = {"matrix": p[:9].tolist(), "bias": p[9:].tolist()}
+
+    for key, accel_samples in samples["accel"].items():
+        p = np.array(gradient.calculate(accel_samples, np.array([0.0, 1.0, 0.0]), verbose=verbose).tolist())
+        result["accel"][str(key)] = {"matrix": p[:9].tolist(), "bias": p[9:].tolist()}
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +271,7 @@ class CalibrationWizard:
 
         self._orientations:      list[np.ndarray]          = orientations
         self._orientation_labels: list[tuple[str, str]] | None = (
-            orientation_labels if orientations is not None else _ORIENTATION_LABELS
+            orientation_labels if orientations is not None else ORIENTATION_LABELS
         )
 
         # Collected samples: {"accel": {key: [np.ndarray, ...]}, "mag": {...}}
@@ -304,8 +346,8 @@ class CalibrationWizard:
             raise RuntimeError("Wizard already started. Create a new instance to restart.")
 
         if not self._orientations:
-            self._orientations       = _build_orientations()
-            self._orientation_labels = _ORIENTATION_LABELS
+            self._orientations       = build_orientations()
+            self._orientation_labels = ORIENTATION_LABELS
 
         self._step  = 0
         self._state = _WizardState.WAITING
@@ -329,7 +371,7 @@ class CalibrationWizard:
         print("For each step, place the sensor in the described orientation,")
         print("hold it still, then call next() (or press Enter in the CLI).")
         print()
-        print(_AXIS_REFERENCE_TEXT)
+        print(AXIS_REFERENCE_TEXT)
         print("=" * 62)
 
     def print_instructions(self) -> None:
@@ -460,33 +502,7 @@ class CalibrationWizard:
         """Run gradient descent for every selected sensor component.
         Called from inside the worker thread after the last sample."""
         try:
-            gradient    = ThreespaceGradientDescentCalibration(self._orientations)
-            calc_result: dict[str, dict] = {"accel": {}, "mag": {}}
-
-            for key, samples in self.samples["mag"].items():
-                bias_guess = sum(samples) / len(samples)
-                centered   = [s - bias_guess for s in samples]
-                params     = gradient.calculate(centered, centered[0], verbose=self._verbose).tolist()
-                p          = np.array(params)
-                p[9:] += -bias_guess  # Gradient descent uses opposite sign convention
-                calc_result["mag"][str(key)] = {
-                    "matrix": p[:9].tolist(),
-                    "bias":   p[9:].tolist(),
-                }
-
-            for key, samples in self.samples["accel"].items():
-                params = gradient.calculate(
-                    samples,
-                    np.array([0.0, 1.0, 0.0]),
-                    verbose=self._verbose,
-                ).tolist()
-                p = np.array(params)
-                calc_result["accel"][str(key)] = {
-                    "matrix": p[:9].tolist(),
-                    "bias":   p[9:].tolist(),
-                }
-
-            self.result = calc_result
+            self.result = calculate_calibration(self.samples, self._orientations, verbose=self._verbose)
             self._state = _WizardState.DONE
 
         except Exception as exc:
@@ -670,7 +686,13 @@ class ThreespaceCalibrationWizard(CalibrationWizard):
         super().start()
 
     def gather_sample(self) -> tuple[dict, dict]:
-        """Poll self.readings_per_sample readings and return per-sensor averages."""
+        """Poll self.readings_per_sample readings and return per-sensor averages.
+
+        Raises
+        ------
+        TimeoutError
+            If no reading arrives within a second of starting, Ex: streaming isn't working.
+        """
         accels = self.selected_accels
         mags  = self.selected_mags
 
@@ -702,6 +724,8 @@ class ThreespaceCalibrationWizard(CalibrationWizard):
 
                 packet = self.sensor.getOldestStreamingPacket()
         self.sensor.stopStreaming()
+        if samples_gathered == 0:
+            raise TimeoutError("No readings arrived from the sensor")
 
         accel_avg = {i: accel_totals[i] / samples_gathered for i in accels}
         mag_avg   = {i: mag_totals[i]   / samples_gathered for i in mags}
