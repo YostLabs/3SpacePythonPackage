@@ -46,7 +46,7 @@ class ButtonTest(SensorTest):
 
         self._disable_button_actions()
         self.start_streaming([(StreamableCommands.GetButtonState, None), (StreamableCommands.GetTimestamp, None)],
-                             self._on_streaming_data, hz=100)
+                             self._on_streaming_data, hz=200)
         self.check().add_criteria("hold_time_s", self.HOLD_TIME)
         yield from self._await_button(True, self.HOLD_TIME, "Hold the button down for 2 seconds.")
 
