@@ -166,8 +166,13 @@ class SdTest(SensorTest):
     @step("Log file data")
     def file_data(self):
         data_lines: list[str] = []
-        while line := self._read_line():
-            data_lines.append(line)
+        self.sensor.fileStartStream()
+        while self.sensor.is_file_streaming:
+            if (yield Busy("Reading the log file.", actions=("Fail",))) == "Fail":   # Stopped by cleanup()
+                self.check().failed("Failed by the operator: reading the log file never finished.")
+                return
+            self.sensor.updateStreaming()
+        data_lines = self.sensor.getFileStreamData().decode().splitlines()
         self.sensor.closeFile()
         self._file_open = False
 
@@ -219,6 +224,8 @@ class SdTest(SensorTest):
     def cleanup(self):
         if self._logging:   # Ended while logging, Ex: cancelled
             self.sensor.stopDataLogging()
+        if self.sensor.is_file_streaming:   # Ended while reading the log file, Ex: failed by the operator
+            self.sensor.fileStopStream()
         if self._file_open:
             self.sensor.closeFile()
         if self._folder_output_location is not None:   # Started logging, so it may be in the session's folder
