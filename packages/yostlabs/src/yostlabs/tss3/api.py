@@ -640,8 +640,57 @@ class ThreespaceSensor:
         #handle the response if debug mode is being turned on
         if "debug_mode" in kwargs and int(kwargs["debug_mode"]) == 1:
             self.immediate_debug = True
-        
-        #Build cmd string and send
+
+        cmd = self.__write_settings_command(kwargs)
+        self.com.write(cmd)
+
+        #Await Response
+        if self.__await_write_settings_response(len(kwargs)) != THREESPACE_AWAIT_COMMAND_FOUND:
+            raise ResponseTimeoutError("Failed to get write_settings response")
+
+        #Read in Response
+        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the header ID
+        err, num_successes, checksum = self.com.read(3)
+        if err:
+            self.log(f"Err setting {cmd}: {err=} {num_successes=}")
+
+        if "default" in kwargs or "fs_cfg_load" in kwargs:
+            self.log("Marking all settings as dirty due to defaults being applied/reloaded.")
+            self.set_cached_settings_dirty(DIRTY_FLAGS_UNKNOWN_SETTINGS)
+        if "reboot" in kwargs:
+            self.log("Sensor restarted, marking state as dirty.")
+            self.set_cached_settings_dirty(DIRTY_FLAGS_UNKNOWN_STATE)
+
+        #Handle caching any settings that need to be cached when changed.
+        if b"header" in cmd:
+            if any(v in kwargs.keys() for v in ThreespaceSensor.HEADER_KEYS):
+                self.__cache_header_settings()
+
+        if "stream_slots" in kwargs:
+            self.__cache_streaming_settings()
+
+        if "debug_mode" in kwargs:
+            self.__cache_debug_mode()
+
+        return err, num_successes
+
+    # Settings the API keeps track of once written, so they can't be sent without their response (see send_settings_untracked())
+    TRACKED_SETTING_KEYS = HEADER_KEYS + ["stream_slots", "debug_mode", "default", "fs_cfg_load", "reboot"]
+
+    def send_settings_untracked(self, **kwargs):
+        """
+        Rarely needed: use write_settings(). Writes settings without waiting for the response, for settings the sensor
+        can't answer: Ex: power_hold_state=0 on its battery, which turns it off at once. Whether they were written isn't
+        known. Raises ValueError for the settings the API keeps track of once written (TRACKED_SETTING_KEYS).
+        """
+        tracked = [key for key in kwargs if key in self.TRACKED_SETTING_KEYS]
+        if tracked:
+            raise ValueError(f"Can't send without the response, the API tracks them: {tracked}")
+        self.check_dirty(ignore_mask=DIRTY_FLAGS_UNKNOWN_SETTINGS | DIRTY_FLAGS_REQUIRED_HEADER_BITS)
+        self.com.write(self.__write_settings_command(kwargs))
+
+    def __write_settings_command(self, kwargs: dict) -> bytearray:
+        """The binary write settings command for kwargs"""
         cmd = bytearray([THREESPACE_BINARY_WRITE_SETTINGS_START_BYTE_HEADER])
         checksum = 0
         for key, value in kwargs.items():
@@ -685,37 +734,7 @@ class ThreespaceSensor:
         checksum -= ord(';')
         cmd[-1] = 0
         cmd.append(checksum % 256)
-        self.com.write(cmd)
-
-        #Await Response
-        if self.__await_write_settings_response(len(kwargs)) != THREESPACE_AWAIT_COMMAND_FOUND:
-            raise ResponseTimeoutError("Failed to get write_settings response")
-
-        #Read in Response
-        self.com.read(THREESPACE_BINARY_SETTINGS_ID_SIZE) #Read pass the header ID
-        err, num_successes, checksum = self.com.read(3)
-        if err:
-            self.log(f"Err setting {cmd}: {err=} {num_successes=}")
-        
-        if "default" in kwargs or "fs_cfg_load" in kwargs:
-            self.log("Marking all settings as dirty due to defaults being applied/reloaded.")
-            self.set_cached_settings_dirty(DIRTY_FLAGS_UNKNOWN_SETTINGS)
-        if "reboot" in kwargs:
-            self.log("Sensor restarted, marking state as dirty.")
-            self.set_cached_settings_dirty(DIRTY_FLAGS_UNKNOWN_STATE)
-
-        #Handle caching any settings that need to be cached when changed.
-        if b"header" in cmd:
-            if any(v in kwargs.keys() for v in ThreespaceSensor.HEADER_KEYS):
-                self.__cache_header_settings()
-        
-        if "stream_slots" in kwargs:
-            self.__cache_streaming_settings()
-
-        if "debug_mode" in kwargs:
-            self.__cache_debug_mode()
-
-        return err, num_successes
+        return cmd
 
     def __await_write_settings_response(self, num_keys: int):
         start_time = time.perf_counter()

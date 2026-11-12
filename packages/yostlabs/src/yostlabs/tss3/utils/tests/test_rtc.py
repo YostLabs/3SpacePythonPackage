@@ -1,10 +1,10 @@
 import time
 import datetime
 
-from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, TestStatus, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, TestStatus, Busy, CONNECTION_LOST, step
+from yostlabs.tss3.utils.tests.test_battery import on_charger
 from yostlabs.tss3.consts import THREESPACE_FAMILY_DATA_LOGGER
 from yostlabs.tss3.utils.tests.cli import main
-from yostlabs.tss3.api import ResponseTimeoutError
 from yostlabs.tss3.errors import SettingError
 
 import logging
@@ -19,11 +19,14 @@ class RTCTest(SensorTest):
     2. If rtc_source is available, set it to 3 (RTC). Fail if writing errors.
     3. Set utc_offset to 0 if available, and the sensor date/time to the current UTC time.
        Wait 1 second and verify the sensor time advanced by ~1 second.
-    4. The operator unplugs the sensor, which turns off, so only the coin cell keeps the clock
-       running, and plugs it back in. A hard reset can't do this: on some boards the RTC is powered
-       from USB, before the charger. Verify the sensor did turn off, and that its datetime increased
-       by approximately the time it was unplugged. While waiting, the operator can fail the step if
-       the app never notices.
+    4. The sensor turns off, so only the coin cell keeps the clock running, and the operator turns it
+       back on (plugging it in, holding its button, or putting it on its charger). A hard reset can't
+       do this: on some boards the RTC is powered from USB, before the charger. Told to turn off once
+       off its power (power_hold_state 0), a sensor on its battery turns off by itself; one on its
+       power (over USB, or wirelessly while on its charger) once the operator unplugs it or takes it
+       off its charger. Verify the sensor did turn off, and that its datetime increased by
+       approximately the time it was off. While waiting, the operator can fail the step if the app
+       never notices.
     """
 
     id = "rtc"
@@ -90,26 +93,46 @@ class RTCTest(SensorTest):
         if "coin_cell" in self.not_installed:
             result.skipped("Not installed yet: coin cell")
             return
-        if self.sensor.has_setting("power_hold_state"):
-            self.change_settings(power_hold_state=0)   # Turn off once unplugged, or the battery may power the clock
+        hold = self.sensor.has_setting("power_hold_state")
+        on_battery = False   # And it turns off by itself once told to
+        if self.sensor.com.interface is None:
+            text = "Unplug the sensor from the USB port."
+        elif on_charger(self.sensor):
+            text = "Take the sensor off its power: unplug it, or take it off its charger."
+        elif hold:
+            text, on_battery = "Turning the sensor off.", True
+        else:
+            text = "Turn the sensor off."
+        # Before turning off, which on its battery is as soon as it's told to
         before = self.sensor.getDateTime().data
         uptime_before = self.sensor.getTimestamp().data
         start = time.perf_counter()
+        # Turn off once off its power, or the battery may power the clock. On its battery that's at once, unanswered
+        if hold:
+            if on_battery:
+                self.change_settings_unanswered(power_hold_state=0)
+            else:
+                self.change_settings(power_hold_state=0)
 
+        # Each wait shows its text before checking: a check can block a while (Ex: a read timing out, a Bluetooth
+        # connection attempt)
         while True:
+            if (yield Busy(text, actions=("Fail",))) == "Fail":
+                result.failed("Failed by the operator: the sensor turning off was not detected.")
+                return
             try:
                 self.sensor.getDateTime()
-            except (OSError, ResponseTimeoutError):
+            except CONNECTION_LOST:
                 break
-            if (yield Busy("Unplug the sensor from the USB port.", actions=("Fail",))) == "Fail":
-                result.failed("Failed by the operator: the sensor being unplugged was not detected.")
-                return
-        yield from self.wait(self.POWER_OFF_TIME, "Leave the sensor unplugged.")
-        while not self.sensor.attempt_reconnect(timeout=0):
-            if (yield Busy("Plug the sensor back into the USB port.", actions=("Fail",))) == "Fail":
-                result.failed("Failed by the operator: the sensor being plugged back in was not detected.")
+        yield from self.wait(self.POWER_OFF_TIME, "Leave the sensor off.")
+        while True:
+            if (yield Busy("Turn the sensor back on: plug it in, hold its button, or put it on its charger.",
+                           actions=("Fail",))) == "Fail":
+                result.failed("Failed by the operator: the sensor turning back on was not detected.")
                 self.stop_session = True   # The sensor is gone, so no later test can run
                 return
+            if self.sensor.attempt_reconnect(timeout=0):
+                break
 
         # Turning off lost these, which reading the time relies on
         if self.sensor.has_setting("rtc_source"):
@@ -130,7 +153,7 @@ class RTCTest(SensorTest):
         result.add_criteria("expected_elapsed_s", elapsed)
         result.add_criteria("time_tolerance_s", self.POWER_LOSS_TOLERANCE_S)
         if uptime_after >= uptime_before:
-            result.failed("Sensor stayed on while unplugged, so the coin cell wasn't tested.")
+            result.failed("Sensor stayed on, so the coin cell wasn't tested.")
         elif abs(time_diff - elapsed) > self.POWER_LOSS_TOLERANCE_S:
             result.failed(f"Sensor time changed by {time_diff:.2f}s while it had no power, expected ~{elapsed:.2f}s.")
         else:

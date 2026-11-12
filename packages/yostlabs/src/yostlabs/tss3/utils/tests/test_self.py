@@ -4,7 +4,7 @@
 # were missed, and may give additional information in the
 # case of failures.
 
-from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestKind, TestStatus, step
+from yostlabs.tss3.utils.tests.base import SensorTest, ALL_SENSORS, TestKind, step
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.consts import THREESPACE_DEBUG_LEVEL_WRN, THREESPACE_DEBUG_LEVEL_ERR
 
@@ -22,8 +22,9 @@ class SelfTest(SensorTest):
 
     # Keys must be in order of the bits in the self test result bitfield.
     BIT_KEYS = ["accel", "gyro", "mag", "baro", "rtc", "gps", "bluetooth", "sd", "sms", "battery"]
-    # Bits that fail without a part, by the part's name in not_installed. No coin cell doesn't fail the rtc bit over USB
-    BIT_PARTS = {"sd": "sd_card", "battery": "battery"}
+    # Bits that may fail without a part, by the part's name in not_installed: their failure skips the test instead (Ex:
+    # without a coin cell, the rtc bit fails off USB on some versions)
+    BIT_PARTS = {"rtc": "coin_cell", "sd": "sd_card", "battery": "battery"}
 
     @step("Self test")
     def bitfield(self):
@@ -45,15 +46,18 @@ class SelfTest(SensorTest):
         result.add_measurement("raw", raw)
         result.add_measurement("messages", messages)
         failed = raw
-        ignored = []
+        ignored = []   # Failed bits of parts not installed yet
         for i, key in enumerate(self.BIT_KEYS):
             result.add_measurement(key, not bool(raw & (1 << i)))
-            if self.BIT_PARTS.get(key) in self.not_installed:
+            if raw & (1 << i) and self.BIT_PARTS.get(key) in self.not_installed:
                 failed &= ~(1 << i)
                 ignored.append(key)
-        if ignored:
-            result.message = f"Not installed yet, so not checked: {', '.join(ignored)}"
-        result.set_status(TestStatus.PASS if failed == 0 else TestStatus.FAIL)
+        if failed:
+            result.failed()
+        elif ignored:
+            result.skipped(f"Failed, but not installed yet: {', '.join(ignored)}")
+        else:
+            result.passed()
 
 if __name__ == "__main__":
     main(SelfTest)

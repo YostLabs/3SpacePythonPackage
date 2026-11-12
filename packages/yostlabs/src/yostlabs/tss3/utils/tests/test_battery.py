@@ -1,7 +1,7 @@
-from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, Busy, step
+from yostlabs.tss3.utils.tests.base import SensorTest, SensorVariant, TestKind, Busy, CONNECTION_LOST, step
 from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager
-from yostlabs.tss3.api import ThreespaceSensor, ResponseTimeoutError
+from yostlabs.tss3.api import ThreespaceSensor
 from yostlabs.tss3.consts import *
 import time
 
@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 # getBatteryStatus() values (bit 7 aside) meaning the sensor is on its charger. Off it, it reads neither (Ex: standby)
 CHARGED, CHARGING = 1, 2
+
+
+def on_charger(sensor: ThreespaceSensor) -> bool:
+    """On its charger, or plugged in: on external power"""
+    return (sensor.getBatteryStatus().data & ~128) in (CHARGED, CHARGING)
 
 
 class BatteryTest(SensorTest):
@@ -25,7 +30,8 @@ class BatteryTest(SensorTest):
     4. The operator charges it again, reconnecting to it first if its connection was lost. The sensor's clock must have
        kept running for the time it was off the charger.
 
-    Over Bluetooth, the connection stays on and off the charger, so only the battery status tells. While waiting on any
+    Over Bluetooth, the connection stays on and off the charger, so only the battery status tells, though on some
+    sensors taking it off the charger can drop the link, which is then reconnected like a USB one. While waiting on any
     of them, the operator can fail the step if the app never notices.
     """
 
@@ -43,11 +49,7 @@ class BatteryTest(SensorTest):
         super().__init__(sensor, streaming_manager)
         self._off_timestamp: int = None      # Sensor timestamp (us) of the last read before it was off the charger
         self._off_time: float = None         # perf_counter() of the read finding it off
-        self._connection_lost = False        # Taking it off the charger unplugged it (USB)
-
-    def _on_charger(self) -> bool:
-        status = self.sensor.getBatteryStatus().data
-        return (status & ~128) in (CHARGED, CHARGING)
+        self._connection_lost = False        # Taking it off the charger unplugged it (USB), or dropped the link
 
     @step("Self test")
     def self_test(self):
@@ -64,7 +66,7 @@ class BatteryTest(SensorTest):
 
     @step("On the charger")
     def charging(self):
-        while not self._on_charger():
+        while not on_charger(self.sensor):
             if (yield Busy("Start charging the sensor: plug it in, or put it on its charger.",
                            actions=("Fail",))) == "Fail":
                 self.check().failed("Failed by the operator: the sensor charging was not detected.")
@@ -84,11 +86,11 @@ class BatteryTest(SensorTest):
             attempt_time = time.perf_counter()
             try:
                 timestamp = self.sensor.getTimestamp().data
-                if not self._on_charger():   # Ex: over Bluetooth, which stays connected
+                if not on_charger(self.sensor):   # Ex: over Bluetooth, which stays connected
                     self._off_timestamp, self._off_time = timestamp, attempt_time
                     break
                 self._off_timestamp = timestamp
-            except (OSError, ResponseTimeoutError):   # Unplugged from USB: the connection is lost
+            except CONNECTION_LOST:   # Unplugged from USB, or the link dropped
                 self._off_time, self._connection_lost = attempt_time, True
                 break
             if (yield Busy(text, actions=("Fail",))) == "Fail":
@@ -102,17 +104,7 @@ class BatteryTest(SensorTest):
         text = "Charge the sensor again: plug it back in, or put it back on its charger."
         lost = self._connection_lost
         while True:
-            if lost:
-                lost = not self.sensor.attempt_reconnect(timeout=0)
-                if not lost:
-                    continue   # Found again: its status next
-            else:
-                try:
-                    if self._on_charger():
-                        break
-                except (OSError, ResponseTimeoutError):   # Unplugged from USB, though its status read off first
-                    lost = True
-                    continue
+            # Shown before checking: reconnecting can block a while (Ex: a Bluetooth connection attempt)
             if (yield Busy(text, actions=("Fail",))) == "Fail":
                 if lost:
                     self.check().failed("Failed by the operator: the sensor being plugged back in was not detected.")
@@ -120,6 +112,14 @@ class BatteryTest(SensorTest):
                 else:
                     self.check().failed("Failed by the operator: the sensor charging again was not detected.")
                 return
+            if lost and not self.sensor.attempt_reconnect(timeout=0):
+                continue
+            lost = False   # Found again: its status next
+            try:
+                if on_charger(self.sensor):
+                    break
+            except CONNECTION_LOST:   # Unplugged from USB or the link dropped, though its status read off first
+                lost = True
 
         expected_elapsed = time.perf_counter() - self._off_time
         timestamp = self.sensor.getTimestamp().data

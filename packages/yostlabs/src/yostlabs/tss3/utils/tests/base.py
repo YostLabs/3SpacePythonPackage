@@ -7,11 +7,16 @@ from typing import Any, Callable, ClassVar, Collection, Generator
 
 from yostlabs.communication.base import ThreespaceComClass
 from yostlabs.tss3 import ThreespaceSensor, ThreespaceHardwareVersion
-from yostlabs.tss3.errors import SettingError, UnsupportedTestError
+from yostlabs.tss3.api import ResponseTimeoutError
+from yostlabs.tss3.errors import SettingError, UnsupportedTestError, SensorConnectionError
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, StreamableCommands
 
 import logging
 logger = logging.getLogger(__name__)
+
+# What a command raises once the sensor's connection is lost: Ex: unplugged from USB (a closed port), a dropped wireless
+# link, or a sensor that turned off without answering
+CONNECTION_LOST = (OSError, ResponseTimeoutError, SensorConnectionError)
 
 """
 Test results should be stored as a list of TestResult entries, one per
@@ -487,6 +492,16 @@ class SensorTest:
         err, _ = self.sensor.write_settings(**settings)
         if err:
             raise SettingError(f"Failed to write {settings}: error {err}")
+
+    def change_settings_unanswered(self, **settings):
+        """
+        As change_settings(), without waiting for the response, for settings the sensor can't answer (see
+        ThreespaceSensor.send_settings_untracked()), Ex: one that turns it off. Whether they were written isn't known.
+        """
+        new_keys = [key for key in settings if key not in self._settings_cache]
+        if new_keys:
+            self._settings_cache |= self.sensor.read_settings(*new_keys)
+        self.sensor.send_settings_untracked(**settings)
 
     def wait(self, seconds: float, text: str) -> Generator:
         """Waits without blocking the thread. Use as `yield from self.wait(1.0, "Waiting for the GPS")`"""
