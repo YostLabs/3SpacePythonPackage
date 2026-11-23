@@ -358,10 +358,14 @@ def slerp(a, b, t):
     dot = _vec.vec_dot(a, b)
     if dot < 0: #To force it to be the shortest route
         b = [-v for v in b]
+        dot = -dot
 
+    dot = min(dot, 1.0) #Guard acos against rounding just above 1
     theta = math.acos(dot)
     sin_theta = math.sin(theta)
-    r1 = math.sin(1 - t) * theta / sin_theta
+    if sin_theta < 1e-6: #Nearly identical, fall back to linear interpolation
+        return _vec.vec_normalize([(1 - t) * v + t * w for v, w in zip(a, b)])
+    r1 = math.sin((1 - t) * theta) / sin_theta
     r2 = math.sin(t * theta) / sin_theta
     a = [r1 * v for v in a]
     b = [r2 * v for v in b]
