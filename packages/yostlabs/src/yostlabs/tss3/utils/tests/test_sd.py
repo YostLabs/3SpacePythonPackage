@@ -19,7 +19,9 @@ class SdTest(SensorTest):
 
     1. Verify the SD card is present. If absent, the operator inserts it, or fails the step.
     2. Start a datalogging session. If the card is write protected (FR_WRITE_PROTECTED), the operator
-       ejects it from the OS and retries, or gives up. Any other non-zero status fails the test.
+       ejects it from the OS and retries, or gives up. Any other non-zero status still there after SD_READY_TIMEOUT
+       fails the test: a sensor may be reinitializing its card, Ex: after its charging state changed, which is the
+       last thing the battery test does.
     3. Logging stops by itself after LOG_STOP_COUNT samples, which should take EXPECTED_LOG_DURATION.
     4. Find the session's CSV file and open it.
     5. Its header must be the labels of LOG_COMMANDS.
@@ -39,6 +41,7 @@ class SdTest(SensorTest):
     EXPECTED_LOG_DURATION = 2.0  # seconds
     LOG_FINISH_MARGIN = 1.0      # seconds logging may take beyond EXPECTED_LOG_DURATION to stop by itself
     LOG_STOP_COUNT = 100         # Samples logged, one line each
+    SD_READY_TIMEOUT = 2.0       # seconds to keep trying to start logging before failing
 
     LOG_COMMANDS: list[StreamableCommands] = [StreamableCommands.GetTimestamp, StreamableCommands.GetUntaredOrientation]
     VALUES_PER_LINE = 5          # Of LOG_COMMANDS: the timestamp, and the orientation's 4
@@ -52,7 +55,7 @@ class SdTest(SensorTest):
     @step("SD card present")
     def sd_present(self):
         self.change_settings(header_status=1)   # The SD commands report their result in the header status
-        while not self._is_sd_present():
+        while not self._is_sd_present():   # Checked again until found: Ex: the card is still being reinitialized
             if (yield Busy("SD card not detected. Insert the SD card.", actions=("Fail",))) == "Fail":
                 self.check().failed("Failed by the operator: the SD card was not detected.")
                 return
@@ -73,9 +76,13 @@ class SdTest(SensorTest):
                              debug_level=THREESPACE_DEBUG_LEVEL_INFO,
                              debug_module=THREESPACE_DEBUG_MODULE_SD)
 
+        ready_by = time.perf_counter() + self.SD_READY_TIMEOUT
+        attempts = 0
         while True:
             status = self.sensor.startDataLogging().header.status
+            attempts += 1
             self.check().add_measurement("status", status)
+            self.check().add_measurement("attempts", attempts)
             if status == FR_OK:
                 self._logging = True
                 messages = self.read_debug_messages()
@@ -90,14 +97,19 @@ class SdTest(SensorTest):
                     return
                 self.check().passed()
                 return
-            if status != FR_WRITE_PROTECTED:
-                self.check().failed(f"Failed to start logging: status {status}.")
-                return
-            retry = yield Confirm("The SD card is write protected. Eject it from the computer to clear "
-                                  "the write protection, then retry. Retry?")
-            if not retry:
-                self.check().failed("SD card is write protected.")
-                return
+            if status == FR_WRITE_PROTECTED:
+                retry = yield Confirm("The SD card is write protected. Eject it from the computer to clear "
+                                      "the write protection, then retry. Retry?")
+                if not retry:
+                    self.check().failed("SD card is write protected.")
+                    return
+                ready_by = time.perf_counter() + self.SD_READY_TIMEOUT   # Ejected, the sensor may reinitialize it
+                continue
+            if time.perf_counter() < ready_by:   # Ex: still reinitializing the card
+                yield Busy("Waiting for the SD card to be ready.")
+                continue
+            self.check().failed(f"Failed to start logging: status {status}.")
+            return
 
     @step("Stop logging")
     def stop_logging(self):
