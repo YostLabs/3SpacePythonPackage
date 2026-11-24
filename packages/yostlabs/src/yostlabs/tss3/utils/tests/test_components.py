@@ -22,8 +22,11 @@ from yostlabs.tss3.utils.tests.cli import main
 from yostlabs.tss3.utils.streaming import ThreespaceStreamingManager, ThreespaceStreamingStatus
 from yostlabs.tss3.api import ThreespaceSensor, StreamableCommands
 from yostlabs.tss3.errors import SettingError
+import numpy as np
+
 from yostlabs.math.vector import vec_len, vec_dot, vec_normalize
-from yostlabs.math.quaternion import quat_mul, quat_from_axis_angle, quat_rotate_vec
+from yostlabs.math.quaternion import (quat_mul, quat_inverse, quat_from_axis_angle, quat_rotate_vec,
+                                      quaternion_to_3x3_rotation_matrix)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -44,14 +47,17 @@ class ComponentTest(SensorTest):
         Compare measured update rates to the 1000 ODR true values (within 1% tolerance).
     Flip:
         Set ODR=50 for all components. Read back true set ODR.
-        The operator places the sensor on a flat surface, then flips it upside down while it streams calibrated
-        data (see FLIP_STREAM_COMMANDS).
+        The operator places the sensor on a flat surface, then turns it, any way, until the face that was up faces
+        down, while it streams calibrated data (see FLIP_STREAM_COMMANDS).
         Compare measured update rates to the 50 ODR true values (within 1% tolerance).
         Analyze flip data per component:
         - Accel: verify gravity vector direction reversed.
+        - Mag: verify its reading changed by at least MAG_MIN_FIELD_CHANGE. The change between the first and last
+          readings cancels any fixed offset, Ex: of a battery in the case, which turns with the sensor.
         - Gyro: verify integrated rotation >= 120 degrees (gyro in rad/s),
-          and that it predicts the change in each accel's direction.
-        - Mag: verify field vector direction reversed.
+          and that it predicts the change in each accel's direction (gyro_accel_check),
+          and each mag's readings through the whole flip (gyro_mag_check, see _check_gyro_mag()).
+        None of these depend on where the sensor is tested: the field's strength and direction there.
     Barometer raise, Barometer lower (if any barometer's data changed in 1000 Hz data):
         Measure the starting altitude while the sensor is held still. The operator then raises and lowers
         the sensor at least 1 ft, holding it still each time. The operator may pass or fail each stage by hand
@@ -70,6 +76,10 @@ class ComponentTest(SensorTest):
     UPDATE_RATE_TOLERANCE = 0.01    # 1% tolerance for update rate vs true ODR
     GYRO_ACCEL_DOT_THRESHOLD = 0.5  # minimum acceptable dot product for gyro-accel cross-check
     MAG_MIN_LENGTH = 0.21           # minimum acceptable average mag vector magnitude
+    # Minimum half the change in the mag reading over the flip, in gauss: the part of the Earth's field the flip turned
+    # around. Far above noise, and below that part anywhere unless the flip turns the sensor about the field's direction
+    MAG_MIN_FIELD_CHANGE = 0.05
+    GYRO_MAG_MAX_FIT_ERROR = 0.25   # maximum gyro_mag_check fit error, relative to how far the mag readings moved
     GYRO_FLIP_MIN_DEGREES = 120.0   # integrated rotation threshold to count as a flip
     BARO_MIN_ALTITUDE_CHANGE = 0.3048  # 1 foot in meters; minimum altitude delta for baro test
     BARO_EMA_ALPHA        = 0.1        # IIR smoothing factor α; higher = faster response, more noise
@@ -78,8 +88,9 @@ class ComponentTest(SensorTest):
     BARO_WINDOW_SAMPLES   = 25         # ~0.5 s at 50 Hz
     STREAMING_HZ = 50
 
-    # Per-component checks created for every detected accel/gyro/mag/baro. Baro has no flip, but gets "altitude".
-    COMPONENT_CHECKS = ("set_odr_1000", "update_rate_1000", "static_check", "set_odr_50", "update_rate_50", "flip")
+    # Per-component checks created for every detected accel/gyro/mag/baro, then the one check each type has of its own
+    COMPONENT_CHECKS = ("set_odr_1000", "update_rate_1000", "static_check", "set_odr_50", "update_rate_50")
+    TYPE_CHECKS = {"accel": "flip", "gyro": "flip", "mag": "field_change", "baro": "altitude"}
 
     STREAM_COMMANDS = {
         "accel": StreamableCommands.GetRawAccelVec,
@@ -87,8 +98,8 @@ class ComponentTest(SensorTest):
         "mag": StreamableCommands.GetRawMagVec,
         "baro": StreamableCommands.GetBarometerAltitudeById,
     }
-    # The flip judges calibrated data: a battery in the case can bias the raw readings so much they never reverse. A
-    # stopgap: such a sensor has to be calibrated before it can pass
+    # The flip judges calibrated data, so the accel and gyro read in their real units. The mag needs no calibration:
+    # its checks cancel a fixed offset, Ex: a battery in the case, which can be far larger than the Earth's field
     FLIP_STREAM_COMMANDS = STREAM_COMMANDS | {
         "accel": StreamableCommands.GetCorrectedAccelVec,
         "gyro": StreamableCommands.GetCorrectedGyroRate,
@@ -154,9 +165,9 @@ class ComponentTest(SensorTest):
         yield Message("Place the sensor on a flat, level surface.")
         yield from self._collect_flip_data()
         yield from self._check_update_rates("set_odr_50", "update_rate_50")
-        self._analyze_flip("accel")
-        self._analyze_flip("mag")
-        self._analyze_gyro_flip()
+        self._analyze_accel_flip()
+        self._analyze_mag_field_change()
+        self._analyze_gyro_flip()   # After the accel and mag: it cross-checks them
 
     @step("Barometer raise", check=None)
     def baro_raise(self):
@@ -250,10 +261,7 @@ class ComponentTest(SensorTest):
         return self.results[(ctype, cid, check_name)]
 
     def _make_component_checks(self, ctype: str, cid: int):
-        checks = [c for c in self.COMPONENT_CHECKS if not (ctype == "baro" and c == "flip")]
-        if ctype == "baro":
-            checks.append("altitude")
-        for check_name in checks:
+        for check_name in self.COMPONENT_CHECKS + (self.TYPE_CHECKS[ctype],):
             self.results[(ctype, cid, check_name)] = TestResult(self.id, f"{ctype}.{check_name}", components=[f"{ctype}:{cid}"])
 
     # ------------------------------------------------------------------
@@ -352,11 +360,11 @@ class ComponentTest(SensorTest):
     # Flip data analysis
     # ------------------------------------------------------------------
 
-    def _analyze_flip(self, ctype: str):
-        """Accel and mag: the vector must point the opposite way after the flip"""
-        for cid in self._ids[ctype]:
-            values = self._flip_samples[ctype][cid]
-            result = self._result(ctype, cid, "flip")
+    def _analyze_accel_flip(self):
+        """The gravity vector must point the opposite way after the flip"""
+        for cid in self._ids["accel"]:
+            values = self._flip_samples["accel"][cid]
+            result = self._result("accel", cid, "flip")
             if len(values) < 2:
                 result.failed("insufficient samples")
                 continue
@@ -368,26 +376,39 @@ class ComponentTest(SensorTest):
             result.add_measurement("direction_changed", direction_changed)
             result.set_status(TestStatus.PASS if direction_changed else TestStatus.FAIL)
 
+    def _analyze_mag_field_change(self):
+        """The mag reading must change by at least MAG_MIN_FIELD_CHANGE. The first and last readings are each the
+        field plus the same fixed offset, so their difference is the field's change alone"""
+        for cid in self._ids["mag"]:
+            values = [v for v in self._flip_samples["mag"][cid] if v is not None]
+            result = self._result("mag", cid, "field_change")
+            if len(values) < 2:
+                result.failed("insufficient samples")
+                continue
+            initial, final = values[0], values[-1]
+            half_change = vec_len([a - b for a, b in zip(initial, final)]) / 2
+            result.add_measurement("reading_initial", initial)
+            result.add_measurement("reading_final", final)
+            result.add_measurement("half_change", half_change)
+            # About the fixed offset, give or take the field along the axis the sensor was turned about
+            result.add_measurement("reading_midpoint", [(a + b) / 2 for a, b in zip(initial, final)])
+            result.add_criteria("min_half_change", self.MAG_MIN_FIELD_CHANGE)
+            if half_change < self.MAG_MIN_FIELD_CHANGE:
+                result.failed("The reading barely changed. If the mag works, flip it about a different axis: turning "
+                              "it about the Earth's field's direction doesn't change the field it reads.")
+                continue
+            result.passed()
+
     def _analyze_gyro_flip(self):
         principal_axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 
         for gyro_id in self._ids["gyro"]:
-            times = self._flip_samples["time"]
-            gyro_values = self._flip_samples["gyro"][gyro_id]
-            timed_values = [(t, g) for t, g in zip(times, gyro_values) if g is not None]
             result = self._result("gyro", gyro_id, "flip")
-            if len(timed_values) < 2:
+            if sum(g is not None for g in self._flip_samples["gyro"][gyro_id]) < 2:
                 result.failed("insufficient samples for integration")
                 continue
-
-            # Integrate angular velocity (rad/s) into a cumulative rotation quaternion
-            q = [0.0, 0.0, 0.0, 1.0]  # identity: [x, y, z, w]
-            for i in range(1, len(timed_values)):
-                dt = timed_values[i][0] - timed_values[i - 1][0]
-                gyro = timed_values[i][1]  # [wx, wy, wz] in rad/s
-                angle = vec_len(gyro) * dt
-                if angle > 1e-12:
-                    q = quat_mul(q, quat_from_axis_angle(vec_normalize(gyro), angle))
+            orientations = self._gyro_orientations(gyro_id)
+            q = orientations[-1]
 
             # Pass if any principal axis was rotated >= GYRO_FLIP_MIN_DEGREES.
             # Checking all three avoids false negatives when the flip axis is
@@ -408,13 +429,13 @@ class ComponentTest(SensorTest):
             result.set_status(TestStatus.PASS if max_deg >= self.GYRO_FLIP_MIN_DEGREES else TestStatus.FAIL)
 
             # Cross-check against every accel that passed its own flip test:
-            # rotate the initial accel vector by q and verify it aligns with
+            # turn the initial accel vector into the final frame (by q's inverse) and verify it aligns with
             # the observed final accel vector (dot >= self.GYRO_ACCEL_DOT_THRESHOLD).
             for accel_id in self._ids["accel"]:
                 if not self._result("accel", accel_id, "flip").success:
                     continue
                 accel_vals = self._flip_samples["accel"][accel_id]
-                predicted = quat_rotate_vec(q, accel_vals[0])
+                predicted = quat_rotate_vec(quat_inverse(q), accel_vals[0])   # q: final frame -> start frame
                 dot = vec_dot(vec_normalize(predicted), vec_normalize(accel_vals[-1]))
 
                 cross_check = TestResult(self.id, "gyro_accel_check", components=[f"gyro:{gyro_id}", f"accel:{accel_id}"])
@@ -422,6 +443,54 @@ class ComponentTest(SensorTest):
                 cross_check.add_criteria("min_dot_product", self.GYRO_ACCEL_DOT_THRESHOLD)
                 cross_check.set_status(TestStatus.PASS if dot >= self.GYRO_ACCEL_DOT_THRESHOLD else TestStatus.FAIL)
                 self.results[("gyro_accel_check", gyro_id, accel_id)] = cross_check
+
+            # And every mag whose reading changed enough to judge
+            for mag_id in self._ids["mag"]:
+                if self._result("mag", mag_id, "field_change").success:
+                    self.results[("gyro_mag_check", gyro_id, mag_id)] = self._check_gyro_mag(gyro_id, mag_id, orientations)
+
+    def _gyro_orientations(self, gyro_id: int) -> list[list[float] | None]:
+        """The gyro's integrated rotation at each flip sample, since its first value: [x, y, z, w], from the sensor's
+        frame at that sample to its frame at the start. None before its first value"""
+        orientations = []
+        q, last_time = None, None
+        for t, gyro in zip(self._flip_samples["time"], self._flip_samples["gyro"][gyro_id]):
+            if gyro is not None:
+                if q is None:
+                    q = [0.0, 0.0, 0.0, 1.0]
+                else:
+                    angle = vec_len(gyro) * (t - last_time)   # gyro: [wx, wy, wz] in rad/s
+                    if angle > 1e-12:
+                        q = quat_mul(q, quat_from_axis_angle(vec_normalize(gyro), angle))
+                last_time = t
+            orientations.append(q)
+        return orientations
+
+    def _check_gyro_mag(self, gyro_id: int, mag_id: int, orientations: list) -> TestResult:
+        """
+        A working mag reads one fixed field, turned by how the sensor turned, plus one fixed offset: at every flip
+        sample, reading = R^T field + offset, R the gyro's orientation then. Fits the field and offset by least
+        squares, then judges the error left relative to how far the readings moved, so the local field's strength
+        doesn't matter. Catches a mag turning the wrong way, Ex: an axis inverted or two swapped, which the start and
+        end readings alone can't show
+        """
+        pairs = [(q, m) for q, m in zip(orientations, self._flip_samples["mag"][mag_id]) if q is not None and m is not None]
+        readings = np.array([m for _, m in pairs])
+        # Each sample's 3 equations: [R^T | I] @ [field, offset] = reading
+        model = np.vstack([np.hstack([np.array(quaternion_to_3x3_rotation_matrix(quat_inverse(q))), np.eye(3)])
+                           for q, _ in pairs])
+        solution, *_ = np.linalg.lstsq(model, readings.reshape(-1), rcond=None)
+        errors = (model @ solution).reshape(-1, 3) - readings
+        fit_error = float(np.sqrt(np.mean(np.sum(errors ** 2, axis=1))))   # RMS vector error, gauss
+        spread = float(np.sqrt(np.mean(np.sum((readings - readings.mean(axis=0)) ** 2, axis=1))))
+        relative_error = fit_error / spread   # field_change passed, so the readings moved
+
+        cross_check = TestResult(self.id, "gyro_mag_check", components=[f"gyro:{gyro_id}", f"mag:{mag_id}"])
+        cross_check.add_measurement("fit_error", fit_error)
+        cross_check.add_measurement("readings_spread", spread)
+        cross_check.add_measurement("relative_fit_error", relative_error)
+        cross_check.add_criteria("max_relative_fit_error", self.GYRO_MAG_MAX_FIT_ERROR)
+        return cross_check.set_status(TestStatus.PASS if relative_error <= self.GYRO_MAG_MAX_FIT_ERROR else TestStatus.FAIL)
 
     # ------------------------------------------------------------------
     # Barometer altitude
